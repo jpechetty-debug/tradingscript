@@ -46,6 +46,21 @@ class MarketRegime:
         if not self.confirmed: s += " [UNCONFIRMED]"
         return s
 
+def _regime_confidence(regime: MarketRegimeType, adx_med: float, breadth: float, atr_rat: float, config) -> float:
+    """Computes a strength-weighted confidence value [0-1]."""
+    if regime == MarketRegimeType.PANIC:
+        return float(np.clip(0.70 + (config.REGIME_BREADTH_PANIC - breadth) * 2, 0.70, 1.0))
+    
+    if regime in (MarketRegimeType.TREND_UP, MarketRegimeType.TREND_DOWN):
+        # Scale ADX strength: 20-35 range adds up to 0.30 confidence
+        adx_strength = float(np.clip((adx_med - config.REGIME_ADX_TREND) / 15.0, 0.0, 1.0))
+        # Scale Breadth extreme: 0.5 center, distance adds up to 0.20 confidence
+        breadth_str  = float(np.clip(abs(breadth - 0.5) * 2.0, 0.0, 1.0))
+        return round(0.50 + adx_strength * 0.30 + breadth_str * 0.20, 3)
+    
+    return 0.55  # RANGE / EXPANSION - keep neutral/baseline
+
+
 def classify_regime(processed: dict[str, pd.DataFrame], breadth: float, tracker: RegimeTracker, config) -> MarketRegime:
     adx_vals, atr_ratios = [], []
     for ticker, df in processed.items():
@@ -72,8 +87,7 @@ def classify_regime(processed: dict[str, pd.DataFrame], breadth: float, tracker:
     tracker.push(regime)
     confirmed = tracker.is_confirmed(regime, config.REGIME_CONFIRM_BARS)
     
-    conf = 0.55
-    if regime == MarketRegimeType.PANIC: conf = 0.90
+    conf = _regime_confidence(regime, adx_med, breadth, atr_rat, config)
     return MarketRegime(regime, breadth, adx_med, atr_rat, conf, confirmed)
 
 
