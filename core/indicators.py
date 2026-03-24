@@ -85,10 +85,18 @@ def add_indicators(df: pd.DataFrame, config) -> pd.DataFrame:
     dx = 100*(pdi-ndi).abs()/(pdi+ndi).replace(0, np.nan)
     df["ADX"] = _wilder(dx, adx_p)
 
-    ema12 = c.ewm(span=12, adjust=False).mean()
-    ema26 = c.ewm(span=26, adjust=False).mean()
     ml = ema12 - ema26
     df["MACD_Hist"] = ml - ml.ewm(span=9, adjust=False).mean()
+
+    # Bollinger Bands (Fix for BB_Width/BB_Squeeze dead factors)
+    bb_period, bb_std = 20, 2.0
+    bb_mid = c.rolling(bb_period).mean()
+    bb_sd  = c.rolling(bb_period).std(ddof=0)
+    df["BB_Upper"]  = bb_mid + bb_std * bb_sd
+    df["BB_Lower"]  = bb_mid - bb_std * bb_sd
+    df["BB_Width"]  = (df["BB_Upper"] - df["BB_Lower"]) / bb_mid
+    bw_avg          = df["BB_Width"].rolling(50).mean()
+    df["BB_Squeeze"] = df["BB_Width"] < (bw_avg * 0.85)
 
     df["Vol_Avg_20"] = df["Volume"].rolling(20).mean()
     df["Turnover_Avg_20"] = (c * df["Volume"]).rolling(20).mean()
