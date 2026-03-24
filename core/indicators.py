@@ -54,6 +54,15 @@ def add_indicators(df: pd.DataFrame, config) -> pd.DataFrame:
     rs_s = np.where(avg_loss == 0, np.inf, avg_gain / avg_loss)
     df["RSI"] = 100 - (100 / (1 + rs_s))
 
+    # StochRSI
+    rsi_s     = df["RSI"]
+    stoch_len = 14
+    rsi_lo    = rsi_s.rolling(stoch_len).min()
+    rsi_hi    = rsi_s.rolling(stoch_len).max()
+    stoch_rsi = (rsi_s - rsi_lo) / (rsi_hi - rsi_lo + 1e-9)
+    df["StochRSI_K"] = stoch_rsi.rolling(3).mean() * 100
+    df["StochRSI_D"] = df["StochRSI_K"].rolling(3).mean()
+
     tr = _true_range(df)
     df["ATR"] = _wilder(tr, 14)
     df["ATR_50_mean"] = df["ATR"].rolling(50).mean()
