@@ -97,9 +97,19 @@ class ScanState:
             PLATT_CALIB_FILE.write_text(
                 json.dumps({"A": a, "B": b, "fitted_at": datetime.now().isoformat()}, indent=2)
             )
+            self.platt_a, self.platt_b = a, b
             log.info("Platt params saved: A=%.4f B=%.4f", a, b)
         except Exception as e:
             log.warning("Could not save Platt params: %s", e)
+
+    def calibrate(self, composites: list[float], outcomes: list[int]) -> None:
+        """Fit new Platt A/B and persist."""
+        from core.scorer import calibrate_platt
+        if not composites or len(composites) != len(outcomes):
+            log.error("Invalid calibration data")
+            return
+        a, b = calibrate_platt(composites, outcomes)
+        self.save_platt(a, b)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -272,6 +282,42 @@ def _send_alert(portfolio: list[TickerResult], regime: MarketRegime, config: Sys
     send_telegram("\n".join(lines), config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID)
 
 
+def run_calibration() -> None:
+    """Load trade_log.json, re-calculate composites, and re-fit Platt A/B."""
+    log.info("Starting Platt calibration from trade_log.json...")
+    trade_log_path = Path(os.getenv("TRADE_LOG_PATH", "trade_log.json"))
+    if not trade_log_path.exists():
+        log.error("Trade log not found at %s", trade_log_path)
+        return
+
+    try:
+        trades = json.loads(trade_log_path.read_text())
+    except Exception as e:
+        log.error("Could not load trade log: %s", e)
+        return
+
+    composites, outcomes = [], []
+    for t in trades:
+        f = t.get("factors")
+        pnl = t.get("pnl")
+        if f and pnl is not None:
+            # Reconstruct composite using default weights if not present
+            comp = t.get("composite")
+            if comp is None:
+                comp = sum(f.get(k, 0) * DEFAULT_WEIGHTS.get(k, 0) for k in DEFAULT_WEIGHTS)
+            
+            composites.append(float(comp))
+            outcomes.append(1 if pnl > 0 else 0)
+
+    if len(composites) < 5:
+        log.warning("Insufficient data for calibration (%d samples)", len(composites))
+        return
+
+    log.info("Calibrating on %d samples...", len(composites))
+    state = ScanState()
+    state.calibrate(composites, outcomes)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -283,6 +329,7 @@ def main() -> None:
     parser.add_argument("--debug",       action="store_true")
     parser.add_argument("--no-telegram", action="store_true")
     parser.add_argument("--no-intraday", action="store_true")
+    parser.add_argument("--calibrate",   action="store_true", help="Re-fit Platt A/B from trade_log.json")
     args = parser.parse_args()
 
     if args.version:
@@ -300,7 +347,9 @@ def main() -> None:
         if not args.no_telegram and portfolio and regime:
             _send_alert(portfolio, regime, config)
 
-    if args.watch:
+    if args.calibrate:
+        run_calibration()
+    elif args.watch:
         log.info("Watch mode — scanning every %d minutes", args.watch)
         while True:
             try:

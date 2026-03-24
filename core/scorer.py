@@ -116,6 +116,22 @@ def composite_to_prob(composite: float, platt_a: float, platt_b: float) -> float
     return float(_sigmoid(platt_a * composite + platt_b))
 
 
+def calibrate_platt(composites: list[float], outcomes: list[int]) -> tuple[float, float]:
+    """
+    Fits Platt A and B parameters using MLE.
+    Optimises: P(y=1|x) = 1 / (1 + exp(A*x + B))
+    """
+    from scipy.optimize import minimize
+    def nll(ab):
+        p = _sigmoid(ab[0] * np.array(composites) + ab[1])
+        p = np.clip(p, 1e-7, 1-1e-7)
+        return -np.mean(np.array(outcomes)*np.log(p) + (1-np.array(outcomes))*np.log(1-p))
+    
+    # Init from a reasonable starting point (negative slope)
+    res = minimize(nll, [-4.0, 2.0], method="Nelder-Mead")
+    return float(res.x[0]), float(res.x[1])
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LIQUIDITY GATE
 # ─────────────────────────────────────────────────────────────────────────────
