@@ -39,7 +39,7 @@ import pandas as pd
 
 from core.config import CONFIG, SystemConfig, IST
 from core.data_provider import fetch_daily_batch
-from core.factors import DEFAULT_WEIGHTS
+from core.factors import DEFAULT_WEIGHTS, calibrate_ic_weights
 from core.indicators import add_indicators
 from core.portfolio import optimize_portfolio
 from core.regime import (
@@ -248,7 +248,24 @@ def run_scan(
 
     log.info("%d tickers passed all gates", len(all_results))
 
-    # ── 5. Portfolio optimisation ─────────────────────────────────────────────
+    # ── 5. ICIR Factor Weight Calibration ─────────────────────────────────────
+    if len(all_results) >= config.ICIR_MIN_OBS:
+        try:
+            new_weights = calibrate_ic_weights(
+                results=all_results,
+                processed=processed,
+                bench=bench_series,
+                sector_ranks=sector_ranks,
+                n_sectors=N_SECTORS,
+                config=config,
+            )
+            state.factor_weights = new_weights
+            state.weights_calibrated = True
+            log.info("🎯 IC weights optimized: %s", {k: round(v, 4) for k, v in new_weights.items()})
+        except Exception as e:
+            log.warning("IC calibration failed: %s", e)
+
+    # ── 6. Portfolio optimisation ─────────────────────────────────────────────
     corr_matrix = _build_corr_matrix(processed, config)
     portfolio   = optimize_portfolio(all_results, config, corr_matrix)
 

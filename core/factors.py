@@ -492,3 +492,92 @@ def compute_factors(
         composite  = round(float(composite), 4),
         ic_weights = {k: round(w.get(k, 1 / 7), 4) for k in raw},
     )
+
+
+def calibrate_ic_weights(
+    results: list,  # list[TickerResult]
+    processed: dict[str, pd.DataFrame],
+    bench: pd.Series,
+    sector_ranks: dict[str, int],
+    n_sectors: int,
+    config,
+    lookback: int = 60,
+    calib_offset: int = 5,
+    fwd_bars: int = 5,
+) -> dict[str, float]:
+    """
+    Optimizes factor weights using Information Coefficient (Spearman)
+    over a historical lookback window.
+    """
+    from scipy.stats import spearmanr
+    from .universe import TICKER_TO_SECTOR
+    
+    factors_list = ["trend", "momentum", "volume", "volatility", "rs", "breakout", "quality"]
+    daily_ics = {f: [] for f in factors_list}
+    
+    tickers = [r.ticker for r in results]
+    
+    # Sample daily for efficiency if lookback is large
+    step = 2
+    for offset in range(calib_offset + 1, calib_offset + lookback + 1, step):
+        f_vals = {f: [] for f in factors_list}
+        rets = []
+        
+        for ticker in tickers:
+            df = processed.get(ticker)
+            if df is None or len(df) < offset + fwd_bars + 5:
+                continue
+            
+            idx = len(df) - offset
+            row = df.iloc[idx - 1]
+            close = float(row["Close"])
+            
+            # Forward return
+            fwd_close = float(df["Close"].iloc[idx + fwd_bars - 1])
+            rets.append((fwd_close - close) / close if close > 0 else 0)
+            
+            # Recalculate factors for this historical point
+            direction = "LONG" # Assume LONG for calibration context
+            
+            f_vals["trend"].append(factor_trend(row, close, direction))
+            f_vals["momentum"].append(factor_momentum(row, df.iloc[:idx], direction))
+            f_vals["volume"].append(factor_volume(row, df.iloc[:idx], direction, close))
+            f_vals["volatility"].append(factor_volatility(row))
+            f_vals["rs"].append(factor_relative_strength(
+                ticker, df.iloc[:idx], bench.iloc[:idx], 
+                TICKER_TO_SECTOR.get(ticker, "Unknown"), sector_ranks, 
+                direction, n_sectors
+            ))
+            f_vals["breakout"].append(factor_breakout(row, df.iloc[:idx], close, direction))
+            f_vals["quality"].append(factor_quality(df.iloc[:idx], row, close))
+            
+        if len(rets) < 10:
+            continue
+            
+        rets_arr = np.array(rets)
+        for f in factors_list:
+            arr = np.array(f_vals[f])
+            if len(arr) == len(rets_arr) and arr.std() > 1e-6:
+                ic, _ = spearmanr(arr, rets_arr)
+                daily_ics[f].append(float(ic) if not np.isnan(ic) else 0.0)
+            else:
+                daily_ics[f].append(0.0)
+
+    # Compute ICIR
+    icir = {}
+    for f in factors_list:
+        ics = np.array(daily_ics[f])
+        if len(ics) < 5:
+            icir[f] = 0.0
+        else:
+            m, s = ics.mean(), ics.std()
+            icir[f] = m / s if s > 1e-6 else 0.0
+
+    # Weighted by positive ICIR
+    pos_icir = {f: max(0.0, icir[f]) for f in factors_list}
+    total = sum(pos_icir.values())
+    
+    if total < 1e-6:
+        return {f: 1.0/len(factors_list) for f in factors_list}
+    
+    return {f: pos_icir[f] / total for f in factors_list}
