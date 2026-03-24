@@ -509,7 +509,9 @@ MAG    = lambda t: _c(str(t), "95")
 # PLATT SCALING
 # ─────────────────────────────────────────────────────────────────────────────
 def composite_to_prob(composite: float) -> float:
-    return float(_sigmoid(CONFIG["PLATT_A"] * composite + CONFIG["PLATT_B"]))
+    # Use strict Platt convention: p = 1 / (1 + exp(Ax + B))
+    # where A is negative for positive correlation.
+    return 1.0 / (1.0 + np.exp(CONFIG["PLATT_A"] * composite + CONFIG["PLATT_B"]))
 
 
 def calibrate_platt(composites: np.ndarray, outcomes: np.ndarray) -> tuple[float, float]:
@@ -518,11 +520,13 @@ def calibrate_platt(composites: np.ndarray, outcomes: np.ndarray) -> tuple[float
     a, b = -2.0, 1.0
     lr   = 0.1
     for _ in range(500):
-        p    = _sigmoid(a * composites + b)
+        # GD matching our p = 1 / (1 + exp(ax + b)) logic
+        z    = a * composites + b
+        p    = 1.0 / (1.0 + np.exp(z))
         p    = np.clip(p, 1e-7, 1 - 1e-7)
         err  = p - outcomes
-        a   -= lr * np.mean(err * composites)
-        b   -= lr * np.mean(err)
+        a   += lr * np.mean(err * composites)
+        b   += lr * np.mean(err)
     return round(float(a), 4), round(float(b), 4)
 
 
@@ -670,8 +674,6 @@ def compute_rolling_ic(
             icir_scores[f]    = 0.0
             ic_mean_scores[f] = 0.0
             continue
-        m = float(ics.mean())
-        s = float(ics.std())
         ic_mean_scores[f] = round(m, 5)
         icir_scores[f]    = round(m/s, 4) if s > 1e-8 else 0.0
 
@@ -1416,6 +1418,8 @@ def _ticker_excess_kurtosis(daily_df: pd.DataFrame) -> float:
     rets_arr = rets.tail(window).values
     try:
         ek = float(_kurtosis(rets_arr, fisher=True))
+        if np.isnan(ek):
+            return CONFIG["KELLY_KURTOSIS_FALLBACK"]
         return float(np.clip(ek, 0.0, 20.0))
     except Exception:
         return CONFIG["KELLY_KURTOSIS_FALLBACK"]
@@ -1450,7 +1454,7 @@ def kelly_size(
     risk_inr = max(risk_inr, CONFIG["RISK_PER_TRADE_INR"] * 0.25 * cap_fraction)
 
     shares = max(CONFIG["KELLY_MIN_SHARES"], int(risk_inr / rps)) if cap_fraction > 0 else 0
-    return shares, round(shares * rps, 2), round(f, 5), round(kurt_corr, 4)
+    return int(shares), float(round(shares * rps, 2)), float(round(f, 5)), float(round(kurt_corr, 4))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1726,10 +1730,10 @@ def optimise_portfolio(
 
         c_key = c.ticker + ".NS"
         too_corr = False
-        if not corr_matrix.empty and c_key in corr_matrix.columns:
+        if not corr_matrix.empty and (c_key in corr_matrix.columns):
             for s in selected:
                 sk = s.ticker + ".NS"
-                if sk in corr_matrix.columns and c_key in corr_matrix.index:
+                if sk in corr_matrix.columns and (c_key in corr_matrix.index):
                     if abs(float(corr_matrix.loc[c_key, sk])) > CONFIG["MAX_CORR"]:
                         too_corr = True; break
         if too_corr: continue

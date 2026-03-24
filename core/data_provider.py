@@ -65,17 +65,31 @@ def fetch_daily_batch(tickers: list, config) -> dict[str, pd.DataFrame]:
                 if df is not None: out[ticker] = df
         if out: return out
 
-    log.warning("Falling back to yfinance")
-    raw = yf.download(tickers + [config.BENCHMARK], period=config.DAILY_PERIOD, interval="1d", group_by="ticker", progress=False)
-    for ticker in tickers + [config.BENCHMARK]:
+    log.warning("Falling back to yfinance (chunked)")
+    full_list = tickers + [config.BENCHMARK]
+    chunk_size = 40
+    for i in range(0, len(full_list), chunk_size):
+        chunk = full_list[i : i + chunk_size]
         try:
-            if isinstance(raw.columns, pd.MultiIndex):
-                df = raw.xs(ticker, axis=1, level=0).copy()
-            else:
-                df = raw.copy()
-            df.dropna(how="all", inplace=True)
-            df.columns = [c.title() for c in df.columns]
-            if not df.empty: out[ticker] = df
+            raw = yf.download(chunk, period=config.DAILY_PERIOD, interval="1d", group_by="ticker", progress=False)
+            log.info("Chunk: %s | Raw shape: %s | Columns: %s", chunk, raw.shape, list(raw.columns))
+            if raw.empty: continue
+            
+            for t in chunk:
+                try:
+                    if isinstance(raw.columns, pd.MultiIndex):
+                        if t not in raw.columns.levels[0]: continue
+                        df = raw.xs(t, axis=1, level=0).copy()
+                    else:
+                        if len(chunk) == 1: df = raw.copy()
+                        else: continue # should not happen with group_by=ticker
+                    
+                    df.dropna(how="all", inplace=True)
+                    df.columns = [c.title() for c in df.columns]
+                    if not df.empty: out[t] = df
+                except Exception as e:
+                    log.debug(f"yfinance extracting error for {t}: {e}")
         except Exception as e:
-            log.error(f"yfinance error for {ticker}: {e}")
+            log.error(f"yfinance batch error for chunk starting {chunk[0]}: {e}")
+            
     return out

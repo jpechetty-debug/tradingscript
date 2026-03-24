@@ -17,8 +17,8 @@ def _supertrend_vectorised(df: pd.DataFrame, period: int, mult: float) -> tuple[
     close = df["Close"].values
     n = len(close)
 
-    final_upper = (hl2 + mult * atr).values
-    final_lower = (hl2 - mult * atr).values
+    final_upper = (hl2 + mult * atr).values.copy()
+    final_lower = (hl2 - mult * atr).values.copy()
 
     for i in range(1, n):
         final_upper[i] = (final_upper[i] if close[i - 1] > final_upper[i - 1]
