@@ -201,10 +201,9 @@ def run_scan(
     regime    = classify_regime(processed, breadth, tracker, config)
     session   = config.session_from_time()
 
-    log.info(
-        "Regime: %s (confirmed=%s, breadth=%.0f%%) | Session: %s",
-        regime.regime, regime.confirmed, breadth * 100, session,
-    )
+    log.info("📊 Breadth: %.0f%% above EMA-50  |  Regime: %s (%s)  |  Conf: %.2f  |  ADX: %.1f  |  ATR ratio: %.2f",
+             regime.breadth*100, regime.regime, "CONFIRMED" if regime.confirmed else f"{config.REGIME_CONFIRM_BARS} bar CONFIRM REQ",
+             regime.confidence, regime.adx_median, regime.atr_ratio)
 
     if not regime.is_tradeable():
         log.warning("PANIC regime — no new positions")
