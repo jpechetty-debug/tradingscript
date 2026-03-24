@@ -85,6 +85,8 @@ def add_indicators(df: pd.DataFrame, config) -> pd.DataFrame:
     dx = 100*(pdi-ndi).abs()/(pdi+ndi).replace(0, np.nan)
     df["ADX"] = _wilder(dx, adx_p)
 
+    ema12 = c.ewm(span=12, adjust=False).mean()
+    ema26 = c.ewm(span=26, adjust=False).mean()
     ml = ema12 - ema26
     df["MACD_Hist"] = ml - ml.ewm(span=9, adjust=False).mean()
 
@@ -99,6 +101,7 @@ def add_indicators(df: pd.DataFrame, config) -> pd.DataFrame:
     df["BB_Squeeze"] = df["BB_Width"] < (bw_avg * 0.85)
 
     df["Vol_Avg_20"] = df["Volume"].rolling(20).mean()
+    df["RVol_20"] = c.pct_change().rolling(20).std()
     df["Turnover_Avg_20"] = (c * df["Volume"]).rolling(20).mean()
     df["Up_Day"] = (c > df["Open"]).astype(int)
     df["Dn_Day"] = (c < df["Open"]).astype(int)

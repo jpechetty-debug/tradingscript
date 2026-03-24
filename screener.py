@@ -247,6 +247,47 @@ def save_platt_params(a: float, b: float) -> None:
         print(YELLOW(f"  ⚠️  Could not save Platt params: {e}"))
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TRADE LOG  (required by --calibrate / calibrate_platt)
+# Each live scan appends one record per portfolio pick so --backtest /
+# --calibrate can read real signal history instead of erroring "not found".
+# ─────────────────────────────────────────────────────────────────────────────
+TRADE_LOG_FILE = "trade_log.jsonl"
+
+def append_trade_log(portfolio: list, regime_label: str) -> None:
+    """Append one JSON-lines record per portfolio pick to TRADE_LOG_FILE.
+
+    Fields written are the minimum needed by calibrate_platt():
+      composite  – raw sharpe_rank used to size the position
+      timestamp  – ISO scan time (IST)
+      regime     – regime label at signal time
+    The pnl_r / outcome columns are filled in later (by --backtest) once the
+    trade closes.  calibrate_platt() filters to rows where pnl_r is present.
+    """
+    if not portfolio:
+        return
+    ts = datetime.now(IST).isoformat()
+    try:
+        with open(TRADE_LOG_FILE, "a") as f:
+            for r in portfolio:
+                record = {
+                    "timestamp":  ts,
+                    "ticker":     r.ticker,
+                    "direction":  r.direction,
+                    "composite":  round(float(r.sharpe_rank), 6),
+                    "score":      r.display_score,
+                    "prob_win":   round(float(r.prob_win), 4),
+                    "entry":      r.entry,
+                    "stop":       r.stop,
+                    "t1":         r.t1,
+                    "regime":     regime_label,
+                    "pnl_r":      None,   # filled by backtester on close
+                }
+                f.write(json.dumps(record, default=str) + "\n")
+        log.info("Trade log: %d records appended → %s", len(portfolio), TRADE_LOG_FILE)
+    except Exception as e:
+        log.warning("Could not write trade log: %s", e)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 _platt_a, _platt_b = load_platt_params()   # FIX B: load at import time
@@ -1915,6 +1956,11 @@ def run_scan(debug=False, no_intraday=False, calibrate=False):
 
     all_results.sort(key=lambda r: r.sharpe_rank, reverse=True)
     portfolio = optimise_portfolio(all_results, corr_matrix)
+
+    # Write signals to trade log so --calibrate has data to fit on.
+    # Each portfolio pick gets one record with pnl_r=null; the backtester
+    # fills in the outcome column when the trade closes.
+    append_trade_log(portfolio, regime.regime)
 
     return all_results, portfolio, regime
 

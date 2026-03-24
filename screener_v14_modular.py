@@ -276,6 +276,27 @@ def run_scan(
             r.ticker, r.direction, r.prob_win, r.expectancy_r, r.rr_t1, r.shares, r.risk_inr,
         )
 
+    # ── 7. Trade Log Writer (for --calibrate) ────────────────────────────────
+    if portfolio:
+        trade_log_path = Path("trade_log.json")
+        try:
+            trades = []
+            if trade_log_path.exists():
+                trades = json.loads(trade_log_path.read_text())
+            
+            for r in portfolio:
+                entry = r.to_dict()
+                # Ensure structure matches run_calibration expectations
+                entry["factors"] = r.factors.as_dict()
+                entry["pnl"] = None  # Placeholder for actual trade outcome
+                entry["logged_at"] = datetime.now().isoformat()
+                trades.append(entry)
+            
+            trade_log_path.write_text(json.dumps(trades, indent=2))
+            log.info("Logged %d portfolio candidates to %s", len(portfolio), trade_log_path)
+        except Exception as e:
+            log.warning("Could not write to trade log: %s", e)
+
     return all_results, portfolio, regime
 
 
