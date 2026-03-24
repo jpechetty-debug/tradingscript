@@ -285,8 +285,12 @@ def run_scan(
 
 def _send_alert(portfolio: list[TickerResult], regime: MarketRegime, config: SystemConfig) -> None:
     if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+        log.debug("Telegram credentials missing in config")
         return
+    
     top = [r for r in portfolio if r.prob_win >= config.TELEGRAM_ALERT_MIN_PROB]
+    log.debug("Telegram candidates: %d/%d (threshold %.2f)", len(top), len(portfolio), config.TELEGRAM_ALERT_MIN_PROB)
+    
     if not top:
         return
     lines = [f"<b>Sovereign v{VERSION}</b> | {regime.regime} | {datetime.now(IST).strftime('%H:%M IST')}"]

@@ -7,7 +7,9 @@ def send_telegram(message, token, chat_id):
     if not token or not chat_id: return
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=10)
+        res = requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=10)
+        if not res.ok:
+            log.error(f"Telegram API Error: {res.status_code} - {res.text}")
     except Exception as e:
         log.error(f"Telegram error: {e}")
 
