@@ -241,9 +241,9 @@ def run_scan(
     log.info("Sovereign Engine v%s | %s", VERSION, datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"))
 
     # ── 1. Data ───────────────────────────────────────────────────────────────
-    _t0 = __import__("time").monotonic()
+    _t0 = time.monotonic()
     raw_data = fetch_daily_batch(ALL_TICKERS, config)
-    _fetch_elapsed = __import__("time").monotonic() - _t0
+    _fetch_elapsed = time.monotonic() - _t0
     if not raw_data:
         log.error("No data fetched — aborting scan")
         return [], [], None
@@ -255,7 +255,7 @@ def run_scan(
 
     processed: dict[str, pd.DataFrame] = {}
     _ind_fail = 0
-    _t0 = __import__("time").monotonic()
+    _t0 = time.monotonic()
     for ticker, df in raw_data.items():
         try:
             processed[ticker] = add_indicators(df, config)
@@ -265,7 +265,7 @@ def run_scan(
     _metrics.record_indicators(
         n_ok=len(processed),
         n_fail=_ind_fail,
-        elapsed_s=__import__("time").monotonic() - _t0,
+        elapsed_s=time.monotonic() - _t0,
     )
 
     bench_key = config.BENCHMARK
@@ -321,7 +321,7 @@ def run_scan(
             log.debug("score_ticker error for %s: %s", ticker, e)
             return None
 
-    _t0 = __import__("time").monotonic()
+    _t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
         futures = {executor.submit(_score_one, t): t for t in ALL_TICKERS}
         for future in as_completed(futures):
@@ -332,7 +332,7 @@ def run_scan(
     _metrics.record_score(
         n_passed=len(all_results),
         n_total=len(ALL_TICKERS),
-        elapsed_s=__import__("time").monotonic() - _t0,
+        elapsed_s=time.monotonic() - _t0,
     )
     log.info("%d tickers passed all gates", len(all_results))
 

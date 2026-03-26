@@ -31,7 +31,7 @@ import pandas as pd
 import yfinance as yf
 
 from .config import IST, SystemConfig
-from utils.retry import retry_with_backoff, YFINANCE_BREAKER, guarded_call
+from .retry import retry_with_backoff, YFINANCE_BREAKER, guarded_call
 
 log = logging.getLogger("sovereign.data")
 
