@@ -665,3 +665,20 @@ class TestDataProviderExceptions:
         ticker, df = fetch_single_ticker("TEST.NS", "NSE:TEST-EQ", cfg)
         assert ticker == "TEST.NS"
         assert df is None
+
+def test_nan_atr_rejected_at_gate():
+    from core.scorer import passes_data_quality
+    row = pd.Series({"ATR": float("nan"), "ATR_50_mean": 1.0, "ATR_Pctile": 40.0,
+                     "EMA_20": 100.0, "EMA_50": 98.0, "EMA_200": 90.0,
+                     "RSI": 55.0, "ADX": 25.0, "MACD_Hist": 0.1, "Vol_Avg_20": 1e6})
+    ok, msg = passes_data_quality(row, "TEST")
+    assert not ok
+    assert "ATR" in msg
+
+def test_pd_na_rejected_at_gate():
+    from core.scorer import passes_data_quality
+    row = pd.Series({"ATR": 1.0, "ATR_50_mean": pd.NA, "ATR_Pctile": 40.0,
+                     "EMA_20": 100.0, "EMA_50": 98.0, "EMA_200": 90.0,
+                     "RSI": 55.0, "ADX": 25.0, "MACD_Hist": 0.1, "Vol_Avg_20": 1e6})
+    ok, msg = passes_data_quality(row, "TEST")
+    assert not ok

@@ -229,64 +229,18 @@ def passes_liquidity(row: pd.Series, config: SystemConfig) -> tuple[bool, str]:
     return True, ""
 
 
-def passes_data_quality(row: pd.Series, daily_df: pd.DataFrame) -> tuple[bool, str]:
+def passes_data_quality(row: pd.Series, ticker: str) -> tuple[bool, str]:
     """
-    Explicit data-quality gate run before factor computation.
-
-    FIX 4 — replaces silent ATR_Pctile=50 fallback in factor_volatility
-    ----------------------------------------------------------------------
-    Previously, ``factor_volatility`` used ``row.get("ATR_Pctile", 50)``
-    as a fallback, silently treating data-sparse tickers as "mid-range"
-    volatility.  This hides two failure modes:
-
-      (a) Tickers with fewer than 50 bars of ATR history (e.g. recently
-          listed stocks or after a data gap) would receive a volatility
-          factor score as if they had median ATR rank — neither penalised
-          nor rewarded, effectively bypassing the quality check.
-
-      (b) ``ATR_50_mean = NaN`` makes the ``contract = (atr < ratio * atr50m)``
-          comparison False unconditionally (NaN comparisons in Python/NumPy
-          are always False), so the volatility factor silently scores as
-          "expanding" rather than raising a flag.
-
-    Fix: reject tickers where either column is NaN at the last bar.
-    Score them as "insufficient history" — they are gated out before
-    factor_volatility is ever called, so no silent neutral score is
-    possible.
-
-    Columns checked
-    ---------------
-    * ``ATR_Pctile``  — requires min 50 bars of ATR (rolling 252, min_periods=50).
-    * ``ATR_50_mean`` — requires 50 bars of ATR.
-
-    Both are intentionally left as NaN in ``add_indicators()`` for early
-    bars; see that module's docstring for the full contract.
-
-    Returns
-    -------
-    (True, "") if quality passes.
-    (False, reason_string) if any check fails.
+    Reject tickers whose indicator columns contain NaN/NA.
+    These indicate insufficient history or a pipeline failure —
+    scoring them produces misleading composites.
     """
-    import math
-
-    atr_pctile = row.get("ATR_Pctile")
-    atr_50_mean = row.get("ATR_50_mean")
-
-    # pandas .get() on a Series returns the scalar; check for NaN explicitly.
-    if atr_pctile is None or (isinstance(atr_pctile, float) and math.isnan(atr_pctile)):
-        n_bars = len(daily_df)
-        return (
-            False,
-            f"ATR_Pctile=NaN — only {n_bars} bars available (need >= 50 for ATR rank)",
-        )
-
-    if atr_50_mean is None or (isinstance(atr_50_mean, float) and math.isnan(atr_50_mean)):
-        n_bars = len(daily_df)
-        return (
-            False,
-            f"ATR_50_mean=NaN — only {n_bars} bars available (need >= 50 for ATR baseline)",
-        )
-
+    required = ["ATR", "ATR_50_mean", "ATR_Pctile", "EMA_20", "EMA_50",
+                "EMA_200", "RSI", "ADX", "MACD_Hist", "Vol_Avg_20"]
+    for col in required:
+        val = row.get(col)
+        if val is None or pd.isna(val):
+            return False, f"{col} is NaN — insufficient history"
     return True, ""
 
 
@@ -379,7 +333,7 @@ def score_ticker(
     # a ticker has fewer than 50 bars of history.  Without this gate,
     # factor_volatility silently treats them as mid-range (fallback=50),
     # which hides data-sparse tickers and biases the composite score.
-    ok, msg = passes_data_quality(row, daily_df)
+    ok, msg = passes_data_quality(row, ticker)
     if not ok:
         if debug:
             log.debug("%s: DATA_QUALITY — %s", ticker, msg)
