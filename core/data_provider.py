@@ -210,7 +210,7 @@ def fetch_daily_batch(
     ``{ticker: OHLCV_DataFrame}`` for every symbol successfully fetched.
     """
     out: dict[str, pd.DataFrame] = {}
-    all_symbols: list[str] = tickers + [config.BENCHMARK]
+    all_symbols: list[str] = sorted(list(set(tickers + [config.BENCHMARK])))
 
     fyers_map: dict[str, str] = {
         t: f"NSE:{t.replace('.NS', '')}-EQ" for t in all_symbols

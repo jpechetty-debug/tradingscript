@@ -93,7 +93,12 @@ Double-click **`run_watch.bat`** to launch the engine in 15-minute Watch Mode.
 ---
 
 ## 🧪 Testing & Quality
-- **Unit Tests**: Run `pytest tests/` to verify core logic.
+- **Core Component Tests**: Verifying 18+ critical paths in `core/` including:
+  - `calibrate_ic_weights`: Direction-aware factor optimization.
+  - `fetch_daily_batch`: Robust yfinance/Fyers batch logic with symbol deduping.
+  - `async_data`: High-concurrency semaphore-guarded fetches.
+  - `universe`: Static sector mapping integrity.
+- **Run Tests**: Use `pytest tests/ -v` for the full suite or `pytest tests/test_factors_calibration.py` for specific modules.
 - **Type Safety**: Fully typed with Python 3.10 `|` unions and `from __future__ import annotations`.
 - **Performance**: Vectorised indicators and `ThreadPoolExecutor` parallel scoring.
 

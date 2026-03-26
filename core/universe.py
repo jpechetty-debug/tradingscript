@@ -88,6 +88,7 @@ TICKER_TO_SECTOR: dict[str, str] = {
 
 N_SECTORS = len(SECTORS)
 N_TICKERS = len(ALL_TICKERS)
+SECTOR_LIST = list(SECTORS.keys())
 
 
 def get_fyers_symbol(ticker: str) -> str:
