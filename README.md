@@ -1,9 +1,9 @@
-# 🦅 Sovereign Engine v14.2: Institutional Modular Infrastructure
+# 🦅 Sovereign Engine v14.3: Institutional Modular Infrastructure
 
 Sovereign Engine is a professional-grade quantitative trading architecture designed for high-fidelity scanning, probabilistic setup evaluation, and automated portfolio optimization. 
 
 > [!IMPORTANT]
-> **v14.2 Performance & Resilience**: This version introduces **Exponential Backoff with Full Jitter** for data fetching and a **10-20x speedup** in volume profiling via NumPy vectorisation.
+> **v14.3 Institutional Grade**: This version introduces **SecretStr security masking**, **Robust Telegram Alerting** (429 retries/truncation), **Tiered Panic Scaling**, and **Regime-Dependent Probability Gates**.
 
 ---
 

@@ -11,13 +11,52 @@ Config is now a true value object — safe to share across threads.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from enum import Enum
 
 import pytz
 
+
+class SecretStr(str):
+    """
+    A ``str`` subclass whose ``__repr__`` never exposes the secret value.
+
+    Use for any field that holds an API key, token, or password so that
+    accidentally logging or printing the config object does not leak
+    credentials::
+
+        token = SecretStr("bot123:ABC-def")
+        repr(token)   # → "SecretStr('bot1...ef')"
+        str(token)    # → "bot123:ABC-def"   (full value for API calls)
+
+    The masked repr shows the first 4 and last 4 characters when the
+    secret is at least 12 chars long; otherwise it returns ``'****'``.
+    """
+
+    _SECRET_FIELDS = frozenset({
+        "TELEGRAM_BOT_TOKEN",
+        "FYERS_CLIENT_ID",
+        "FYERS_SECRET_KEY",
+        "FYERS_ACCESS_TOKEN",
+    })
+
+    def __repr__(self) -> str:
+        if len(self) >= 12:
+            return f"SecretStr('{self[:4]}...{self[-4:]}')"
+        return "SecretStr('****')"
+
+
+
 IST = pytz.timezone("Asia/Kolkata")
+
+# Fields whose values must never appear in repr / logs.
+_SECRET_FIELD_NAMES: frozenset[str] = frozenset({
+    "TELEGRAM_BOT_TOKEN",
+    "FYERS_CLIENT_ID",
+    "FYERS_SECRET_KEY",
+    "FYERS_ACCESS_TOKEN",
+})
 
 
 class MarketRegimeType(Enum):
@@ -123,7 +162,9 @@ class SystemConfig:
     SESSION_MIDDAY_END: str = "13:30"
 
     # ── Telegram alerts ───────────────────────────────────────────────────────
-    TELEGRAM_BOT_TOKEN:    str   = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_BOT_TOKEN:    SecretStr = field(
+        default_factory=lambda: SecretStr(os.getenv("TELEGRAM_BOT_TOKEN", ""))
+    )
     TELEGRAM_CHAT_ID:      str   = os.getenv("TELEGRAM_CHAT_ID", "")
     TELEGRAM_ALERT_MIN_PROB: float = 0.60
     TELEGRAM_ALERT_TOP_N:  int   = 3
@@ -134,11 +175,37 @@ class SystemConfig:
     BACKTEST_MIN_PROB: float = 0.52
 
     # ── Fyers API ─────────────────────────────────────────────────────────────
-    FYERS_CLIENT_ID:    str  = os.getenv("FYERS_CLIENT_ID", "")
-    FYERS_SECRET_KEY:   str  = os.getenv("FYERS_SECRET_KEY", "")
+    FYERS_CLIENT_ID:    SecretStr = field(
+        default_factory=lambda: SecretStr(os.getenv("FYERS_CLIENT_ID", ""))
+    )
+    FYERS_SECRET_KEY:   SecretStr = field(
+        default_factory=lambda: SecretStr(os.getenv("FYERS_SECRET_KEY", ""))
+    )
     FYERS_REDIRECT_URI: str  = os.getenv("FYERS_REDIRECT_URI", "")
-    FYERS_ACCESS_TOKEN: str  = os.getenv("FYERS_ACCESS_TOKEN", "")
+    FYERS_ACCESS_TOKEN: SecretStr = field(
+        default_factory=lambda: SecretStr(os.getenv("FYERS_ACCESS_TOKEN", ""))
+    )
     USE_FYERS:          bool = True
+
+    def __repr__(self) -> str:
+        """
+        Safe repr that masks all ``SecretStr`` fields.
+
+        Without this override, ``dataclasses.dataclass`` generates a repr
+        that calls ``repr()`` on every field — which would print the full
+        token/key values for plain ``str`` fields and, before SecretStr was
+        introduced, would leak credentials in any log that records the
+        config object.
+        """
+        parts = []
+        for f in fields(self):
+            val = getattr(self, f.name)
+            if f.name in _SECRET_FIELD_NAMES:
+                # Use SecretStr's own masked repr
+                parts.append(f"{f.name}={SecretStr(str(val))!r}")
+            else:
+                parts.append(f"{f.name}={val!r}")
+        return f"SystemConfig({', '.join(parts)})"
 
     def session_from_time(self, now: datetime | None = None) -> str:
         """Return session label for the given IST datetime (defaults to now)."""

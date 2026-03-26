@@ -55,9 +55,19 @@ from utils.messaging import send_telegram
 from core.telemetry import setup_logging, ScanMetrics, emit
 from core.cache import SCAN_CACHE, _build_corr_matrix
 from core.retry import guarded_call, FYERS_BREAKER, YFINANCE_BREAKER, TELEGRAM_BREAKER
+import sovereign_improvements as SE_PATCH
 
-VERSION = "14.0-Modular"
+VERSION = "14.3-Modular"
 PLATT_CALIB_FILE = Path("platt_calibration.json")
+
+# Global patch components (initialized in main)
+PATCH = {
+    "gate":       None,
+    "scaler":     None,
+    "data":       None,
+    "calibrator": None,
+    "alerter":    None,
+}
 
 setup_logging(level="INFO", json_log_file="logs/sovereign.jsonl")
 log = logging.getLogger("sovereign")
@@ -154,7 +164,11 @@ def run_scan(
 
     state = ScanState()
     state.load_platt()
-    state.capital_scaler = CapitalScaler.from_config(config)
+
+    # 14.3: Use dynamic factor weights from the background calibrator if available
+    if PATCH["calibrator"]:
+        state.factor_weights = PATCH["calibrator"].current_weights()
+        log.info("Using dynamic factor weights: %s", {k: round(v, 3) for k, v in state.factor_weights.items()})
 
     # Inject calibrated Platt into config for this scan
     config = SystemConfig(
@@ -237,7 +251,7 @@ def run_scan(
                 intraday={} if no_intraday else {},  # hook for live intraday data
                 mtf_60m={},
                 factor_weights=state.factor_weights,
-                capital_fraction=state.capital_scaler.capital_fraction() if state.capital_scaler else 1.0,
+                capital_fraction=PATCH["scaler"].capital_fraction(1_000_000, regime.regime) if PATCH["scaler"] else 1.0,
                 debug=debug,
             )
         except Exception as e:
@@ -307,13 +321,17 @@ def _send_alert(portfolio: list[TickerResult], regime: MarketRegime, config: Sys
     
     if not top:
         return
-    lines = [f"<b>Sovereign v{VERSION}</b> | {regime.regime} | {datetime.now(IST).strftime('%H:%M IST')}"]
-    for r in top[:config.TELEGRAM_ALERT_TOP_N]:
-        lines.append(
-            f"<b>{r.ticker}</b> {r.direction} | P={r.prob_win:.0%} | E(R)={r.expectancy_r:.2f} | "
-            f"Entry {r.entry} | SL {r.stop} | T1 {r.t1} | {r.shares} shares"
-        )
-    send_telegram("\n".join(lines), config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID)
+
+    if PATCH["alerter"]:
+        PATCH["alerter"].send_daily_summary(regime.regime, [r.__dict__ for r in top])
+    else:
+        lines = [f"<b>Sovereign v{VERSION}</b> | {regime.regime} | {datetime.now(IST).strftime('%H:%M IST')}"]
+        for r in top[:config.TELEGRAM_ALERT_TOP_N]:
+            lines.append(
+                f"<b>{r.ticker}</b> {r.direction} | P={r.prob_win:.0%} | E(R)={r.expectancy_r:.2f} | "
+                f"Entry {r.entry} | SL {r.stop} | T1 {r.t1} | {r.shares} shares"
+            )
+        send_telegram("\n".join(lines), config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID)
 
 
 def run_calibration() -> None:
@@ -380,6 +398,16 @@ def main() -> None:
         )
         if not args.no_telegram and portfolio and regime:
             _send_alert(portfolio, regime, config)
+
+        # 14.3: Feed completed trades from trade_log into the calibrator buffer for live updates
+        if PATCH["calibrator"]:
+            for r in portfolio:
+                # This is a placeholder; in a real live environment, we'd record closed trades here.
+                # For now, we just ensure the calibrator is aware of the current scan.
+                pass
+
+    global PATCH
+    PATCH = SE_PATCH.apply(None, portfolio_peak=1_000_000)
 
     if args.calibrate:
         run_calibration()
