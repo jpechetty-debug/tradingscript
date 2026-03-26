@@ -1,9 +1,9 @@
-# 🦅 Sovereign Engine v14.3: Institutional Modular Infrastructure
+# 🦅 Sovereign Engine v14.4-Modular: Institutional State Isolation
 
 Sovereign Engine is a professional-grade quantitative trading architecture designed for high-fidelity scanning, probabilistic setup evaluation, and automated portfolio optimization. 
 
 > [!IMPORTANT]
-> **v14.3 Institutional Grade**: This version introduces **SecretStr security masking**, **Robust Telegram Alerting** (429 retries/truncation), **Tiered Panic Scaling**, and **Regime-Dependent Probability Gates**.
+> **v14.4 Architectural Refinement**: This version introduces **ScanState-scoped isolation** (eliminating state bleed), **Direction-Aware IC Calibration** (removing lookahead bias), and **Improved Telemetry Hygiene**.
 
 ---
 

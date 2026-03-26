@@ -560,12 +560,17 @@ def calibrate_ic_weights(
     from scipy.stats import spearmanr
     from .universe import TICKER_TO_SECTOR
 
-    # Build a direction lookup from the most-recent TickerResult so that
-    # tickers not in `results` (e.g. only-long universe) still degrade
-    # gracefully to "LONG".
+    # Build a direction lookup from the most-recent TickerResult.
+    # This is a *fallback only* — used when a ticker's historical DataFrame
+    # lacks the ``Super_Up`` indicator column.  Imputing a historical bar's
+    # direction from the *current* live result is a weak form of lookahead
+    # bias: if a regime flip occurred within the last ``calib_offset`` bars,
+    # the imputed direction will be wrong.  We log a warning on first use
+    # and skip the bar rather than silently propagate the bias.
     result_direction: dict[str, str] = {
         r.ticker.replace(".NS", ""): r.direction for r in results
     }
+    _direction_fallback_warned: set[str] = set()
 
     factors_list = ["trend", "momentum", "volume", "volatility", "rs", "breakout", "quality"]
     daily_ics = {f: [] for f in factors_list}
@@ -587,15 +592,27 @@ def calibrate_ic_weights(
             row = df.iloc[idx - 1]
             close = float(row["Close"])
 
-            # ── Direction: infer from historical Supertrend if available,
-            #    else fall back to the ticker's most-recent live direction.
+            # ── Direction: use historical Supertrend exclusively.
+            # Falling back to the live TickerResult direction risks
+            # lookahead bias — if the regime flipped recently the live
+            # direction reflects future information relative to this bar.
+            # We warn once per ticker and skip the bar entirely instead.
             if "Super_Up" in df.columns:
                 super_up = bool(row.get("Super_Up", True))
                 ema20 = float(row.get("EMA_20", close))
                 direction = "LONG" if (super_up and close >= ema20) else "SHORT"
             else:
                 base = ticker.replace(".NS", "")
-                direction = result_direction.get(base, "LONG")
+                if base not in _direction_fallback_warned:
+                    import logging as _logging
+                    _logging.getLogger("sovereign.factors").warning(
+                        "calibrate_ic_weights: ticker %s has no Super_Up column — "
+                        "skipping all historical IC bars for this ticker to avoid "
+                        "lookahead bias from live-direction imputation.",
+                        ticker,
+                    )
+                    _direction_fallback_warned.add(base)
+                continue   # skip this bar for this ticker — do not use live direction
 
             # ── Signed forward return (positive = good for direction) ──────
             fwd_close = float(df["Close"].iloc[idx + fwd_bars - 1])

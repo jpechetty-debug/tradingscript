@@ -53,21 +53,12 @@ from core.scorer import TickerResult, score_ticker
 from core.universe import ALL_TICKERS, SECTORS, TICKER_TO_SECTOR, N_SECTORS
 from utils.messaging import send_telegram
 from core.telemetry import setup_logging, ScanMetrics, emit
-from core.cache import SCAN_CACHE, _build_corr_matrix
+from core.cache import _build_corr_matrix
 from core.retry import guarded_call, FYERS_BREAKER, YFINANCE_BREAKER, TELEGRAM_BREAKER
 import sovereign_improvements as SE_PATCH
 
-VERSION = "14.3-Modular"
+VERSION = "14.4-Modular"
 PLATT_CALIB_FILE = Path("platt_calibration.json")
-
-# Global patch components (initialized in main)
-PATCH = {
-    "gate":       None,
-    "scaler":     None,
-    "data":       None,
-    "calibrator": None,
-    "alerter":    None,
-}
 
 setup_logging(level="INFO", json_log_file="logs/sovereign.jsonl")
 log = logging.getLogger("sovereign")
@@ -82,6 +73,10 @@ class ScanState:
     """
     All mutable context for a single scan session.
     Created fresh per run_scan() call — no watch-mode bleed.
+
+    Patch components (gate, scaler, calibrator, alerter) live here rather
+    than in a module-level PATCH dict so that each scan cycle is fully
+    self-contained and watch-mode runs cannot share stale state.
     """
     platt_a: float = CONFIG.PLATT_A
     platt_b: float = CONFIG.PLATT_B
@@ -90,6 +85,18 @@ class ScanState:
     factor_weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
     ic_history: dict = field(default_factory=dict)
     capital_scaler: Optional[CapitalScaler] = None
+
+    # Patch components — populated by main() via SE_PATCH.apply().
+    # Keeping them on ScanState rather than in a module global means
+    # each run_scan() call is fully self-contained.
+    patch_gate:       Optional[object] = None
+    patch_scaler:     Optional[object] = None
+    patch_calibrator: Optional[object] = None
+    patch_alerter:    Optional[object] = None
+
+    # Per-scan cache — created fresh so different scan cycles never
+    # share cached volume profiles or correlation matrices.
+    cache: object = field(default_factory=lambda: __import__("core.cache", fromlist=["ScanCache"]).ScanCache())
 
     def load_platt(self) -> None:
         """Load Platt A/B from file if present; fall back to config defaults."""
@@ -148,9 +155,17 @@ def run_scan(
     config: SystemConfig = CONFIG,
     debug: bool = False,
     no_intraday: bool = False,
+    patch: Optional[dict] = None,
 ) -> tuple[list[TickerResult], list[TickerResult], Optional[MarketRegime]]:
     """
     Full scan pipeline. Returns (all_results, portfolio, regime).
+
+    Parameters
+    ----------
+    patch
+        Dict of patch components returned by SE_PATCH.apply() — keys
+        ``gate``, ``scaler``, ``calibrator``, ``alerter``.  Pass None
+        (default) for a bare scan with no patch components.
 
     Steps:
         1. Fetch & process daily data
@@ -158,16 +173,24 @@ def run_scan(
         3. Score each ticker (parallel)
         4. Optimise portfolio
     """
-    # Clear per-scan cache and start metrics collection
-    SCAN_CACHE.clear()
+    patch = patch or {}
+
+    # Fresh per-scan state and cache — no watch-mode bleed, no cross-test
+    # contamination when run_scan is called from tests.
+    state = ScanState()
+    state.patch_gate       = patch.get("gate")
+    state.patch_scaler     = patch.get("scaler")
+    state.patch_calibrator = patch.get("calibrator")
+    state.patch_alerter    = patch.get("alerter")
+
+    state.cache.clear()   # defensive: ensure the new cache starts clean
     _metrics = ScanMetrics()
 
-    state = ScanState()
     state.load_platt()
 
-    # 14.3: Use dynamic factor weights from the background calibrator if available
-    if PATCH["calibrator"]:
-        state.factor_weights = PATCH["calibrator"].current_weights()
+    # 14.4: Use dynamic factor weights from the background calibrator if available
+    if state.patch_calibrator:
+        state.factor_weights = state.patch_calibrator.current_weights()
         log.info("Using dynamic factor weights: %s", {k: round(v, 3) for k, v in state.factor_weights.items()})
 
     # Inject calibrated Platt into config for this scan
@@ -251,7 +274,7 @@ def run_scan(
                 intraday={} if no_intraday else {},  # hook for live intraday data
                 mtf_60m={},
                 factor_weights=state.factor_weights,
-                capital_fraction=PATCH["scaler"].capital_fraction(1_000_000, regime.regime) if PATCH["scaler"] else 1.0,
+                capital_fraction=state.patch_scaler.capital_fraction(1_000_000, regime.regime) if state.patch_scaler else 1.0,
                 debug=debug,
             )
         except Exception as e:
@@ -291,12 +314,12 @@ def run_scan(
             log.warning("IC calibration failed: %s", e)
 
     # ── 6. Portfolio optimisation ─────────────────────────────────────────────
-    corr_matrix = SCAN_CACHE.corr_matrix(processed, config)
+    corr_matrix = state.cache.corr_matrix(processed, config)
     portfolio   = optimize_portfolio(all_results, config, corr_matrix)
 
     _metrics.record_portfolio(portfolio)
     _metrics.emit_summary()
-    SCAN_CACHE.log_stats()
+    state.cache.log_stats()
     log.info("Portfolio: %d positions selected", len(portfolio))
     for r in portfolio:
         log.info(
@@ -311,19 +334,20 @@ def run_scan(
 # TELEGRAM ALERT
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _send_alert(portfolio: list[TickerResult], regime: MarketRegime, config: SystemConfig) -> None:
+def _send_alert(portfolio: list[TickerResult], regime: MarketRegime, config: SystemConfig, patch: Optional[dict] = None) -> None:
     if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         log.debug("Telegram credentials missing in config")
         return
-    
+
     top = [r for r in portfolio if r.prob_win >= config.TELEGRAM_ALERT_MIN_PROB]
     log.debug("Telegram candidates: %d/%d (threshold %.2f)", len(top), len(portfolio), config.TELEGRAM_ALERT_MIN_PROB)
-    
+
     if not top:
         return
 
-    if PATCH["alerter"]:
-        PATCH["alerter"].send_daily_summary(regime.regime, [r.__dict__ for r in top])
+    patch = patch or {}
+    if patch.get("alerter"):
+        patch["alerter"].send_daily_summary(regime.regime, [r.__dict__ for r in top])
     else:
         lines = [f"<b>Sovereign v{VERSION}</b> | {regime.regime} | {datetime.now(IST).strftime('%H:%M IST')}"]
         for r in top[:config.TELEGRAM_ALERT_TOP_N]:
@@ -390,24 +414,24 @@ def main() -> None:
 
     config = CONFIG
 
+    # Initialise patch components once at startup; pass them into each
+    # run_scan() call rather than storing them in a module-level global.
+    patch = SE_PATCH.apply(None, portfolio_peak=1_000_000)
+
     def _step() -> None:
         results, portfolio, regime = run_scan(
             config=config,
             debug=args.debug,
             no_intraday=args.no_intraday,
+            patch=patch,
         )
         if not args.no_telegram and portfolio and regime:
-            _send_alert(portfolio, regime, config)
+            _send_alert(portfolio, regime, config, patch=patch)
 
-        # 14.3: Feed completed trades from trade_log into the calibrator buffer for live updates
-        if PATCH["calibrator"]:
-            for r in portfolio:
-                # This is a placeholder; in a real live environment, we'd record closed trades here.
-                # For now, we just ensure the calibrator is aware of the current scan.
-                pass
-
-    global PATCH
-    PATCH = SE_PATCH.apply(None, portfolio_peak=1_000_000)
+        # Feed completed trades into the calibrator buffer for live updates.
+        # In a real live environment, record actual closed trades here.
+        if patch.get("calibrator"):
+            pass  # placeholder — wire in broker PnL events here
 
     if args.calibrate:
         run_calibration()

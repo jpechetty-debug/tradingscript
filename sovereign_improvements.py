@@ -29,13 +29,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
-import requests
 
+# Fix #9: never call logging.basicConfig in a library module — it
+# reconfigures the root logger and overrides whatever the application
+# set up via core.telemetry.setup_logging.  The caller owns logging
+# configuration; this module just gets a named logger.
 logger = logging.getLogger("sovereign.patch")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s — %(message)s",
-)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS & DEFAULTS
@@ -641,21 +640,22 @@ REGIME_CAPITAL_LABEL: dict[str, str] = {
 }
 
 def _send_telegram(text: str, parse_mode: str = "Markdown") -> bool:
-    """Send a message via Telegram Bot API. Returns True on success."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.debug("Telegram not configured — skipping alert.")
-        return False
-    try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": parse_mode},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return True
-    except Exception as exc:
-        logger.warning("Telegram send failed: %s", exc)
-        return False
+    """
+    Thin wrapper over ``utils.messaging.send_telegram``.
+
+    Delegates to the hardened implementation which enforces Telegram's
+    4,096-char limit (truncating with a notice) and performs one automatic
+    retry on HTTP 429 with Retry-After honour.  Reads credentials from the
+    same env vars as the rest of the engine.
+
+    The ``parse_mode`` parameter is accepted for call-site compatibility
+    but note that ``utils.messaging.send_telegram`` always uses HTML mode
+    as required by the v14 alert format — Markdown-formatted callers in
+    this module use only safe Markdown that also renders acceptably as
+    plain text.
+    """
+    from utils.messaging import send_telegram as _hardened_send
+    return _hardened_send(text, token=TELEGRAM_BOT_TOKEN, chat_id=TELEGRAM_CHAT_ID)
 
 
 class RegimeAwareTelegramAlerter:
