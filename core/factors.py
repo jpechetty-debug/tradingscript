@@ -253,11 +253,40 @@ def factor_volatility(
     High score = ATR contracting relative to 50d mean (coiling for breakout).
     Bollinger Squeeze bonus: +0.15 if squeeze detected.
     Low score  = ATR expanding well above baseline.
+
+    Data contract (FIX 4)
+    ---------------------
+    This function assumes ``ATR_Pctile`` and ``ATR_50_mean`` are real,
+    finite numbers — NOT NaN.  The ``passes_data_quality()`` gate in
+    ``scorer.py`` must be called before reaching this function.
+
+    Why: the original code used ``row.get("ATR_Pctile", 50)`` as a fallback.
+    A fallback of 50 treats data-sparse tickers as "mid-range volatility",
+    silently bypassing the quality check and biasing composite scores for
+    recently listed or history-incomplete instruments.
+
+    If a NaN somehow escapes the gate (e.g. during direct unit-test calls),
+    the function falls back to a conservative penalty score of 0.0 instead
+    of the neutral 50-percentile, making the data problem visible in output
+    rather than hiding it.
     """
+    import math
+
     atr    = float(row["ATR"])
-    atr50m = float(row.get("ATR_50_mean", atr) or atr)
-    atr_pct = float(row.get("ATR_Pctile", 50) or 50)
-    bbs    = bool(row.get("BB_Squeeze", False))
+    atr50m_raw = row.get("ATR_50_mean", None)
+    atr_pct_raw = row.get("ATR_Pctile", None)
+
+    # Defensive NaN check — the gate should prevent this, but if called
+    # directly (e.g. in unit tests without pre-filtering), return 0.0 so the
+    # bad data produces a visibly low score rather than a neutral one.
+    if atr50m_raw is None or (isinstance(atr50m_raw, float) and math.isnan(atr50m_raw)):
+        return 0.0
+    if atr_pct_raw is None or (isinstance(atr_pct_raw, float) and math.isnan(atr_pct_raw)):
+        return 0.0
+
+    atr50m  = float(atr50m_raw)
+    atr_pct = float(atr_pct_raw)
+    bbs     = bool(row.get("BB_Squeeze", False))
 
     contract = (atr < vol_contract_ratio * atr50m) if atr50m > 0 else False
 

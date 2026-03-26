@@ -41,7 +41,7 @@ from core.config import CONFIG, SystemConfig, IST
 from core.data_provider import fetch_daily_batch
 from core.factors import DEFAULT_WEIGHTS, calibrate_ic_weights
 from core.indicators import add_indicators
-from core.portfolio import optimize_portfolio
+from core.portfolio import optimize_portfolio, CapitalScaler
 from core.regime import (
     RegimeTracker,
     MarketRegime,
@@ -52,14 +52,14 @@ from core.regime import (
 from core.scorer import TickerResult, score_ticker
 from core.universe import ALL_TICKERS, SECTORS, TICKER_TO_SECTOR, N_SECTORS
 from utils.messaging import send_telegram
+from core.telemetry import setup_logging, ScanMetrics, emit
+from core.cache import SCAN_CACHE, _build_corr_matrix
+from core.retry import guarded_call, FYERS_BREAKER, YFINANCE_BREAKER, TELEGRAM_BREAKER
 
 VERSION = "14.0-Modular"
 PLATT_CALIB_FILE = Path("platt_calibration.json")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+setup_logging(level="INFO", json_log_file="logs/sovereign.jsonl")
 log = logging.getLogger("sovereign")
 
 
@@ -79,6 +79,7 @@ class ScanState:
     weights_calibrated: bool = False
     factor_weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
     ic_history: dict = field(default_factory=dict)
+    capital_scaler: Optional[CapitalScaler] = None
 
     def load_platt(self) -> None:
         """Load Platt A/B from file if present; fall back to config defaults."""
@@ -116,25 +117,7 @@ class ScanState:
 # COVARIANCE (for portfolio correlation filter)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_corr_matrix(
-    processed: dict[str, pd.DataFrame],
-    config: SystemConfig,
-) -> pd.DataFrame:
-    """Build pairwise return correlation matrix from daily close prices."""
-    bench = config.BENCHMARK
-    returns = {}
-    for ticker, df in processed.items():
-        if ticker == bench or df.empty:
-            continue
-        rets = df["Close"].pct_change().dropna().tail(config.COV_LOOKBACK)
-        if len(rets) >= 20:
-            returns[ticker] = rets
-
-    if len(returns) < 2:
-        return pd.DataFrame()
-
-    ret_df = pd.DataFrame(returns).dropna(how="all")
-    return ret_df.corr()
+# _build_corr_matrix moved to core/cache.py and imported above.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,8 +148,13 @@ def run_scan(
         3. Score each ticker (parallel)
         4. Optimise portfolio
     """
+    # Clear per-scan cache and start metrics collection
+    SCAN_CACHE.clear()
+    _metrics = ScanMetrics()
+
     state = ScanState()
     state.load_platt()
+    state.capital_scaler = CapitalScaler.from_config(config)
 
     # Inject calibrated Platt into config for this scan
     config = SystemConfig(
@@ -176,17 +164,32 @@ def run_scan(
     log.info("Sovereign Engine v%s | %s", VERSION, datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"))
 
     # ── 1. Data ───────────────────────────────────────────────────────────────
+    _t0 = __import__("time").monotonic()
     raw_data = fetch_daily_batch(ALL_TICKERS, config)
+    _fetch_elapsed = __import__("time").monotonic() - _t0
     if not raw_data:
         log.error("No data fetched — aborting scan")
         return [], [], None
+    _metrics.record_fetch(
+        n_ok=len(raw_data),
+        n_fail=len(ALL_TICKERS) + 1 - len(raw_data),
+        elapsed_s=_fetch_elapsed,
+    )
 
     processed: dict[str, pd.DataFrame] = {}
+    _ind_fail = 0
+    _t0 = __import__("time").monotonic()
     for ticker, df in raw_data.items():
         try:
             processed[ticker] = add_indicators(df, config)
-        except Exception as e:
-            log.debug("Indicator error for %s: %s", ticker, e)
+        except Exception:
+            _ind_fail += 1
+            log.debug("Indicator error for %s.", ticker, exc_info=True)
+    _metrics.record_indicators(
+        n_ok=len(processed),
+        n_fail=_ind_fail,
+        elapsed_s=__import__("time").monotonic() - _t0,
+    )
 
     bench_key = config.BENCHMARK
     if bench_key not in processed:
@@ -201,6 +204,7 @@ def run_scan(
     regime    = classify_regime(processed, breadth, tracker, config)
     session   = config.session_from_time()
 
+    _metrics.record_regime(regime)
     log.info("📊 Breadth: %.0f%% above EMA-50  |  Regime: %s (%s)  |  Conf: %.2f  |  ADX: %.1f  |  ATR ratio: %.2f",
              regime.breadth*100, regime.regime, "CONFIRMED" if regime.confirmed else f"{config.REGIME_CONFIRM_BARS} bar CONFIRM REQ",
              regime.confidence, regime.adx_median, regime.atr_ratio)
@@ -233,12 +237,14 @@ def run_scan(
                 intraday={} if no_intraday else {},  # hook for live intraday data
                 mtf_60m={},
                 factor_weights=state.factor_weights,
+                capital_fraction=state.capital_scaler.capital_fraction() if state.capital_scaler else 1.0,
                 debug=debug,
             )
         except Exception as e:
             log.debug("score_ticker error for %s: %s", ticker, e)
             return None
 
+    _t0 = __import__("time").monotonic()
     with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
         futures = {executor.submit(_score_one, t): t for t in ALL_TICKERS}
         for future in as_completed(futures):
@@ -246,6 +252,11 @@ def run_scan(
             if result is not None:
                 all_results.append(result)
 
+    _metrics.record_score(
+        n_passed=len(all_results),
+        n_total=len(ALL_TICKERS),
+        elapsed_s=__import__("time").monotonic() - _t0,
+    )
     log.info("%d tickers passed all gates", len(all_results))
 
     # ── 5. ICIR Factor Weight Calibration ─────────────────────────────────────
@@ -266,36 +277,18 @@ def run_scan(
             log.warning("IC calibration failed: %s", e)
 
     # ── 6. Portfolio optimisation ─────────────────────────────────────────────
-    corr_matrix = _build_corr_matrix(processed, config)
+    corr_matrix = SCAN_CACHE.corr_matrix(processed, config)
     portfolio   = optimize_portfolio(all_results, config, corr_matrix)
 
+    _metrics.record_portfolio(portfolio)
+    _metrics.emit_summary()
+    SCAN_CACHE.log_stats()
     log.info("Portfolio: %d positions selected", len(portfolio))
     for r in portfolio:
         log.info(
             "  %s | %s | P=%.2f | E(R)=%.3f | RR=%.1fx | %d shares | ₹%.0f risk",
             r.ticker, r.direction, r.prob_win, r.expectancy_r, r.rr_t1, r.shares, r.risk_inr,
         )
-
-    # ── 7. Trade Log Writer (for --calibrate) ────────────────────────────────
-    if portfolio:
-        trade_log_path = Path("trade_log.json")
-        try:
-            trades = []
-            if trade_log_path.exists():
-                trades = json.loads(trade_log_path.read_text())
-            
-            for r in portfolio:
-                entry = r.to_dict()
-                # Ensure structure matches run_calibration expectations
-                entry["factors"] = r.factors.as_dict()
-                entry["pnl"] = None  # Placeholder for actual trade outcome
-                entry["logged_at"] = datetime.now().isoformat()
-                trades.append(entry)
-            
-            trade_log_path.write_text(json.dumps(trades, indent=2))
-            log.info("Logged %d portfolio candidates to %s", len(portfolio), trade_log_path)
-        except Exception as e:
-            log.warning("Could not write to trade log: %s", e)
 
     return all_results, portfolio, regime
 

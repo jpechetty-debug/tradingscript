@@ -1,9 +1,9 @@
-# 🦅 Sovereign Engine v14.0: Institutional Modular Infrastructure
+# 🦅 Sovereign Engine v14.1: Institutional Modular Infrastructure
 
 Sovereign Engine is a professional-grade quantitative trading architecture designed for high-fidelity scanning, probabilistic setup evaluation, and automated portfolio optimization. 
 
 > [!IMPORTANT]
-> **v14.0 Modular Refactor**: Complete separation of concerns. All runtime state has been moved to `ScanState`, making the engine thread-safe, immutable, and fully testable.
+> **v14.1 Critical Patch**: This version introduces **NAV-aware position sizing** (`CapitalScaler`), **Out-of-sample Platt Calibration**, and a critical fix for **Supertrend bar-0 initialization**.
 
 ---
 
@@ -50,6 +50,7 @@ The engine evaluates the Nifty 200 universe using 7 orthogonal factors, fully im
 Every setup is transformed into a **Win Probability P(Win)** using calibrated **Platt scaling**. The v14.0 system automatically loads and saves `platt_calibration.json` to ensure consistent execution across restarts and backtests.
 
 ### 3. Institutional Risk Management
+- **CapitalScaler (FIX 2)**: NAV-aware position sizing. The system scales risk proportional to your live portfolio value (pro-rated against a 50x risk-per-trade par NAV). Automatically scales down during drawdowns and up during hot streaks.
 - **Fat-Tail Kelly Sizing**: Position sizing corrected for excess kurtosis (fat tails) to prevent over-leverage in volatile names.
 - **Correlation Gate**: Optimized portfolio selection using a `MAX_CORR` filter (0.70 default) to ensure ticker diversification.
 - **Regime Breadth Veto**: Automatic trading suspension (PANIC mode) when market breadth falls below critical thresholds.
@@ -63,9 +64,9 @@ Every setup is transformed into a **Win Probability P(Win)** using calibrated **
 | `backtest.py` | **Walk-Forward Engine**: Multi-fold simulation with Sharpe, MaxDD, and Hit-Rate metrics. |
 | `telemetry.py` | **Structured Logging**: Emits JSON-line metrics for log aggregators (ELK/Loki compatible). |
 | `retry.py` | **Resilience Layer**: Circuit breakers and exponential backoff for Fyers/yfinance APIs. |
-| `factors.py` | **Alpha Logic**: Decoupled factor computation for individual unit testing. |
+| `factors.py` | **Alpha Logic**: Decoupled factor computation with strict **FIX 4** data-quality gates. |
 | `regime.py` | **Regime Tracker**: 5-state classification with confirmation-lag protection. |
-| `portfolio.py` | **Optimizer**: Correlation-aware selection and sector cap enforcement. |
+| `portfolio.py` | **Optimizer**: Correlation-aware selection and **NAV-aware scaling** (CapitalScaler). |
 
 ---
 

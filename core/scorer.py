@@ -116,20 +116,105 @@ def composite_to_prob(composite: float, platt_a: float, platt_b: float) -> float
     return float(_sigmoid(platt_a * composite + platt_b))
 
 
-def calibrate_platt(composites: list[float], outcomes: list[int]) -> tuple[float, float]:
+def calibrate_platt(
+    composites: list[float],
+    outcomes:   list[int],
+    calib_offset: int = 60,
+) -> tuple[float, float]:
     """
-    Fits Platt A and B parameters using MLE.
-    Optimises: P(y=1|x) = 1 / (1 + exp(A*x + B))
+    Fit Platt A and B parameters on a **held-out** validation window.
+
+    FIX 3 — out-of-sample calibration
+    -----------------------------------
+    The original implementation trained on the *same* composites that the
+    live system uses to generate signals.  This is in-sample calibration:
+    the sigmoid is tuned to the training residuals, producing
+    over-confident probabilities (P(win) consistently > actual win-rate)
+    and inflating position sizes.
+
+    Fix: split the data at ``calib_offset`` bars from the end.
+
+    * Training window  : composites[:-calib_offset]  / outcomes[:-calib_offset]
+      Used ONLY to fit A and B via MLE.
+    * Validation window: composites[-calib_offset:]  / outcomes[-calib_offset:]
+      Never seen during fitting; used to log calibration quality (Brier
+      score and mean predicted prob vs actual win-rate) so you can monitor
+      drift over time.
+
+    The calib_offset default (60 bars) mirrors ``IC_CALIB_OFFSET`` in
+    factors.py — keep them in sync if you change either.
+
+    Parameters
+    ----------
+    composites
+        List of composite factor scores (floats in [0, 1]) in chronological
+        order, oldest first.
+    outcomes
+        List of binary trade outcomes (1 = win, 0 = loss), same order.
+    calib_offset
+        Number of most-recent samples to hold out.  Must be < len(composites).
+        Set to 0 to replicate the old in-sample behaviour (not recommended).
+
+    Returns
+    -------
+    (A, B) — Platt parameters for ``composite_to_prob()``.
+
+    Raises
+    ------
+    ValueError
+        If there are fewer than ``calib_offset + 20`` samples — not enough
+        data to calibrate reliably.
     """
     from scipy.optimize import minimize
-    def nll(ab):
-        p = _sigmoid(ab[0] * np.array(composites) + ab[1])
-        p = np.clip(p, 1e-7, 1-1e-7)
-        return -np.mean(np.array(outcomes)*np.log(p) + (1-np.array(outcomes))*np.log(1-p))
-    
-    # Init from a reasonable starting point (negative slope)
+
+    n = len(composites)
+    min_required = calib_offset + 20
+    if n < min_required:
+        raise ValueError(
+            f"calibrate_platt: need >= {min_required} samples to hold out "
+            f"{calib_offset} for validation, got {n}.  "
+            "Collect more trade history or reduce calib_offset."
+        )
+
+    # ── Split ─────────────────────────────────────────────────────────────────
+    if calib_offset > 0:
+        train_x = np.array(composites[:-calib_offset])
+        train_y = np.array(outcomes[:-calib_offset])
+        val_x   = np.array(composites[-calib_offset:])
+        val_y   = np.array(outcomes[-calib_offset:])
+    else:
+        # calib_offset=0 → in-sample (legacy); caller's explicit choice.
+        train_x = np.array(composites)
+        train_y = np.array(outcomes)
+        val_x   = train_x
+        val_y   = train_y
+
+    # ── MLE fit on training window ────────────────────────────────────────────
+    def nll(ab: np.ndarray) -> float:
+        p = _sigmoid(ab[0] * train_x + ab[1])
+        p = np.clip(p, 1e-7, 1 - 1e-7)
+        return -float(np.mean(train_y * np.log(p) + (1 - train_y) * np.log(1 - p)))
+
     res = minimize(nll, [-4.0, 2.0], method="Nelder-Mead")
-    return float(res.x[0]), float(res.x[1])
+    a, b = float(res.x[0]), float(res.x[1])
+
+    # ── Validation diagnostics (logged, not used for fitting) ─────────────────
+    val_p       = _sigmoid(a * val_x + b)
+    brier       = float(np.mean((val_p - val_y) ** 2))
+    mean_pred   = float(val_p.mean())
+    actual_wr   = float(val_y.mean())
+    cal_err     = mean_pred - actual_wr          # positive → over-confident
+
+    log.info(
+        "Platt calibration (train=%d, val=%d): A=%.4f B=%.4f | "
+        "val Brier=%.4f  pred_prob=%.3f  actual_wr=%.3f  cal_err=%+.3f%s",
+        len(train_x), len(val_x), a, b,
+        brier, mean_pred, actual_wr, cal_err,
+        "  [OVER-CONFIDENT]" if cal_err > 0.05 else
+        "  [UNDER-CONFIDENT]" if cal_err < -0.05 else "",
+    )
+
+    return a, b
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -141,6 +226,67 @@ def passes_liquidity(row: pd.Series, config: SystemConfig) -> tuple[bool, str]:
         return False, f"Vol {int(row['Vol_Avg_20']):,} < {config.ADV_SHARE_FLOOR:,}"
     if row["Turnover_Avg_20"] < config.ADV_TURNOVER_FLOOR:
         return False, f"Turnover < ₹{config.ADV_TURNOVER_FLOOR / 1e7:.0f}cr"
+    return True, ""
+
+
+def passes_data_quality(row: pd.Series, daily_df: pd.DataFrame) -> tuple[bool, str]:
+    """
+    Explicit data-quality gate run before factor computation.
+
+    FIX 4 — replaces silent ATR_Pctile=50 fallback in factor_volatility
+    ----------------------------------------------------------------------
+    Previously, ``factor_volatility`` used ``row.get("ATR_Pctile", 50)``
+    as a fallback, silently treating data-sparse tickers as "mid-range"
+    volatility.  This hides two failure modes:
+
+      (a) Tickers with fewer than 50 bars of ATR history (e.g. recently
+          listed stocks or after a data gap) would receive a volatility
+          factor score as if they had median ATR rank — neither penalised
+          nor rewarded, effectively bypassing the quality check.
+
+      (b) ``ATR_50_mean = NaN`` makes the ``contract = (atr < ratio * atr50m)``
+          comparison False unconditionally (NaN comparisons in Python/NumPy
+          are always False), so the volatility factor silently scores as
+          "expanding" rather than raising a flag.
+
+    Fix: reject tickers where either column is NaN at the last bar.
+    Score them as "insufficient history" — they are gated out before
+    factor_volatility is ever called, so no silent neutral score is
+    possible.
+
+    Columns checked
+    ---------------
+    * ``ATR_Pctile``  — requires min 50 bars of ATR (rolling 252, min_periods=50).
+    * ``ATR_50_mean`` — requires 50 bars of ATR.
+
+    Both are intentionally left as NaN in ``add_indicators()`` for early
+    bars; see that module's docstring for the full contract.
+
+    Returns
+    -------
+    (True, "") if quality passes.
+    (False, reason_string) if any check fails.
+    """
+    import math
+
+    atr_pctile = row.get("ATR_Pctile")
+    atr_50_mean = row.get("ATR_50_mean")
+
+    # pandas .get() on a Series returns the scalar; check for NaN explicitly.
+    if atr_pctile is None or (isinstance(atr_pctile, float) and math.isnan(atr_pctile)):
+        n_bars = len(daily_df)
+        return (
+            False,
+            f"ATR_Pctile=NaN — only {n_bars} bars available (need >= 50 for ATR rank)",
+        )
+
+    if atr_50_mean is None or (isinstance(atr_50_mean, float) and math.isnan(atr_50_mean)):
+        n_bars = len(daily_df)
+        return (
+            False,
+            f"ATR_50_mean=NaN — only {n_bars} bars available (need >= 50 for ATR baseline)",
+        )
+
     return True, ""
 
 
@@ -190,6 +336,7 @@ def score_ticker(
     intraday:     Optional[dict] = None,
     mtf_60m:      Optional[dict] = None,
     factor_weights: Optional[dict[str, float]] = None,
+    capital_fraction: float = 1.0,
     debug:        bool = False,
 ) -> Optional[TickerResult]:
     """
@@ -225,6 +372,17 @@ def score_ticker(
     if not ok:
         if debug:
             log.debug("%s: LIQUIDITY — %s", ticker, msg)
+        return None
+
+    # ── 1b. Data-quality gate (FIX 4) ────────────────────────────────────────
+    # Reject tickers with NaN ATR_Pctile or ATR_50_mean.  These arise when
+    # a ticker has fewer than 50 bars of history.  Without this gate,
+    # factor_volatility silently treats them as mid-range (fallback=50),
+    # which hides data-sparse tickers and biases the composite score.
+    ok, msg = passes_data_quality(row, daily_df)
+    if not ok:
+        if debug:
+            log.debug("%s: DATA_QUALITY — %s", ticker, msg)
         return None
 
     # ── 2. Direction ─────────────────────────────────────────────────────────
@@ -346,6 +504,7 @@ def score_ticker(
         rr=targets.rr,
         daily_df=daily_df,
         config=config,
+        capital_fraction=capital_fraction,
     )
     from .portfolio import _ticker_excess_kurtosis
     excess_kurt = _ticker_excess_kurtosis(daily_df, config)
