@@ -30,7 +30,7 @@ import pandas as pd
 import yfinance as yf
 
 from .config import IST, SystemConfig
-from utils.retry import retry_with_backoff
+from utils.retry import retry_with_backoff, YFINANCE_BREAKER, guarded_call
 
 log = logging.getLogger("sovereign.data")
 
@@ -41,6 +41,23 @@ FYERS_CONT_FLAG: str     = "1"
 FYERS_LOOKBACK_DAYS: int = 365
 YFINANCE_CHUNK_SIZE: int = 40
 YFINANCE_INTERVAL: str   = "1d"
+
+
+@retry_with_backoff(retries=4, base_delay=1.0, max_delay=30.0)
+def _yf_download_chunk(
+    symbols: list[str],
+    period: str,
+    interval: str,
+) -> pd.DataFrame:
+    """yfinance batch download with exponential-backoff retry."""
+    return yf.download(
+        symbols,
+        period=period,
+        interval=interval,
+        group_by="ticker",
+        progress=False,
+        auto_adjust=True,
+    )
 
 
 # ── Fyers session singleton ───────────────────────────────────────────────────
@@ -234,25 +251,18 @@ def fetch_daily_batch(
     # ── 2. yfinance fallback ──────────────────────────────────────────────────
     log.warning("📡 yfinance fallback: %d symbols (chunked)…", len(all_symbols))
 
-    # Wrap download in exponential backoff so transient 429 / network errors
-    # are retried automatically.  Max 4 retries, ceiling grows 1→2→4→8→30s
-    # with full jitter to spread concurrent retries across threads.
-    @retry_with_backoff(retries=4, base_delay=1.0, max_delay=30.0)
-    def _yf_download(symbols: list[str]) -> pd.DataFrame:
-        return yf.download(
-            symbols,
-            period=config.DAILY_PERIOD,
-            interval=YFINANCE_INTERVAL,
-            group_by="ticker",
-            progress=False,
-            auto_adjust=True,
-        )
-
     for i in range(0, len(all_symbols), YFINANCE_CHUNK_SIZE):
         chunk = all_symbols[i : i + YFINANCE_CHUNK_SIZE]
 
         try:
-            raw: pd.DataFrame = _yf_download(chunk)
+            raw: pd.DataFrame = guarded_call(
+                lambda: _yf_download_chunk(chunk, config.DAILY_PERIOD, YFINANCE_INTERVAL),
+                breaker=YFINANCE_BREAKER,
+                max_attempts=4,
+                base_delay=1.0,
+                max_delay=30.0,
+                label=f"yfinance chunk[{chunk[0]}]",
+            )
         except Exception:
             log.error(
                 "yfinance: download failed for chunk starting at %s.",

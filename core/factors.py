@@ -279,7 +279,6 @@ def factor_volatility(
     of the neutral 50-percentile, making the data problem visible in output
     rather than hiding it.
     """
-    import math
 
     atr    = float(row["ATR"])
     atr50m_raw = row.get("ATR_50_mean", None)
@@ -288,9 +287,9 @@ def factor_volatility(
     # Defensive NaN check — the gate should prevent this, but if called
     # directly (e.g. in unit tests without pre-filtering), return 0.0 so the
     # bad data produces a visibly low score rather than a neutral one.
-    if atr50m_raw is None or (isinstance(atr50m_raw, float) and math.isnan(atr50m_raw)):
+    if pd.isna(atr50m_raw):
         return 0.0
-    if atr_pct_raw is None or (isinstance(atr_pct_raw, float) and math.isnan(atr_pct_raw)):
+    if pd.isna(atr_pct_raw):
         return 0.0
 
     atr50m  = float(atr50m_raw)

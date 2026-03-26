@@ -139,3 +139,12 @@ def retry_with_backoff(
 
         return wrapper  # type: ignore[return-value]
     return decorator
+
+from core.retry import (  # noqa: F401 — re-export for unified import surface
+    CircuitBreaker,
+    CircuitBreakerOpen,
+    guarded_call,
+    FYERS_BREAKER,
+    YFINANCE_BREAKER,
+    TELEGRAM_BREAKER,
+)
