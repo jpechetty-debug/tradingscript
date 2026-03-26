@@ -91,44 +91,13 @@ def classify_regime(processed: dict[str, pd.DataFrame], breadth: float, tracker:
     return MarketRegime(regime, breadth, adx_med, atr_rat, conf, confirmed)
 
 
-def compute_rs(
-    stock: pd.Series,
-    bench: pd.Series,
-    lookback: int | None = None,
-    config=None,
-) -> float:
-    """
-    Log-return relative-strength of *stock* vs *bench* over *lookback* bars.
-
-    Parameters
-    ----------
-    stock:
-        Close price series for the individual ticker.
-    bench:
-        Close price series for the benchmark (e.g. Nifty50).
-    lookback:
-        Number of bars to look back.  **Prefer passing this explicitly.**
-        If omitted, ``config.RS_LOOKBACK`` is used when *config* is
-        supplied; otherwise the module-level CONFIG singleton is the
-        last resort.  Unit tests should always pass either *lookback*
-        or *config* directly so they can control the parameter without
-        patching the singleton.
-    config:
-        Optional ``SystemConfig`` instance.  Ignored when *lookback* is
-        provided.
-    """
-    if lookback is None:
-        if config is not None:
-            lookback = config.RS_LOOKBACK
-        else:
-            from .config import CONFIG  # last-resort singleton — avoid in tests
-            lookback = CONFIG.RS_LOOKBACK
-
-    m = stock.rename("s").to_frame().join(bench.rename("b"), how="inner").dropna()
-    if len(m) < lookback + 1:
-        return 0.0
-    s = np.log(m["s"].iloc[-1] / m["s"].iloc[-lookback - 1])
-    b = np.log(m["b"].iloc[-1] / m["b"].iloc[-lookback - 1])
+def compute_rs(stock: pd.Series, bench: pd.Series, lookback: int | None = None) -> float:
+    from .config import CONFIG
+    lb = lookback or CONFIG.RS_LOOKBACK
+    m  = stock.rename("s").to_frame().join(bench.rename("b"), how="inner").dropna()
+    if len(m) < lb + 1: return 0.0
+    s = np.log(m["s"].iloc[-1] / m["s"].iloc[-lb-1])
+    b = np.log(m["b"].iloc[-1] / m["b"].iloc[-lb-1])
     return round((s - b) * 100, 3)
 
 

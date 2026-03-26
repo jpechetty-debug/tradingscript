@@ -30,7 +30,6 @@ import pandas as pd
 import yfinance as yf
 
 from .config import IST, SystemConfig
-from utils.retry import retry_with_backoff
 
 log = logging.getLogger("sovereign.data")
 
@@ -234,25 +233,18 @@ def fetch_daily_batch(
     # ── 2. yfinance fallback ──────────────────────────────────────────────────
     log.warning("📡 yfinance fallback: %d symbols (chunked)…", len(all_symbols))
 
-    # Wrap download in exponential backoff so transient 429 / network errors
-    # are retried automatically.  Max 4 retries, ceiling grows 1→2→4→8→30s
-    # with full jitter to spread concurrent retries across threads.
-    @retry_with_backoff(retries=4, base_delay=1.0, max_delay=30.0)
-    def _yf_download(symbols: list[str]) -> pd.DataFrame:
-        return yf.download(
-            symbols,
-            period=config.DAILY_PERIOD,
-            interval=YFINANCE_INTERVAL,
-            group_by="ticker",
-            progress=False,
-            auto_adjust=True,
-        )
-
     for i in range(0, len(all_symbols), YFINANCE_CHUNK_SIZE):
         chunk = all_symbols[i : i + YFINANCE_CHUNK_SIZE]
 
         try:
-            raw: pd.DataFrame = _yf_download(chunk)
+            raw: pd.DataFrame = yf.download(
+                chunk,
+                period=config.DAILY_PERIOD,
+                interval=YFINANCE_INTERVAL,
+                group_by="ticker",
+                progress=False,
+                auto_adjust=True,
+            )
         except Exception:
             log.error(
                 "yfinance: download failed for chunk starting at %s.",

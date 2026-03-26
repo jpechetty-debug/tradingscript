@@ -61,23 +61,14 @@ def true_volume_profile(
     POC  — Price of Control (highest volume price level)
     VAL  — Value Area Low  (bottom of 70% volume zone)
     VAH  — Value Area High (top of 70% volume zone)
-
-    Implementation uses vectorised NumPy binning (np.searchsorted over the
-    entire window at once) instead of a Python for-loop, giving a 10–20×
-    speed-up across the universe.  Each bar's volume is distributed uniformly
-    across the bins that overlap [Low, High].
     """
     window = df.tail(lookback)
     if len(window) < 5:
         c = float(df["Close"].iloc[-1])
         return c, c * 0.99, c * 1.01
 
-    lows  = window["Low"].to_numpy(dtype=float)
-    highs = window["High"].to_numpy(dtype=float)
-    vols  = window["Volume"].to_numpy(dtype=float)
-
-    lo_p = float(lows.min())
-    hi_p = float(highs.max())
+    lo_p = float(window["Low"].min())
+    hi_p = float(window["High"].max())
     if hi_p <= lo_p:
         c = float(window["Close"].iloc[-1])
         return c, c * 0.99, c * 1.01
@@ -85,17 +76,17 @@ def true_volume_profile(
     levels   = np.linspace(lo_p, hi_p, bins + 1)
     vol_hist = np.zeros(bins)
 
-    # Vectorised: find the first and last bin touched by each bar's range.
-    li_arr = np.clip(np.searchsorted(levels, lows,  "left")  - 1, 0, bins - 1)
-    hi_arr = np.clip(np.searchsorted(levels, highs, "right"),     0, bins - 1)
-
-    # Only bars with positive volume and valid range contribute.
-    valid = (highs > lows) & (vols > 0)
-    spans = (hi_arr - li_arr + 1).astype(float)
-    spans[~valid] = 0.0
-
-    for i in np.where(valid)[0]:
-        vol_hist[li_arr[i] : hi_arr[i] + 1] += vols[i] / spans[i]
+    for _, row in window.iterrows():
+        blo  = float(row["Low"])
+        bhi  = float(row["High"])
+        bvol = float(row["Volume"])
+        if bhi <= blo or bvol <= 0:
+            continue
+        li = max(0, np.searchsorted(levels, blo, "left") - 1)
+        hi = min(bins - 1, np.searchsorted(levels, bhi, "right"))
+        span = hi - li + 1
+        if span > 0:
+            vol_hist[li : hi + 1] += bvol / span
 
     poc_idx = int(np.argmax(vol_hist))
     poc     = float((levels[poc_idx] + levels[poc_idx + 1]) / 2)
@@ -262,40 +253,11 @@ def factor_volatility(
     High score = ATR contracting relative to 50d mean (coiling for breakout).
     Bollinger Squeeze bonus: +0.15 if squeeze detected.
     Low score  = ATR expanding well above baseline.
-
-    Data contract (FIX 4)
-    ---------------------
-    This function assumes ``ATR_Pctile`` and ``ATR_50_mean`` are real,
-    finite numbers — NOT NaN.  The ``passes_data_quality()`` gate in
-    ``scorer.py`` must be called before reaching this function.
-
-    Why: the original code used ``row.get("ATR_Pctile", 50)`` as a fallback.
-    A fallback of 50 treats data-sparse tickers as "mid-range volatility",
-    silently bypassing the quality check and biasing composite scores for
-    recently listed or history-incomplete instruments.
-
-    If a NaN somehow escapes the gate (e.g. during direct unit-test calls),
-    the function falls back to a conservative penalty score of 0.0 instead
-    of the neutral 50-percentile, making the data problem visible in output
-    rather than hiding it.
     """
-    import math
-
     atr    = float(row["ATR"])
-    atr50m_raw = row.get("ATR_50_mean", None)
-    atr_pct_raw = row.get("ATR_Pctile", None)
-
-    # Defensive NaN check — the gate should prevent this, but if called
-    # directly (e.g. in unit tests without pre-filtering), return 0.0 so the
-    # bad data produces a visibly low score rather than a neutral one.
-    if atr50m_raw is None or (isinstance(atr50m_raw, float) and math.isnan(atr50m_raw)):
-        return 0.0
-    if atr_pct_raw is None or (isinstance(atr_pct_raw, float) and math.isnan(atr_pct_raw)):
-        return 0.0
-
-    atr50m  = float(atr50m_raw)
-    atr_pct = float(atr_pct_raw)
-    bbs     = bool(row.get("BB_Squeeze", False))
+    atr50m = float(row.get("ATR_50_mean", atr) or atr)
+    atr_pct = float(row.get("ATR_Pctile", 50) or 50)
+    bbs    = bool(row.get("BB_Squeeze", False))
 
     contract = (atr < vol_contract_ratio * atr50m) if atr50m > 0 else False
 
@@ -546,80 +508,52 @@ def calibrate_ic_weights(
     """
     Optimizes factor weights using Information Coefficient (Spearman)
     over a historical lookback window.
-
-    Direction-aware: the historical direction at each bar is inferred
-    from Supertrend (Super_Up) so that SHORT tickers contribute to IC
-    measurement with the correct factor polarity, rather than being
-    forced into LONG-only calibration which biases breakout weights.
-
-    For SHORT bars the signed forward return is negated before Spearman
-    correlation so that a factor score of 1.0 still means "good for the
-    actual direction taken" — preserving a consistent IC interpretation
-    across the mixed-direction universe.
     """
     from scipy.stats import spearmanr
     from .universe import TICKER_TO_SECTOR
-
-    # Build a direction lookup from the most-recent TickerResult so that
-    # tickers not in `results` (e.g. only-long universe) still degrade
-    # gracefully to "LONG".
-    result_direction: dict[str, str] = {
-        r.ticker.replace(".NS", ""): r.direction for r in results
-    }
-
+    
     factors_list = ["trend", "momentum", "volume", "volatility", "rs", "breakout", "quality"]
     daily_ics = {f: [] for f in factors_list}
-
+    
     tickers = [r.ticker for r in results]
-
-    # Sample every other bar for efficiency over the lookback window.
+    
+    # Sample daily for efficiency if lookback is large
     step = 2
     for offset in range(calib_offset + 1, calib_offset + lookback + 1, step):
         f_vals = {f: [] for f in factors_list}
-        rets: list[float] = []
-
+        rets = []
+        
         for ticker in tickers:
             df = processed.get(ticker)
             if df is None or len(df) < offset + fwd_bars + 5:
                 continue
-
+            
             idx = len(df) - offset
             row = df.iloc[idx - 1]
             close = float(row["Close"])
-
-            # ── Direction: infer from historical Supertrend if available,
-            #    else fall back to the ticker's most-recent live direction.
-            if "Super_Up" in df.columns:
-                super_up = bool(row.get("Super_Up", True))
-                ema20 = float(row.get("EMA_20", close))
-                direction = "LONG" if (super_up and close >= ema20) else "SHORT"
-            else:
-                base = ticker.replace(".NS", "")
-                direction = result_direction.get(base, "LONG")
-
-            # ── Signed forward return (positive = good for direction) ──────
+            
+            # Forward return
             fwd_close = float(df["Close"].iloc[idx + fwd_bars - 1])
-            raw_ret = (fwd_close - close) / close if close > 0 else 0.0
-            signed_ret = raw_ret if direction == "LONG" else -raw_ret
-            rets.append(signed_ret)
-
-            # ── Factor scores for the historical slice ────────────────────
-            hist_df = df.iloc[:idx]
+            rets.append((fwd_close - close) / close if close > 0 else 0)
+            
+            # Recalculate factors for this historical point
+            direction = "LONG" # Assume LONG for calibration context
+            
             f_vals["trend"].append(factor_trend(row, close, direction))
-            f_vals["momentum"].append(factor_momentum(row, hist_df, direction))
-            f_vals["volume"].append(factor_volume(row, hist_df, direction, close))
+            f_vals["momentum"].append(factor_momentum(row, df.iloc[:idx], direction))
+            f_vals["volume"].append(factor_volume(row, df.iloc[:idx], direction, close))
             f_vals["volatility"].append(factor_volatility(row))
             f_vals["rs"].append(factor_relative_strength(
-                ticker, hist_df, bench.iloc[:idx],
-                TICKER_TO_SECTOR.get(ticker, "Unknown"), sector_ranks,
-                direction, n_sectors,
+                ticker, df.iloc[:idx], bench.iloc[:idx], 
+                TICKER_TO_SECTOR.get(ticker, "Unknown"), sector_ranks, 
+                direction, n_sectors
             ))
-            f_vals["breakout"].append(factor_breakout(row, hist_df, close, direction))
-            f_vals["quality"].append(factor_quality(hist_df, row, close))
-
+            f_vals["breakout"].append(factor_breakout(row, df.iloc[:idx], close, direction))
+            f_vals["quality"].append(factor_quality(df.iloc[:idx], row, close))
+            
         if len(rets) < 10:
             continue
-
+            
         rets_arr = np.array(rets)
         for f in factors_list:
             arr = np.array(f_vals[f])
@@ -629,8 +563,8 @@ def calibrate_ic_weights(
             else:
                 daily_ics[f].append(0.0)
 
-    # ── ICIR: mean IC / std IC ────────────────────────────────────────────────
-    icir: dict[str, float] = {}
+    # Compute ICIR
+    icir = {}
     for f in factors_list:
         ics = np.array(daily_ics[f])
         if len(ics) < 5:
@@ -639,11 +573,11 @@ def calibrate_ic_weights(
             m, s = ics.mean(), ics.std()
             icir[f] = m / s if s > 1e-6 else 0.0
 
-    # ── Normalise positive ICIR to sum-to-one weights ─────────────────────────
+    # Weighted by positive ICIR
     pos_icir = {f: max(0.0, icir[f]) for f in factors_list}
     total = sum(pos_icir.values())
-
+    
     if total < 1e-6:
-        return {f: 1.0 / len(factors_list) for f in factors_list}
-
+        return {f: 1.0/len(factors_list) for f in factors_list}
+    
     return {f: pos_icir[f] / total for f in factors_list}
