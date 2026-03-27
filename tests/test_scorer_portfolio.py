@@ -132,6 +132,7 @@ def _regime(
     return MarketRegime(
         regime=rtype,
         breadth=0.65,
+        breadth_delta=0.0,
         adx_median=28.0,
         atr_ratio=1.1,
         confidence=0.80,

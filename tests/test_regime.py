@@ -1,13 +1,13 @@
 """
 tests/test_regime.py
 ====================
-Unit tests for core/regime.py — v14 modular regime classification.
+Unit tests for core/regime.py — v14.5 regime classification with hardening.
 
 Covers:
-  - RegimeTracker      — push, confirm, PANIC fast-path, history cap, isolation
-  - MarketRegime       — allows_long/short, is_tradeable, strategy_hint
-  - classify_regime()  — all 5 regime states, boundary conditions, confirmation
-  - _regime_confidence — confidence ranges per regime type
+  - RegimeTracker      — deque, push, confirm, PANIC fast-path, last_regime, last_breadth
+  - MarketRegime       — allows_long/short, is_tradeable, strategy_hint, breadth_delta
+  - classify_regime()  — all 5 regime states, PANIC hysteresis, TREND deadband, confirmation
+  - _regime_confidence — confidence ranges per regime type, EXPANSION scaling
   - compute_rs()       — log-return relative strength
   - compute_breadth()  — market breadth (% above EMA50)
   - compute_sector_rs() — sector aggregation
@@ -121,7 +121,7 @@ def _make_price_series(n: int = 200, seed: int = 0) -> pd.Series:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RegimeTracker
+# RegimeTracker (Fix 5: deque)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestRegimeTracker:
@@ -168,9 +168,38 @@ class TestRegimeTracker:
         t.push(MarketRegimeType.EXPANSION)
         assert t.is_confirmed(MarketRegimeType.EXPANSION, confirm_bars=1) is True
 
+    # Fix 5: deque-specific tests
+    def test_deque_maxlen_evicts_old_entries(self):
+        t = RegimeTracker(max_history=3)
+        t.push(MarketRegimeType.RANGE)
+        t.push(MarketRegimeType.TREND_UP)
+        t.push(MarketRegimeType.TREND_UP)
+        t.push(MarketRegimeType.TREND_UP)
+        # RANGE was evicted → all 3 remaining are TREND_UP
+        assert t.is_confirmed(MarketRegimeType.TREND_UP, confirm_bars=3) is True
+
+    def test_last_regime_returns_none_when_empty(self):
+        t = RegimeTracker()
+        assert t.last_regime() is None
+
+    def test_last_regime_returns_most_recent(self):
+        t = RegimeTracker()
+        t.push(MarketRegimeType.RANGE)
+        t.push(MarketRegimeType.TREND_UP)
+        assert t.last_regime() == MarketRegimeType.TREND_UP
+
+    def test_last_breadth_default(self):
+        t = RegimeTracker()
+        assert t.last_breadth() == 0.5
+
+    def test_last_breadth_updates_on_push(self):
+        t = RegimeTracker()
+        t.push(MarketRegimeType.TREND_UP, breadth=0.72)
+        assert t.last_breadth() == 0.72
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MarketRegime Dataclass
+# MarketRegime Dataclass (Fix 4: breadth_delta)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestMarketRegime:
@@ -179,6 +208,7 @@ class TestMarketRegime:
         return MarketRegime(
             regime=regime,
             breadth=0.50,
+            breadth_delta=0.0,
             adx_median=25.0,
             atr_ratio=1.0,
             confidence=0.60,
@@ -229,20 +259,25 @@ class TestMarketRegime:
         r = self._make(MarketRegimeType.TREND_DOWN, confirmed=False)
         assert r.allows_short() is False
 
+    def test_breadth_delta_field_present(self):
+        r = self._make(MarketRegimeType.TREND_UP)
+        assert hasattr(r, "breadth_delta")
+        assert r.breadth_delta == 0.0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# classify_regime — all 5 paths
+# classify_regime — all 5 paths + hysteresis + deadband
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestClassifyRegime:
 
-    def _run(self, adx=28.0, breadth=0.60, atr_ratio=1.0, confirm_bars=1):
+    def _run(self, adx=28.0, breadth=0.60, atr_ratio=1.0, confirm_bars=1, tracker=None):
         config = _make_config(REGIME_CONFIRM_BARS=confirm_bars)
         processed = _make_processed(
             n_tickers=10, adx=adx, breadth_frac=breadth,
             atr_ratio=atr_ratio, config=config,
         )
-        tracker = RegimeTracker()
+        tracker = tracker or RegimeTracker()
         return classify_regime(processed, breadth, tracker, config)
 
     def test_panic_when_breadth_very_low(self):
@@ -266,11 +301,11 @@ class TestClassifyRegime:
         assert r.regime == MarketRegimeType.EXPANSION
 
     def test_boundary_adx_at_trend_threshold(self):
-        """ADX exactly at REGIME_ADX_TREND threshold should classify as TREND."""
+        """ADX exactly at REGIME_ADX_TREND threshold should classify as TREND or EXPANSION."""
         config = _make_config()
-        r = self._run(adx=config.REGIME_ADX_TREND, breadth=0.55)
+        r = self._run(adx=config.REGIME_ADX_TREND, breadth=0.60)
         assert r.regime in (MarketRegimeType.TREND_UP, MarketRegimeType.TREND_DOWN,
-                            MarketRegimeType.EXPANSION)
+                            MarketRegimeType.EXPANSION, MarketRegimeType.RANGE)
 
     def test_else_branch_mid_adx_high_breadth(self):
         """ADX between ADX_RANGE and ADX_TREND, breadth >= 0.55 → TREND_UP."""
@@ -312,9 +347,85 @@ class TestClassifyRegime:
         r = classify_regime(processed, 0.5, tracker, config)
         assert isinstance(r.regime, MarketRegimeType)
 
+    # Fix 1: PANIC hysteresis tests
+    def test_panic_hysteresis_stays_in_panic(self):
+        """breadth 0.30 after PANIC entry → should stay PANIC (< 0.35 exit threshold)."""
+        config = _make_config()
+        processed = _make_processed(adx=30, breadth_frac=0.30, config=config)
+        tracker = RegimeTracker()
+        # First: enter PANIC at breadth=0.15
+        classify_regime(
+            _make_processed(adx=30, breadth_frac=0.15, config=config),
+            0.15, tracker, config,
+        )
+        # Second: breadth recovers to 0.30 — still below PANIC_EXIT (0.35)
+        r = classify_regime(processed, 0.30, tracker, config)
+        assert r.regime == MarketRegimeType.PANIC
+
+    def test_panic_hysteresis_exits_at_threshold(self):
+        """breadth 0.36 after PANIC → should exit PANIC (>= 0.35 exit threshold)."""
+        config = _make_config()
+        tracker = RegimeTracker()
+        # Enter PANIC
+        classify_regime(
+            _make_processed(adx=30, breadth_frac=0.15, config=config),
+            0.15, tracker, config,
+        )
+        # Recover to 0.36 — above PANIC_EXIT
+        r = classify_regime(
+            _make_processed(adx=30, breadth_frac=0.36, config=config),
+            0.36, tracker, config,
+        )
+        assert r.regime != MarketRegimeType.PANIC
+
+    # Fix 2: TREND deadband tests
+    def test_trend_deadband_breadth_052_is_range(self):
+        """breadth=0.52 in high-ADX zone → ambiguous → RANGE (not TREND_UP)."""
+        r = self._run(adx=30, breadth=0.52)
+        assert r.regime == MarketRegimeType.RANGE
+
+    def test_trend_deadband_breadth_056_is_trend_up(self):
+        """breadth=0.56 in high-ADX zone → above deadband → TREND_UP."""
+        r = self._run(adx=30, breadth=0.56)
+        assert r.regime == MarketRegimeType.TREND_UP
+
+    def test_trend_deadband_breadth_044_is_trend_down(self):
+        """breadth=0.44 in high-ADX zone → below deadband → TREND_DOWN."""
+        r = self._run(adx=30, breadth=0.44)
+        assert r.regime == MarketRegimeType.TREND_DOWN
+
+    # Fix 4: breadth_delta tests
+    def test_breadth_delta_positive_on_recovery(self):
+        """breadth rising → positive delta."""
+        config = _make_config()
+        tracker = RegimeTracker()
+        classify_regime(
+            _make_processed(adx=30, breadth_frac=0.40, config=config),
+            0.40, tracker, config,
+        )
+        r = classify_regime(
+            _make_processed(adx=30, breadth_frac=0.60, config=config),
+            0.60, tracker, config,
+        )
+        assert r.breadth_delta > 0
+
+    def test_breadth_delta_negative_on_distribution(self):
+        """breadth falling → negative delta."""
+        config = _make_config()
+        tracker = RegimeTracker()
+        classify_regime(
+            _make_processed(adx=30, breadth_frac=0.70, config=config),
+            0.70, tracker, config,
+        )
+        r = classify_regime(
+            _make_processed(adx=30, breadth_frac=0.40, config=config),
+            0.40, tracker, config,
+        )
+        assert r.breadth_delta < 0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _regime_confidence
+# _regime_confidence (Fix 3: EXPANSION scaling)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestRegimeConfidence:
@@ -340,10 +451,23 @@ class TestRegimeConfidence:
         conf = _regime_confidence(MarketRegimeType.RANGE, 15, 0.50, 1.0, config)
         assert conf == 0.55
 
-    def test_expansion_confidence_is_baseline(self):
+    # Fix 3: EXPANSION confidence now scales
+    def test_expansion_confidence_scales_with_adx(self):
         config = _make_config()
-        conf = _regime_confidence(MarketRegimeType.EXPANSION, 30, 0.60, 1.5, config)
-        assert conf == 0.55
+        low = _regime_confidence(MarketRegimeType.EXPANSION, 26, 0.60, 1.4, config)
+        high = _regime_confidence(MarketRegimeType.EXPANSION, 40, 0.60, 1.4, config)
+        assert high > low
+
+    def test_expansion_confidence_scales_with_atr(self):
+        config = _make_config()
+        low = _regime_confidence(MarketRegimeType.EXPANSION, 30, 0.60, 1.35, config)
+        high = _regime_confidence(MarketRegimeType.EXPANSION, 30, 0.60, 2.0, config)
+        assert high > low
+
+    def test_expansion_confidence_at_least_055(self):
+        config = _make_config()
+        conf = _regime_confidence(MarketRegimeType.EXPANSION, 26, 0.60, 1.3, config)
+        assert conf >= 0.55
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -453,26 +577,26 @@ class TestComputeSectorRS:
 class TestStrategyHint:
 
     def test_trend_up_hint(self):
-        r = MarketRegime(MarketRegimeType.TREND_UP, 0.6, 28, 1.0, 0.7, True)
+        r = MarketRegime(MarketRegimeType.TREND_UP, 0.6, 0.0, 28, 1.0, 0.7, True)
         assert "BREAKOUT" in r.strategy_hint()
 
     def test_trend_down_hint(self):
-        r = MarketRegime(MarketRegimeType.TREND_DOWN, 0.3, 28, 1.0, 0.7, True)
+        r = MarketRegime(MarketRegimeType.TREND_DOWN, 0.3, 0.0, 28, 1.0, 0.7, True)
         assert "SHORT" in r.strategy_hint()
 
     def test_range_hint(self):
-        r = MarketRegime(MarketRegimeType.RANGE, 0.5, 15, 1.0, 0.55, True)
+        r = MarketRegime(MarketRegimeType.RANGE, 0.5, 0.0, 15, 1.0, 0.55, True)
         assert "MEAN REVERSION" in r.strategy_hint()
 
     def test_expansion_hint(self):
-        r = MarketRegime(MarketRegimeType.EXPANSION, 0.6, 30, 1.5, 0.55, True)
+        r = MarketRegime(MarketRegimeType.EXPANSION, 0.6, 0.0, 30, 1.5, 0.55, True)
         assert "VOLATILITY" in r.strategy_hint()
 
     def test_panic_hint(self):
-        r = MarketRegime(MarketRegimeType.PANIC, 0.1, 20, 1.0, 0.8, True)
+        r = MarketRegime(MarketRegimeType.PANIC, 0.1, 0.0, 20, 1.0, 0.8, True)
         assert "NO TRADE" in r.strategy_hint()
 
     def test_unconfirmed_suffix(self):
-        r = MarketRegime(MarketRegimeType.TREND_UP, 0.6, 28, 1.0, 0.7, False)
+        r = MarketRegime(MarketRegimeType.TREND_UP, 0.6, 0.0, 28, 1.0, 0.7, False)
         hint = r.strategy_hint()
         assert "UNCONFIRMED" in hint

@@ -132,6 +132,9 @@ class SystemConfig:
     REGIME_ADX_RANGE:    int   = 18
     REGIME_ATR_EXPANSION: float = 1.3
     REGIME_BREADTH_PANIC: float = 0.25
+    REGIME_BREADTH_PANIC_EXIT: float = 0.35  # asymmetric hysteresis exit
+    REGIME_BREADTH_TREND_UP: float = 0.55    # breadth deadband upper
+    REGIME_BREADTH_TREND_DN: float = 0.45    # breadth deadband lower
     REGIME_CONFIRM_BARS:  int   = 2
 
     # ── EMA / structural filters ──────────────────────────────────────────────
