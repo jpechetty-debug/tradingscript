@@ -2,7 +2,6 @@
 .venv/
 __pycache__/
 *.log
-*.json
 *.jsonl
 *.csv
 *.xlsx
@@ -20,3 +19,7 @@ tmp/
 .vscode/
 .idea/
 .DS_Store
+
+# JSON: only ignore package/build artifacts, NOT runtime calibration files.
+# platt_calibration.json, trade_log.json, factor_weights.json MUST persist.
+package-lock.json
