@@ -37,7 +37,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from core.config import CONFIG, SystemConfig, IST
+from core.config import CONFIG, SystemConfig, IST, MarketRegimeType
 from core.data_provider import fetch_daily_batch
 from core.factors import DEFAULT_WEIGHTS, calibrate_ic_weights
 from core.indicators import add_indicators
@@ -48,6 +48,7 @@ from core.regime import (
     classify_regime,
     compute_breadth,
     compute_sector_rs,
+    compute_sector_concentration,
 )
 from core.scorer import TickerResult, score_ticker
 from core.universe import ALL_TICKERS, SECTORS, TICKER_TO_SECTOR, N_SECTORS
@@ -135,6 +136,9 @@ class ScanState:
     patch_calibrator: Optional[object] = None
     patch_alerter:    Optional[object] = None
 
+    # Fix 6: opening-range regime lock — set once per run_scan() call
+    regime_locked: bool = False
+
     # Per-scan cache — created fresh so different scan cycles never
     # share cached volume profiles or correlation matrices.
     cache: "ScanCache" = field(default_factory=lambda: ScanCache())  # ScanCache imported below
@@ -192,11 +196,35 @@ def _rank_sectors(sector_rs: dict[str, float]) -> dict[str, int]:
 # MAIN SCAN
 # ─────────────────────────────────────────────────────────────────────────────
 
+def passes_static_filters(df: pd.DataFrame, config: SystemConfig) -> bool:
+    """Check ADV and structural filters (EMA200)."""
+    if len(df) < 200: return False
+    
+    # ADV floor (Fix: use tail(20) for ADV20)
+    close = df['Close']
+    volume = df['Volume']
+    turnover = (close * volume).tail(20).mean()
+    
+    if turnover < config.ADV_TURNOVER_FLOOR:
+        return False
+    
+    # EMA200 filter
+    if config.USE_EMA200_FILTER:
+        ema200 = close.ewm(span=200, adjust=False).mean().iloc[-1]
+        if close.iloc[-1] < ema200:
+            return False
+            
+    return True
+
+
 def run_scan(
     config: SystemConfig = CONFIG,
     debug: bool = False,
     no_intraday: bool = False,
     patch: Optional[dict] = None,
+    regime_override: Optional[str] = None,
+    no_ema_filter: bool = False,
+    force_score: bool = False,
 ) -> tuple[list[TickerResult], list[TickerResult], Optional[MarketRegime]]:
     """
     Full scan pipeline. Returns (all_results, portfolio, regime).
@@ -277,33 +305,97 @@ def run_scan(
     bench_series = processed[bench_key]["Close"]
 
     # ── 2. Regime ─────────────────────────────────────────────────────────────
-    breadth   = compute_breadth(processed, config)
-    tracker   = RegimeTracker()
-    regime    = classify_regime(processed, breadth, tracker, config)
-    session   = config.session_from_time()
+    breadth = compute_breadth(processed, config)
+
+    # Fix 7: compute sector RS *before* classify_regime so concentration
+    # feeds into confidence scoring on the same bar it's measured.
+    sector_rs    = compute_sector_rs(processed, bench_series, config)
+    sector_ranks = _rank_sectors(sector_rs)
+
+    # Fix 6: lock regime changes during the opening noise window
+    state.regime_locked = config.is_regime_locked()
+    if state.regime_locked:
+        log.info("🔒 Regime lock active — opening noise window (%d min). "
+                 "Tracker will not update this bar.", config.REGIME_LOCK_MINUTES)
+
+    tracker = RegimeTracker()
+    regime  = classify_regime(
+        processed, breadth, tracker, config,
+        locked=state.regime_locked,     # Fix 6
+        sector_rs=sector_rs,            # Fix 7
+    )
+
+    if regime_override:
+        try:
+            o_type = MarketRegimeType(regime_override.upper())
+            log.warning("⚠️ REGIME OVERRIDE ACTIVE: %s (was %s)", o_type, regime.regime)
+            regime = MarketRegime(
+                regime=o_type,
+                breadth=regime.breadth,
+                breadth_delta=regime.breadth_delta,
+                adx_median=regime.adx_median,
+                atr_ratio=regime.atr_ratio,
+                confidence=1.0,  # Max confidence for override
+                confirmed=True,
+                sector_concentration=regime.sector_concentration,
+                regime_locked=False,
+            )
+        except ValueError:
+            log.error("Invalid override regime: %s — ignoring", regime_override)
+
+    session = config.session_from_time()
 
     _metrics.record_regime(regime)
-    log.info("📊 Breadth: %.0f%% above EMA-50  |  Regime: %s (%s)  |  Conf: %.2f  |  ADX: %.1f  |  ATR ratio: %.2f",
-             regime.breadth*100, regime.regime, "CONFIRMED" if regime.confirmed else f"{config.REGIME_CONFIRM_BARS} bar CONFIRM REQ",
-             regime.confidence, regime.adx_median, regime.atr_ratio)
+    log.info(
+        "📊 Breadth: %.0f%% (Δ%.2f)  |  Regime: %s (%s)  |  "
+        "Conf: %.2f  |  ADX: %.1f  |  ATR ratio: %.2f  |  "
+        "Sector conc: %.0f%%  |  %s",
+        regime.breadth * 100,
+        regime.breadth_delta,
+        regime.regime,
+        "CONFIRMED" if regime.confirmed else f"{config.REGIME_CONFIRM_BARS} bar CONFIRM REQ",
+        regime.confidence,
+        regime.adx_median,
+        regime.atr_ratio,
+        regime.sector_concentration * 100,
+        "LOCKED" if regime.regime_locked else "live",
+    )
 
     if not regime.is_tradeable():
         log.warning("PANIC regime — no new positions")
         return [], [], regime
 
-    # ── 3. Sector RS & ranks ──────────────────────────────────────────────────
-    sector_rs    = compute_sector_rs(processed, bench_series, config)
-    sector_ranks = _rank_sectors(sector_rs)
-
-    # ── 4. Score tickers (parallel) ───────────────────────────────────────────
+    # ── 4. Filtering & Scoring ────────────────────────────────────────────────
     all_results: list[TickerResult] = []
+    
+    # Temporary config override for filter toggle
+    effective_config = config
+    if no_ema_filter:
+        import copy
+        effective_config = copy.copy(config)
+        effective_config.USE_EMA200_FILTER = False
 
-    def _score_one(ticker: str) -> Optional[TickerResult]:
-        df = processed.get(ticker)
-        if df is None or df.empty:
-            return None
-        try:
-            return score_ticker(
+    _t0 = time.monotonic()
+    with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
+        futures = {}
+        for ticker, df in processed.items():
+            if ticker == config.BENCHMARK:
+                continue
+
+            # Liquidity & Structural filters
+            if not passes_static_filters(df, effective_config):
+                continue
+            
+            # Submit to thread pool for scoring
+            capital_f = 1.0
+            if state.patch_scaler:
+                try:
+                    capital_f = state.patch_scaler.capital_fraction(1_000_000, regime.regime)
+                except Exception:
+                    pass
+
+            futures[executor.submit(
+                score_ticker,
                 ticker=ticker,
                 daily_df=df,
                 bench=bench_series,
@@ -312,27 +404,24 @@ def run_scan(
                 session=session,
                 regime=regime,
                 config=config,
-                intraday={} if no_intraday else {},  # hook for live intraday data
-                mtf_60m={},
                 factor_weights=state.factor_weights,
-                capital_fraction=state.patch_scaler.capital_fraction(1_000_000, regime.regime) if state.patch_scaler else 1.0,
+                capital_fraction=capital_f,
                 debug=debug,
-            )
-        except Exception as e:
-            log.debug("score_ticker error for %s: %s", ticker, e)
-            return None
+                force_score=force_score,
+            )] = ticker
 
-    _t0 = time.monotonic()
-    with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
-        futures = {executor.submit(_score_one, t): t for t in ALL_TICKERS}
         for future in as_completed(futures):
-            result = future.result()
-            if result is not None:
-                all_results.append(result)
+            t = futures[future]
+            try:
+                result = future.result()
+                if result is not None:
+                    all_results.append(result)
+            except Exception as e:
+                log.error("score_ticker error for %s: %s", t, e, exc_info=True)
 
     _metrics.record_score(
         n_passed=len(all_results),
-        n_total=len(ALL_TICKERS),
+        n_total=len(processed) - 1,
         elapsed_s=time.monotonic() - _t0,
     )
     log.info("%d tickers passed all gates", len(all_results))
@@ -551,6 +640,9 @@ def main() -> None:
     parser.add_argument("--bt-step",       type=int, default=10,  metavar="DAYS", help="Backtest step between folds (default 10)")
     parser.add_argument("--bt-out",        type=str, default="backtest_results.csv", metavar="FILE", help="CSV output path")
     parser.add_argument("--bt-direction",  type=str, default="LONG", choices=["LONG","SHORT","BOTH"], help="Trade direction")
+    parser.add_argument("--regime-override", type=str, default=None, help="Force a specific regime (TREND_UP, RANGE, etc.)")
+    parser.add_argument("--no-ema-filter", action="store_true", help="Disable EMA200 structural filter for debugging")
+    parser.add_argument("--force-score", action="store_true", help="Force scoring of all tickers (bypass BULL/BEAR directional gates)")
     args = parser.parse_args()
 
     if args.version:
@@ -569,6 +661,9 @@ def main() -> None:
             debug=args.debug,
             no_intraday=args.no_intraday,
             patch=patch,
+            regime_override=args.regime_override,
+            no_ema_filter=args.no_ema_filter,
+            force_score=args.force_score,
         )
         if not args.no_telegram and portfolio and regime:
             _send_alert(portfolio, regime, config, patch=patch)

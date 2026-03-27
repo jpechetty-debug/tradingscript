@@ -11,14 +11,14 @@ scipy==1.13.1
 scikit-learn==1.5.0
  
 # ── Market data providers ─────────────────────────────────────────────────────
-yfinance==0.2.40
+yfinance==1.2.0
 fyers-apiv3==3.1.3          # Fyers API v3 — run fyers_setup.py daily for token refresh
  
 # ── Timezone handling ─────────────────────────────────────────────────────────
 pytz==2024.1
  
 # ── HTTP / Telegram alerts ────────────────────────────────────────────────────
-requests==2.32.3
+requests==2.31.0
  
 # ── Environment / secrets ─────────────────────────────────────────────────────
 python-dotenv==1.0.1

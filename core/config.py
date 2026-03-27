@@ -128,14 +128,18 @@ class SystemConfig:
     NEAR_52W_MAX_DIST_PCT: float = 8.0
     VOL_CONTRACT_RATIO:    float = 0.85
 
-    REGIME_ADX_TREND:    int   = 25
-    REGIME_ADX_RANGE:    int   = 18
-    REGIME_ATR_EXPANSION: float = 1.3
-    REGIME_BREADTH_PANIC: float = 0.25
-    REGIME_BREADTH_PANIC_EXIT: float = 0.35  # asymmetric hysteresis exit
-    REGIME_BREADTH_TREND_UP: float = 0.55    # breadth deadband upper
-    REGIME_BREADTH_TREND_DN: float = 0.45    # breadth deadband lower
-    REGIME_CONFIRM_BARS:  int   = 2
+    REGIME_ADX_TREND:          int   = 25
+    REGIME_ADX_RANGE:          int   = 18
+    REGIME_ATR_EXPANSION:      float = 1.3
+    REGIME_BREADTH_PANIC:      float = 0.25  # entry threshold
+    REGIME_BREADTH_PANIC_EXIT: float = 0.35  # Fix 1: asymmetric exit (higher than entry)
+    REGIME_CONFIRM_BARS:       int   = 2
+
+    # ── Opening-range regime lock (Fix 6) ─────────────────────────────────────
+    # Suppress regime *changes* for this many minutes after NSE open (09:15 IST)
+    # to avoid whipsaw reclassification during price-discovery noise.
+    MARKET_OPEN_TIME:    str = "09:15"
+    REGIME_LOCK_MINUTES: int = 20
 
     # ── EMA / structural filters ──────────────────────────────────────────────
     USE_EMA200_FILTER: bool  = True
@@ -220,6 +224,29 @@ class SystemConfig:
         if t < t1:  return "OPENING_RANGE"
         if t < t2:  return "MIDDAY_CHOP"
         return "CLOSING_TREND"
+
+    def is_regime_locked(self, now: datetime | None = None) -> bool:
+        """
+        Fix 6 — Return True during the opening noise window.
+
+        The first ``REGIME_LOCK_MINUTES`` minutes after ``MARKET_OPEN_TIME``
+        (IST) are structurally noisy: gap opens and price-discovery cause
+        breadth / ADX readings that do not represent the true session regime.
+        While the lock is active ``classify_regime`` skips ``tracker.push()``
+        so no noisy bar can reclassify the confirmed regime.
+
+        Outside market hours (pre-open / post-close) this always returns
+        ``False`` so off-hours backtests and unit tests are unaffected.
+        """
+        import datetime as dt
+        now = now or datetime.now(IST)
+        t = now.time() if hasattr(now, "time") else now
+        open_t = dt.datetime.strptime(self.MARKET_OPEN_TIME, "%H:%M").time()
+        lock_end = (
+            dt.datetime.combine(dt.date.today(), open_t)
+            + dt.timedelta(minutes=self.REGIME_LOCK_MINUTES)
+        ).time()
+        return open_t <= t < lock_end
 
 
 CONFIG = SystemConfig()

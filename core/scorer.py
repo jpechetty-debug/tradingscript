@@ -292,6 +292,7 @@ def score_ticker(
     factor_weights: Optional[dict[str, float]] = None,
     capital_fraction: float = 1.0,
     debug:        bool = False,
+    force_score:  bool = False,
 ) -> Optional[TickerResult]:
     """
     Full ticker evaluation pipeline. Returns None if the ticker does not
@@ -351,12 +352,14 @@ def score_ticker(
     is_bull = super_up and close > ema20 and above_vwap
     is_bear = (not super_up) and close < ema20 and (not above_vwap)
 
-    if not is_bull and not is_bear:
+    if force_score:
+        direction = "LONG"
+    elif not is_bull and not is_bear:
         if debug:
             log.debug("%s: NEUTRAL — no directional bias", ticker)
         return None
-
-    direction = "LONG" if is_bull else "SHORT"
+    else:
+        direction = "LONG" if is_bull else "SHORT"
 
     # ── 3. Regime gate ───────────────────────────────────────────────────────
     if direction == "LONG"  and not regime.allows_long():

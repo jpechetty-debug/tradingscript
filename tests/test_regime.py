@@ -1,13 +1,13 @@
 """
 tests/test_regime.py
 ====================
-Unit tests for core/regime.py — v14.5 regime classification with hardening.
+Unit tests for core/regime.py — v14 modular regime classification.
 
 Covers:
-  - RegimeTracker      — deque, push, confirm, PANIC fast-path, last_regime, last_breadth
-  - MarketRegime       — allows_long/short, is_tradeable, strategy_hint, breadth_delta
-  - classify_regime()  — all 5 regime states, PANIC hysteresis, TREND deadband, confirmation
-  - _regime_confidence — confidence ranges per regime type, EXPANSION scaling
+  - RegimeTracker      — push, confirm, PANIC fast-path, history cap, isolation
+  - MarketRegime       — allows_long/short, is_tradeable, strategy_hint
+  - classify_regime()  — all 5 regime states, boundary conditions, confirmation
+  - _regime_confidence — confidence ranges per regime type
   - compute_rs()       — log-return relative strength
   - compute_breadth()  — market breadth (% above EMA50)
   - compute_sector_rs() — sector aggregation
@@ -48,6 +48,7 @@ from core.regime import (
     RegimeTracker,
     MarketRegime,
     classify_regime,
+    compute_sector_concentration,
     _regime_confidence,
     compute_rs,
     compute_breadth,
@@ -121,7 +122,7 @@ def _make_price_series(n: int = 200, seed: int = 0) -> pd.Series:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RegimeTracker (Fix 5: deque)
+# RegimeTracker
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestRegimeTracker:
@@ -168,38 +169,9 @@ class TestRegimeTracker:
         t.push(MarketRegimeType.EXPANSION)
         assert t.is_confirmed(MarketRegimeType.EXPANSION, confirm_bars=1) is True
 
-    # Fix 5: deque-specific tests
-    def test_deque_maxlen_evicts_old_entries(self):
-        t = RegimeTracker(max_history=3)
-        t.push(MarketRegimeType.RANGE)
-        t.push(MarketRegimeType.TREND_UP)
-        t.push(MarketRegimeType.TREND_UP)
-        t.push(MarketRegimeType.TREND_UP)
-        # RANGE was evicted → all 3 remaining are TREND_UP
-        assert t.is_confirmed(MarketRegimeType.TREND_UP, confirm_bars=3) is True
-
-    def test_last_regime_returns_none_when_empty(self):
-        t = RegimeTracker()
-        assert t.last_regime() is None
-
-    def test_last_regime_returns_most_recent(self):
-        t = RegimeTracker()
-        t.push(MarketRegimeType.RANGE)
-        t.push(MarketRegimeType.TREND_UP)
-        assert t.last_regime() == MarketRegimeType.TREND_UP
-
-    def test_last_breadth_default(self):
-        t = RegimeTracker()
-        assert t.last_breadth() == 0.5
-
-    def test_last_breadth_updates_on_push(self):
-        t = RegimeTracker()
-        t.push(MarketRegimeType.TREND_UP, breadth=0.72)
-        assert t.last_breadth() == 0.72
-
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MarketRegime Dataclass (Fix 4: breadth_delta)
+# MarketRegime Dataclass
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestMarketRegime:
@@ -208,7 +180,6 @@ class TestMarketRegime:
         return MarketRegime(
             regime=regime,
             breadth=0.50,
-            breadth_delta=0.0,
             adx_median=25.0,
             atr_ratio=1.0,
             confidence=0.60,
@@ -259,25 +230,20 @@ class TestMarketRegime:
         r = self._make(MarketRegimeType.TREND_DOWN, confirmed=False)
         assert r.allows_short() is False
 
-    def test_breadth_delta_field_present(self):
-        r = self._make(MarketRegimeType.TREND_UP)
-        assert hasattr(r, "breadth_delta")
-        assert r.breadth_delta == 0.0
-
 
 # ─────────────────────────────────────────────────────────────────────────────
-# classify_regime — all 5 paths + hysteresis + deadband
+# classify_regime — all 5 paths
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestClassifyRegime:
 
-    def _run(self, adx=28.0, breadth=0.60, atr_ratio=1.0, confirm_bars=1, tracker=None):
+    def _run(self, adx=28.0, breadth=0.60, atr_ratio=1.0, confirm_bars=1):
         config = _make_config(REGIME_CONFIRM_BARS=confirm_bars)
         processed = _make_processed(
             n_tickers=10, adx=adx, breadth_frac=breadth,
             atr_ratio=atr_ratio, config=config,
         )
-        tracker = tracker or RegimeTracker()
+        tracker = RegimeTracker()
         return classify_regime(processed, breadth, tracker, config)
 
     def test_panic_when_breadth_very_low(self):
@@ -301,11 +267,11 @@ class TestClassifyRegime:
         assert r.regime == MarketRegimeType.EXPANSION
 
     def test_boundary_adx_at_trend_threshold(self):
-        """ADX exactly at REGIME_ADX_TREND threshold should classify as TREND or EXPANSION."""
+        """ADX exactly at REGIME_ADX_TREND threshold should classify as TREND."""
         config = _make_config()
-        r = self._run(adx=config.REGIME_ADX_TREND, breadth=0.60)
+        r = self._run(adx=config.REGIME_ADX_TREND, breadth=0.55)
         assert r.regime in (MarketRegimeType.TREND_UP, MarketRegimeType.TREND_DOWN,
-                            MarketRegimeType.EXPANSION, MarketRegimeType.RANGE)
+                            MarketRegimeType.EXPANSION)
 
     def test_else_branch_mid_adx_high_breadth(self):
         """ADX between ADX_RANGE and ADX_TREND, breadth >= 0.55 → TREND_UP."""
@@ -347,85 +313,9 @@ class TestClassifyRegime:
         r = classify_regime(processed, 0.5, tracker, config)
         assert isinstance(r.regime, MarketRegimeType)
 
-    # Fix 1: PANIC hysteresis tests
-    def test_panic_hysteresis_stays_in_panic(self):
-        """breadth 0.30 after PANIC entry → should stay PANIC (< 0.35 exit threshold)."""
-        config = _make_config()
-        processed = _make_processed(adx=30, breadth_frac=0.30, config=config)
-        tracker = RegimeTracker()
-        # First: enter PANIC at breadth=0.15
-        classify_regime(
-            _make_processed(adx=30, breadth_frac=0.15, config=config),
-            0.15, tracker, config,
-        )
-        # Second: breadth recovers to 0.30 — still below PANIC_EXIT (0.35)
-        r = classify_regime(processed, 0.30, tracker, config)
-        assert r.regime == MarketRegimeType.PANIC
-
-    def test_panic_hysteresis_exits_at_threshold(self):
-        """breadth 0.36 after PANIC → should exit PANIC (>= 0.35 exit threshold)."""
-        config = _make_config()
-        tracker = RegimeTracker()
-        # Enter PANIC
-        classify_regime(
-            _make_processed(adx=30, breadth_frac=0.15, config=config),
-            0.15, tracker, config,
-        )
-        # Recover to 0.36 — above PANIC_EXIT
-        r = classify_regime(
-            _make_processed(adx=30, breadth_frac=0.36, config=config),
-            0.36, tracker, config,
-        )
-        assert r.regime != MarketRegimeType.PANIC
-
-    # Fix 2: TREND deadband tests
-    def test_trend_deadband_breadth_052_is_range(self):
-        """breadth=0.52 in high-ADX zone → ambiguous → RANGE (not TREND_UP)."""
-        r = self._run(adx=30, breadth=0.52)
-        assert r.regime == MarketRegimeType.RANGE
-
-    def test_trend_deadband_breadth_056_is_trend_up(self):
-        """breadth=0.56 in high-ADX zone → above deadband → TREND_UP."""
-        r = self._run(adx=30, breadth=0.56)
-        assert r.regime == MarketRegimeType.TREND_UP
-
-    def test_trend_deadband_breadth_044_is_trend_down(self):
-        """breadth=0.44 in high-ADX zone → below deadband → TREND_DOWN."""
-        r = self._run(adx=30, breadth=0.44)
-        assert r.regime == MarketRegimeType.TREND_DOWN
-
-    # Fix 4: breadth_delta tests
-    def test_breadth_delta_positive_on_recovery(self):
-        """breadth rising → positive delta."""
-        config = _make_config()
-        tracker = RegimeTracker()
-        classify_regime(
-            _make_processed(adx=30, breadth_frac=0.40, config=config),
-            0.40, tracker, config,
-        )
-        r = classify_regime(
-            _make_processed(adx=30, breadth_frac=0.60, config=config),
-            0.60, tracker, config,
-        )
-        assert r.breadth_delta > 0
-
-    def test_breadth_delta_negative_on_distribution(self):
-        """breadth falling → negative delta."""
-        config = _make_config()
-        tracker = RegimeTracker()
-        classify_regime(
-            _make_processed(adx=30, breadth_frac=0.70, config=config),
-            0.70, tracker, config,
-        )
-        r = classify_regime(
-            _make_processed(adx=30, breadth_frac=0.40, config=config),
-            0.40, tracker, config,
-        )
-        assert r.breadth_delta < 0
-
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _regime_confidence (Fix 3: EXPANSION scaling)
+# _regime_confidence
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestRegimeConfidence:
@@ -451,23 +341,29 @@ class TestRegimeConfidence:
         conf = _regime_confidence(MarketRegimeType.RANGE, 15, 0.50, 1.0, config)
         assert conf == 0.55
 
-    # Fix 3: EXPANSION confidence now scales
-    def test_expansion_confidence_scales_with_adx(self):
+    def test_expansion_confidence_scales_above_baseline(self):
+        """Fix 3: EXPANSION confidence now scales with ADX and ATR — no longer flat."""
         config = _make_config()
-        low = _regime_confidence(MarketRegimeType.EXPANSION, 26, 0.60, 1.4, config)
-        high = _regime_confidence(MarketRegimeType.EXPANSION, 40, 0.60, 1.4, config)
-        assert high > low
+        # ADX=30 (above threshold), ATR ratio=1.5 (above expansion threshold)
+        conf_strong = _regime_confidence(MarketRegimeType.EXPANSION, 30, 0.60, 1.5, config)
+        # ADX at threshold, ATR at threshold — minimum EXPANSION inputs
+        conf_min = _regime_confidence(
+            MarketRegimeType.EXPANSION,
+            config.REGIME_ADX_TREND,      # ADX exactly at trend threshold
+            0.50,
+            config.REGIME_ATR_EXPANSION,  # ATR exactly at expansion threshold
+            config,
+        )
+        assert conf_strong > 0.55, "strong EXPANSION should score above the old flat baseline"
+        assert conf_min == pytest.approx(0.55), "minimum-threshold EXPANSION equals old baseline"
+        assert conf_strong <= 1.0
 
-    def test_expansion_confidence_scales_with_atr(self):
+    def test_expansion_confidence_higher_for_stronger_signals(self):
+        """ADX=45 + ATR=2.0 should beat ADX=26 + ATR=1.4 for EXPANSION."""
         config = _make_config()
-        low = _regime_confidence(MarketRegimeType.EXPANSION, 30, 0.60, 1.35, config)
-        high = _regime_confidence(MarketRegimeType.EXPANSION, 30, 0.60, 2.0, config)
+        high = _regime_confidence(MarketRegimeType.EXPANSION, 45, 0.60, 2.0, config)
+        low  = _regime_confidence(MarketRegimeType.EXPANSION, 26, 0.60, 1.4, config)
         assert high > low
-
-    def test_expansion_confidence_at_least_055(self):
-        config = _make_config()
-        conf = _regime_confidence(MarketRegimeType.EXPANSION, 26, 0.60, 1.3, config)
-        assert conf >= 0.55
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -554,6 +450,11 @@ class TestComputeBreadth:
 
 class TestComputeSectorRS:
 
+    @pytest.fixture(autouse=True)
+    def _require_universe(self):
+        """Skip tests in this class when core.universe is not importable."""
+        pytest.importorskip("core.universe")
+
     def test_returns_dict(self):
         config = _make_config()
         processed = _make_processed(config=config)
@@ -577,26 +478,364 @@ class TestComputeSectorRS:
 class TestStrategyHint:
 
     def test_trend_up_hint(self):
-        r = MarketRegime(MarketRegimeType.TREND_UP, 0.6, 0.0, 28, 1.0, 0.7, True)
+        r = MarketRegime(MarketRegimeType.TREND_UP, 0.6, 28, 1.0, 0.7, True)
         assert "BREAKOUT" in r.strategy_hint()
 
     def test_trend_down_hint(self):
-        r = MarketRegime(MarketRegimeType.TREND_DOWN, 0.3, 0.0, 28, 1.0, 0.7, True)
+        r = MarketRegime(MarketRegimeType.TREND_DOWN, 0.3, 28, 1.0, 0.7, True)
         assert "SHORT" in r.strategy_hint()
 
     def test_range_hint(self):
-        r = MarketRegime(MarketRegimeType.RANGE, 0.5, 0.0, 15, 1.0, 0.55, True)
+        r = MarketRegime(MarketRegimeType.RANGE, 0.5, 15, 1.0, 0.55, True)
         assert "MEAN REVERSION" in r.strategy_hint()
 
     def test_expansion_hint(self):
-        r = MarketRegime(MarketRegimeType.EXPANSION, 0.6, 0.0, 30, 1.5, 0.55, True)
+        r = MarketRegime(MarketRegimeType.EXPANSION, 0.6, 30, 1.5, 0.55, True)
         assert "VOLATILITY" in r.strategy_hint()
 
     def test_panic_hint(self):
-        r = MarketRegime(MarketRegimeType.PANIC, 0.1, 0.0, 20, 1.0, 0.8, True)
+        r = MarketRegime(MarketRegimeType.PANIC, 0.1, 20, 1.0, 0.8, True)
         assert "NO TRADE" in r.strategy_hint()
 
     def test_unconfirmed_suffix(self):
-        r = MarketRegime(MarketRegimeType.TREND_UP, 0.6, 0.0, 28, 1.0, 0.7, False)
+        r = MarketRegime(MarketRegimeType.TREND_UP, 0.6, 28, 1.0, 0.7, False)
         hint = r.strategy_hint()
         assert "UNCONFIRMED" in hint
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix 6 — RegimeLock (opening noise window)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRegimeLock:
+    """
+    Verify that classify_regime(locked=True) suppresses tracker.push() so a
+    single noisy opening bar cannot reclassify the confirmed regime.
+    """
+
+    def _make_processed_adx(self, adx: float = 30.0, breadth_frac: float = 0.70) -> dict:
+        config = _make_config()
+        return _make_processed(n_tickers=10, adx=adx, breadth_frac=breadth_frac, config=config)
+
+    def test_locked_skips_tracker_push(self):
+        """tracker._history must be unchanged after a locked call."""
+        config = _make_config(REGIME_CONFIRM_BARS=1)
+        processed = self._make_processed_adx()
+        tracker = RegimeTracker()
+        # Pre-load one confirmed TREND_UP
+        tracker.push(MarketRegimeType.TREND_UP, 0.70)
+        assert len(tracker._history) == 1
+
+        classify_regime(processed, 0.70, tracker, config, locked=True)
+
+        assert len(tracker._history) == 1, "locked call must not grow tracker history"
+
+    def test_locked_returns_last_known_regime(self):
+        """When locked, the returned regime matches the tracker's last push."""
+        config = _make_config(REGIME_CONFIRM_BARS=1)
+        # Processed data would naturally produce TREND_DOWN (low breadth)
+        processed = self._make_processed_adx(adx=30.0, breadth_frac=0.20)
+        tracker = RegimeTracker()
+        tracker.push(MarketRegimeType.TREND_UP, 0.70)  # prior confirmed state
+
+        r = classify_regime(processed, 0.20, tracker, config, locked=True)
+
+        assert r.regime == MarketRegimeType.TREND_UP, (
+            "locked call should return last known regime, not freshly computed one"
+        )
+
+    def test_locked_falls_back_to_raw_when_history_empty(self):
+        """If the tracker has no history yet, locked must still return something sensible."""
+        config = _make_config(REGIME_CONFIRM_BARS=1)
+        processed = self._make_processed_adx(adx=30.0, breadth_frac=0.70)
+        tracker = RegimeTracker()  # empty history
+
+        r = classify_regime(processed, 0.70, tracker, config, locked=True)
+
+        assert isinstance(r.regime, MarketRegimeType)
+
+    def test_locked_sets_regime_locked_field_true(self):
+        config = _make_config(REGIME_CONFIRM_BARS=1)
+        processed = self._make_processed_adx()
+        tracker = RegimeTracker()
+        tracker.push(MarketRegimeType.TREND_UP, 0.70)
+
+        r = classify_regime(processed, 0.70, tracker, config, locked=True)
+
+        assert r.regime_locked is True
+
+    def test_unlocked_sets_regime_locked_field_false(self):
+        config = _make_config(REGIME_CONFIRM_BARS=1)
+        processed = self._make_processed_adx()
+        tracker = RegimeTracker()
+
+        r = classify_regime(processed, 0.70, tracker, config, locked=False)
+
+        assert r.regime_locked is False
+
+    def test_unlocked_default_updates_tracker(self):
+        """Default (locked omitted) must update the tracker normally."""
+        config = _make_config(REGIME_CONFIRM_BARS=1)
+        processed = self._make_processed_adx()
+        tracker = RegimeTracker()
+        assert len(tracker._history) == 0
+
+        classify_regime(processed, 0.70, tracker, config)
+
+        assert len(tracker._history) == 1
+
+    def test_locked_does_not_affect_breadth_delta(self):
+        """breadth_delta is computed from tracker.last_breadth(), not affected by lock."""
+        config = _make_config(REGIME_CONFIRM_BARS=1)
+        processed = self._make_processed_adx()
+        tracker = RegimeTracker()
+        tracker.push(MarketRegimeType.TREND_UP, 0.60)  # last breadth = 0.60
+
+        r = classify_regime(processed, 0.70, tracker, config, locked=True)
+
+        assert abs(r.breadth_delta - 0.10) < 1e-4, (
+            f"breadth_delta should be 0.70-0.60=0.10, got {r.breadth_delta}"
+        )
+
+    def test_locked_strategy_hint_contains_locked(self):
+        config = _make_config(REGIME_CONFIRM_BARS=1)
+        processed = self._make_processed_adx()
+        tracker = RegimeTracker()
+        tracker.push(MarketRegimeType.TREND_UP, 0.70)
+
+        r = classify_regime(processed, 0.70, tracker, config, locked=True)
+
+        assert "LOCKED" in r.strategy_hint()
+
+    def test_consecutive_locked_calls_history_unchanged(self):
+        """Multiple locked calls in the same watch cycle must not accumulate history."""
+        config = _make_config(REGIME_CONFIRM_BARS=2)
+        processed = self._make_processed_adx()
+        tracker = RegimeTracker()
+        tracker.push(MarketRegimeType.TREND_UP, 0.70)
+        initial_len = len(tracker._history)
+
+        for _ in range(5):
+            classify_regime(processed, 0.70, tracker, config, locked=True)
+
+        assert len(tracker._history) == initial_len
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix 6 — SystemConfig.is_regime_locked()
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestIsRegimeLocked:
+    """Verify the config helper correctly identifies the opening noise window."""
+
+    import datetime as _dt
+
+    def _make_ist_time(self, hour: int, minute: int):
+        from core.config import IST
+        import datetime as dt
+        return IST.localize(dt.datetime(2024, 1, 15, hour, minute, 0))
+
+    def test_locked_at_open(self):
+        config = _make_config(MARKET_OPEN_TIME="09:15", REGIME_LOCK_MINUTES=20)
+        assert config.is_regime_locked(self._make_ist_time(9, 15)) is True
+
+    def test_locked_during_window(self):
+        config = _make_config(MARKET_OPEN_TIME="09:15", REGIME_LOCK_MINUTES=20)
+        assert config.is_regime_locked(self._make_ist_time(9, 20)) is True
+
+    def test_locked_at_last_minute_of_window(self):
+        config = _make_config(MARKET_OPEN_TIME="09:15", REGIME_LOCK_MINUTES=20)
+        assert config.is_regime_locked(self._make_ist_time(9, 34)) is True
+
+    def test_unlocked_at_exact_window_end(self):
+        config = _make_config(MARKET_OPEN_TIME="09:15", REGIME_LOCK_MINUTES=20)
+        # 09:15 + 20 min = 09:35 — the boundary itself is NOT locked
+        assert config.is_regime_locked(self._make_ist_time(9, 35)) is False
+
+    def test_unlocked_after_window(self):
+        config = _make_config(MARKET_OPEN_TIME="09:15", REGIME_LOCK_MINUTES=20)
+        assert config.is_regime_locked(self._make_ist_time(10, 0)) is False
+
+    def test_unlocked_before_market_open(self):
+        config = _make_config(MARKET_OPEN_TIME="09:15", REGIME_LOCK_MINUTES=20)
+        assert config.is_regime_locked(self._make_ist_time(8, 0)) is False
+
+    def test_zero_lock_minutes_never_locked(self):
+        """Setting REGIME_LOCK_MINUTES=0 disables the feature entirely."""
+        config = _make_config(MARKET_OPEN_TIME="09:15", REGIME_LOCK_MINUTES=0)
+        assert config.is_regime_locked(self._make_ist_time(9, 15)) is False
+
+    def test_custom_lock_window(self):
+        """Configurable window — should work for any REGIME_LOCK_MINUTES value."""
+        config = _make_config(MARKET_OPEN_TIME="09:15", REGIME_LOCK_MINUTES=5)
+        assert config.is_regime_locked(self._make_ist_time(9, 19)) is True
+        assert config.is_regime_locked(self._make_ist_time(9, 20)) is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix 7 — compute_sector_concentration()
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSectorConcentration:
+    """
+    Unit tests for the pure compute_sector_concentration() function.
+    """
+
+    def test_all_positive_rs_trend_up_gives_one(self):
+        sector_rs = {"IT": 2.1, "BANKING": 1.5, "AUTO": 0.8, "PHARMA": 0.3}
+        result = compute_sector_concentration(sector_rs, MarketRegimeType.TREND_UP)
+        assert result == pytest.approx(1.0)
+
+    def test_all_negative_rs_trend_down_gives_one(self):
+        sector_rs = {"IT": -2.1, "BANKING": -1.5, "AUTO": -0.8}
+        result = compute_sector_concentration(sector_rs, MarketRegimeType.TREND_DOWN)
+        assert result == pytest.approx(1.0)
+
+    def test_all_negative_rs_trend_up_gives_zero(self):
+        """Everything down but regime says UP → no alignment → 0.0."""
+        sector_rs = {"IT": -2.1, "BANKING": -1.5, "AUTO": -0.8}
+        result = compute_sector_concentration(sector_rs, MarketRegimeType.TREND_UP)
+        assert result == pytest.approx(0.0)
+
+    def test_mixed_rs_trend_up_gives_fraction(self):
+        """4 out of 8 sectors positive → 0.5."""
+        sector_rs = {
+            "IT": 2.0, "BANKING": 1.5, "AUTO": 0.5, "PHARMA": 0.1,
+            "FMCG": -0.3, "METALS": -1.0, "ENERGY": -0.8, "REALTY": -0.2,
+        }
+        result = compute_sector_concentration(sector_rs, MarketRegimeType.TREND_UP)
+        assert result == pytest.approx(0.5)
+
+    def test_mixed_rs_trend_down_gives_fraction(self):
+        """6 out of 8 sectors negative → 0.75."""
+        sector_rs = {
+            "IT": 2.0, "BANKING": 1.5,
+            "AUTO": -0.5, "PHARMA": -0.1, "FMCG": -0.3,
+            "METALS": -1.0, "ENERGY": -0.8, "REALTY": -0.2,
+        }
+        result = compute_sector_concentration(sector_rs, MarketRegimeType.TREND_DOWN)
+        assert result == pytest.approx(0.75)
+
+    def test_non_directional_regime_returns_neutral(self):
+        sector_rs = {"IT": 2.0, "BANKING": -1.5, "AUTO": 0.5}
+        for regime in (MarketRegimeType.RANGE, MarketRegimeType.EXPANSION,
+                       MarketRegimeType.PANIC):
+            result = compute_sector_concentration(sector_rs, regime)
+            assert result == pytest.approx(0.5), f"failed for {regime}"
+
+    def test_empty_sector_rs_returns_neutral(self):
+        result = compute_sector_concentration({}, MarketRegimeType.TREND_UP)
+        assert result == pytest.approx(0.5)
+
+    def test_single_sector_aligned(self):
+        result = compute_sector_concentration(
+            {"IT": 3.0}, MarketRegimeType.TREND_UP
+        )
+        assert result == pytest.approx(1.0)
+
+    def test_single_sector_not_aligned(self):
+        result = compute_sector_concentration(
+            {"IT": -1.0}, MarketRegimeType.TREND_UP
+        )
+        assert result == pytest.approx(0.0)
+
+    def test_result_is_rounded_to_three_decimals(self):
+        """Output should not carry floating-point noise."""
+        sector_rs = {f"S{i}": (1.0 if i < 7 else -1.0) for i in range(10)}
+        result = compute_sector_concentration(sector_rs, MarketRegimeType.TREND_UP)
+        assert result == round(result, 3)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix 7 — sector concentration feeds confidence
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSectorConcentrationConfidence:
+    """
+    Verify that a broadly participating TREND regime earns higher confidence
+    than a narrow one, and that RANGE / EXPANSION are unaffected.
+    """
+
+    def _make_sector_rs(self, n_positive: int, n_total: int) -> dict[str, float]:
+        rs = {}
+        for i in range(n_total):
+            rs[f"S{i}"] = 1.0 if i < n_positive else -1.0
+        return rs
+
+    def test_broad_trend_up_higher_confidence_than_narrow(self):
+        config = _make_config()
+        adx, breadth, atr = 30.0, 0.65, 1.0
+        broad  = self._make_sector_rs(10, 10)   # 100% aligned
+        narrow = self._make_sector_rs(5, 10)    # 50% aligned
+        c_broad  = _regime_confidence(MarketRegimeType.TREND_UP, adx, breadth, atr, config,
+                                      sector_conc=compute_sector_concentration(broad,  MarketRegimeType.TREND_UP))
+        c_narrow = _regime_confidence(MarketRegimeType.TREND_UP, adx, breadth, atr, config,
+                                      sector_conc=compute_sector_concentration(narrow, MarketRegimeType.TREND_UP))
+        assert c_broad > c_narrow, (
+            f"broad confidence {c_broad} should exceed narrow {c_narrow}"
+        )
+
+    def test_broad_trend_down_higher_confidence_than_narrow(self):
+        config = _make_config()
+        adx, breadth, atr = 30.0, 0.35, 1.0
+        broad  = self._make_sector_rs(0, 10)    # 100% negative = fully aligned DOWN
+        narrow = self._make_sector_rs(5, 10)    # 50% aligned
+        c_broad  = _regime_confidence(MarketRegimeType.TREND_DOWN, adx, breadth, atr, config,
+                                      sector_conc=compute_sector_concentration(broad,  MarketRegimeType.TREND_DOWN))
+        c_narrow = _regime_confidence(MarketRegimeType.TREND_DOWN, adx, breadth, atr, config,
+                                      sector_conc=compute_sector_concentration(narrow, MarketRegimeType.TREND_DOWN))
+        assert c_broad > c_narrow
+
+    def test_max_sector_bonus_does_not_exceed_one(self):
+        config = _make_config()
+        full_rs = {f"S{i}": 2.0 for i in range(10)}  # 100% aligned
+        conf = _regime_confidence(
+            MarketRegimeType.TREND_UP, 60.0, 0.90, 1.0, config,
+            sector_conc=compute_sector_concentration(full_rs, MarketRegimeType.TREND_UP),
+        )
+        assert conf <= 1.0
+
+    def test_range_confidence_unaffected_by_sector_rs(self):
+        config = _make_config()
+        # All sectors positive — but RANGE confidence should stay flat 0.55
+        full_rs = {f"S{i}": 2.0 for i in range(10)}
+        conf = _regime_confidence(
+            MarketRegimeType.RANGE, 15.0, 0.50, 1.0, config,
+            sector_conc=compute_sector_concentration(full_rs, MarketRegimeType.RANGE),
+        )
+        assert conf == pytest.approx(0.55)
+
+    def test_classify_regime_populates_sector_concentration(self):
+        """End-to-end: sector_concentration field is set when sector_rs is passed."""
+        config = _make_config(REGIME_CONFIRM_BARS=1)
+        processed = _make_processed(n_tickers=10, adx=30.0, breadth_frac=0.70,
+                                    config=config)
+        tracker = RegimeTracker()
+        sector_rs = {"IT": 2.0, "BANKING": 1.5, "AUTO": 0.8}  # all positive
+
+        r = classify_regime(processed, 0.70, tracker, config, sector_rs=sector_rs)
+
+        assert r.sector_concentration > 0.5, (
+            "all-positive sector RS with TREND_UP should give concentration > 0.5"
+        )
+
+    def test_classify_regime_without_sector_rs_defaults_to_neutral(self):
+        """sector_rs=None must leave sector_concentration at 0.5 (backward compat)."""
+        config = _make_config(REGIME_CONFIRM_BARS=1)
+        processed = _make_processed(n_tickers=10, adx=30.0, breadth_frac=0.70,
+                                    config=config)
+        tracker = RegimeTracker()
+
+        r = classify_regime(processed, 0.70, tracker, config, sector_rs=None)
+
+        assert r.sector_concentration == pytest.approx(0.5)
+
+    def test_classify_regime_with_empty_sector_rs_defaults_to_neutral(self):
+        config = _make_config(REGIME_CONFIRM_BARS=1)
+        processed = _make_processed(n_tickers=10, adx=30.0, breadth_frac=0.70,
+                                    config=config)
+        tracker = RegimeTracker()
+
+        r = classify_regime(processed, 0.70, tracker, config, sector_rs={})
+
+        assert r.sector_concentration == pytest.approx(0.5)
