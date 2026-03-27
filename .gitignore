@@ -21,5 +21,18 @@ tmp/
 .DS_Store
 
 # JSON: only ignore package/build artifacts, NOT runtime calibration files.
-# platt_calibration.json, trade_log.json, factor_weights.json MUST persist.
+# platt_calibration.json and factor_weights.json MUST persist.
+# trade_log.json is now local-only.
 package-lock.json
+trade_log.json
+
+# Local Test/Utility Scripts
+patch.py
+test_alert.py
+test_icir.py
+test_telegram.py
+temp_check/
+
+# Temporary Output
+*.out
+scan_results*.txt
