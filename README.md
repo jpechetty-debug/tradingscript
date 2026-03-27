@@ -1,46 +1,42 @@
-# 🦅 Sovereign Engine v14.5-Modular: Production Hardening
+# 🦅 Sovereign Engine v14.5-Modular: Institutional Production Build
 
 Sovereign Engine is a professional-grade quantitative trading architecture designed for high-fidelity scanning, probabilistic setup evaluation, and automated portfolio optimization. 
 
 > [!IMPORTANT]
-> **v14.5-Modular Build**: This version marks the final production hardening. It restores **61 core math tests** (kelly_size, Platt, Regime) lost during modularization, fixes a **critical runtime persistence bug** in `.gitignore`, and achieves **87.6% test coverage**.
+> **Production Hardened (v14.5)**: This build introduces **ScanState-scoped isolation**, **Institutional CI/CD (Mypy/Ruff/Pytest)**, and a formal **`run.py`** entry point. It restores 61 core math tests and achieves 87.6% test coverage.
 
 ---
 
 ## 🌌 System Architecture
 
-The project features a high-performance modular architecture where each component is an isolated logic bucket, optimized for concurrency and resilience:
+The project features a high-performance modular architecture where each component is an isolated logic bucket, optimized for concurrency and resilience.
 
 ```mermaid
 graph TD
-    A[Market Data Providers <br/> Fyers v3 / yfinance] --> B[Modular Entry <br/> screener_v14_modular.py]
-    B --> C[Core Infrastructure <br/> /core]
+    A[Market Data Providers <br/> Fyers v3 / yfinance] --> B[Institutional Entry <br/> run.py]
+    B --> B2[Modular Core <br/> screener_v14_modular.py]
+    B2 --> C[Core Infrastructure <br/> /core]
     
-    subgraph "Core Modules"
-        C --> D[Data & Config <br/> config, data_provider, universe]
-        C --> E[Alpha Engine <br/> indicators, regime, factors]
-        C --> F[Optimisation <br/> scorer, portfolio, cache]
+    subgraph "Alpha Engine"
+        C --> E[Indicators <br/> indicators.py]
+        C --> F[Regime Tracking <br/> regime.py]
+        C --> G[7-Factor Scoring <br/> factors.py]
     end
     
-    subgraph "Institutional Grade Pillars"
-        C --> H[Testing & QA <br/> 100+ tests, 80% coverage]
-        C --> I[Telemetry & Metrics <br/> structured JSON logging]
-        C --> J[Resilience Layer <br/> circuit breakers & retries]
+    subgraph "Execution & Optimization"
+        C --> H[Scoring Logic <br/> scorer.py]
+        C --> I[Risk & Portfolio <br/> portfolio.py]
+        C --> J[Scan Cache <br/> cache.py]
     end
     
-    subgraph "CI/CD & Automation"
-        K[GitHub Actions] --> L[Lint & Test Gate]
-        L --> M[Main Branch Protection]
+    subgraph "Institutional Pillars"
+        C --> K[CI/CD Workflow <br/> Mypy + Ruff + Pytest]
+        C --> L[Telemetry <br/> Structured JSON Logging]
+        C --> M[Resilience <br/> Circuit Breakers]
     end
     
-    B --> G[Persistence <br/> platt_calibration.json]
-    G --> B
-    
-    subgraph "Recent Gaps Closed"
-        N[Regression Fixes] --> O[.gitignore: JSON allowed]
-        N --> P[Tests: 61 core tests ported]
-        N --> Q[CI: ruff synchronized]
-    end
+    B2 --> N[Persistence <br/> platt_calibration.json]
+    N --> B2
 ```
 
 ---
@@ -48,80 +44,80 @@ graph TD
 ## 🧠 Core Methodology
 
 ### 1. Unified 7-Factor Model (v14.0)
-The engine evaluates the Nifty 200 universe using 7 orthogonal factors, fully implemented in `core/factors.py` with zero placeholders:
-- **Trend (28%)**: Multi-timeframe EMA alignment + vectorised Supertrend.
-- **Momentum (20%)**: RSI-Wilder, MACD Histogram acceleration, and directional streaks.
-- **Volume (18%)**: RVOL, POC proximity, and Value Area (VAH/VAL) positioning.
-- **Volatility (12%)**: ATR coiling (relative to 50d mean) + Bollinger Band Squeeze.
+The engine evaluates the Nifty 200 universe using 7 orthogonal factors, fully implemented in `core/factors.py`:
+- **Trend (28%)**: Multi-timeframe EMA alignment (50/200) + vectorised Supertrend (10, 3).
+- **Momentum (20%)**: RSI-Wilder, MACD Histogram acceleration, and directional price streaks.
+- **Volume (18%)**: RVOL_20, POC proximity, and Value Area (VAH/VAL) positioning.
+- **Volatility (12%)**: ATR coiling (relative to 50d mean) + Bollinger Band Width squeeze.
 - **Relative Strength (12%)**: Sector-relative performance vs Nifty 50 Benchmark.
-- **Breakout (6%)**: 52-week high proximity and BB-Width consolidation.
-- **Quality (4%)**: 63-day log momentum, directional persistence, and ATR expansion.
+- **Breakout (6%)**: 52-week high/low proximity and BB-Width expansion.
+- **Quality (4%)**: 63-day log-momentum and directional persistence metrics.
 
 ### 2. Probabilistic Framework (Platt Scaling)
-Every setup is transformed into a **Win Probability P(Win)** using calibrated **Platt scaling**. The v14.0 system automatically loads and saves `platt_calibration.json` to ensure consistent execution across restarts and backtests.
+Every setup is transformed into a **Win Probability P(Win)** using calibrated **Platt scaling**. The v14.5 system automatically loads/saves `platt_calibration.json` to ensure consistency and prevent lookahead bias.
 
 ### 3. Institutional Risk Management
-- **CapitalScaler (FIX 2)**: NAV-aware position sizing. Use `par_nav` to scale risk proportional to live portfolio value.
-- **Fat-Tail Kelly Sizing**: Corrected for excess kurtosis to prevent over-leverage in volatile names.
-- **Correlation Gate**: Optimized portfolio selection using a `MAX_CORR` filter (0.70 default).
-- **Regime Breadth Veto**: Automatic trading suspension (PANIC mode) when market breadth falls below thresholds.
+- **ScanState Isolation**: Each scan cycle uses a fresh state object, eliminating cross-ticker dependency or state bleed.
+- **CapitalScaler**: NAV-aware position sizing. Scales risk proportional to your live portfolio value.
+- **Fat-Tail Kelly Sizing**: Sizing is automatically penalized based on the **excess kurtosis** of the ticker's return distribution.
+- **Correlation Gate**: Filters candidates with |corr| > 0.70 to ensure diversified portfolio exposure.
 
 ---
 
-## 🏛️ Audit & Quality — **Score: 9.1 / 10**
-
-The system underwent a final hardening audit in March 2026, achieving a "Gold-Standard" production rating.
+## 🏛️ Audit & Quality — **Gold-Standard: 9.1 / 10**
 
 | Category | Score | Highlights |
 |:---|:---:|:---|
 | Architecture | **9.5** | ScanState isolation & clean modular boundaries. |
-| Resilience | **9.0** | Multi-service Circuit Breakers. |
-| Methodology | **9.0** | Calibrated Platt-scaling + fat-tail Kelly. |
-| Testing | **9.5** | **370+ unit tests** with 87% coverage (restored core tests). |
+| Resilience | **9.0** | Circuit Breakers for Fyers, yfinance, and Telegram APIs. |
+| Methodology | **9.0** | Calibrated Platt-scaling + NAV-aware Kelly scaling. |
+| Quality | **9.5** | **373 unit tests** with automated Mypy/Ruff CI gates. |
 
 ---
 
-## 📦 Institutional Modules (`/core`)
+## 📦 Project Structure (`/core`)
 
-| Module | Description |
+| Module | Purpose |
 | :--- | :--- |
-| `backtest.py` | **Walk-Forward Engine**: Multi-fold simulation with Sharpe, MaxDD, and Hit-Rate metrics. |
-| `telemetry.py` | **Structured Logging**: Emits JSON-line metrics for log aggregators (ELK/Loki compatible). |
-| `retry.py` | **Resilience Layer**: Circuit breakers and exponential backoff for APIs. |
-| `indicators.py` | **Vectorised Math**: Low-latency technical indicators (Supertrend, ADX, StochRSI). |
-| `regime.py` | **Regime Tracker**: 5-state classification with confirmation-lag protection. |
-| `portfolio.py` | **Optimizer**: Correlation-aware selection and **NAV-aware scaling**. |
+| `run.py` | **Institutional Entry**: The formal entry point for production execution. |
+| `backtest.py` | **Walk-Forward Engine**: Multi-fold simulation with Sharpe and MaxDD metrics. |
+| `telemetry.py` | **JSON Logging**: Emits machine-readable logs to `logs/sovereign.jsonl`. |
+| `retry.py` | **Resilience**: Implements Circuit Breakers and custom retry decorators. |
+| `regime.py` | **Market State**: 5-state classification (PANIC, TREND_UP, etc.) with breadth veto. |
+| `portfolio.py` | **Optimizer**: Correlation-aware selection and dynamic risk scaling. |
 
 ---
 
 ## 🖥️ Operations
 
-### Quick Start (Windows)
-Double-click **`run_watch.bat`** to launch the engine in 15-minute Watch Mode.
+### 🛠️ Fresh Installation
+1. `git clone https://github.com/jpechetty-debug/intradaybot.git`
+2. `python -m venv .venv`
+3. `.venv\Scripts\activate` (Windows)
+4. `pip install -r requirements.txt`
+5. Configure `.env` (use `.env.example` as a template).
 
-### Command Line Interface
-- **Production Scan**: `python screener_v14_modular.py`
-- **Watch Mode**: `python screener_v14_modular.py --watch 15`
-- **Backtest**: `python screener_v14_modular.py --backtest --days 180`
-- **Calibration**: `python screener_v14_modular.py --calibrate` 
-- **Tests**: `pytest tests/ -v --cov=core --cov-report=term-missing`
+### 🚀 Running the Engine
+- **Normal Execution**: `python run.py`
+- **Watch Mode (15m)**: `python run.py --watch 15`
+- **Backtest**: `python run.py --backtest --days 180 --bt-out backtest_latest.csv`
+- **Calibration**: `python run.py --calibrate` 
+- **Debug Mode**: `python run.py --debug`
+
+### 🧪 Testing & CI
+Run the full institutional-grade test suite:
+- `pytest tests/ -v --cov=core --cov-report=term-missing`
+- `ruff check core/ tests/` (Linting)
+- `mypy core/ run.py` (Type Checking)
 
 ---
 
-## ⚙️ CI/CD & Testing
-The engine uses **GitHub Actions** to enforce institutional quality:
-- **Automated Tests**: Every push/PR triggers 100+ tests on Python 3.10-3.12.
-- **Quality Gate**: Build fails if code coverage drops below **80%**.
-- **Linting**: Enforces **Ruff** standards for clean, performant code.
-
-**Test Suites**:
-- `tests/test_indicators.py`: 47 tests for technical math.
-- `tests/test_regime.py`: 51 tests for market state logic.
-- `tests/test_factors.py`: Alpha factor validation.
-- `tests/test_sovereign_core.py`: **61 tests** for risk, Kelly, and portfolio math (ported).
-- `tests/test_async_data.py`: Fyers and yfinance reliability.
-- `tests/test_circuit_breaker.py`: Fault tolerance logic.
-- `tests/test_cache.py`: ScanState persistence.
+## ⚙️ CI/CD Pipeline
+The engine uses **GitHub Actions** (`ci.yml`) to enforce strict production standards:
+- **Python Support**: Verified on 3.10, 3.11, and 3.12.
+- **Mypy Gate**: Strict type-checking with `--disallow-untyped-defs`.
+- **Ruff Gate**: Enforces high-fidelity linting standards.
+- **Coverage Gate**: Build fails if code coverage drops below **80%**.
 
 ---
 
