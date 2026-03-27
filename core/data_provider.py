@@ -44,20 +44,25 @@ YFINANCE_CHUNK_SIZE: int = 40
 YFINANCE_INTERVAL: str   = "1d"
 
 
-@retry_with_backoff(retries=4, base_delay=1.0, max_delay=30.0)
 def _yf_download_chunk(
     symbols: list[str],
     period: str,
     interval: str,
 ) -> pd.DataFrame:
     """yfinance batch download with exponential-backoff retry."""
-    return yf.download(
-        symbols,
-        period=period,
-        interval=interval,
-        group_by="ticker",
-        progress=False,
-        auto_adjust=True,
+    return retry_with_backoff(
+        lambda: yf.download(
+            symbols,
+            period=period,
+            interval=interval,
+            group_by="ticker",
+            progress=False,
+            auto_adjust=True,
+        ),
+        max_attempts=4,
+        base_delay=1.0,
+        max_delay=30.0,
+        label=f"yf_download[{symbols[0] if symbols else '?'}]",
     )
 
 

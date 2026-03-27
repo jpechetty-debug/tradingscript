@@ -53,7 +53,8 @@ from core.scorer import TickerResult, score_ticker
 from core.universe import ALL_TICKERS, SECTORS, TICKER_TO_SECTOR, N_SECTORS
 from utils.messaging import send_telegram
 from core.telemetry import setup_logging, ScanMetrics, emit
-from core.cache import _build_corr_matrix
+from core.cache import _build_corr_matrix, ScanCache
+from core.backtest import walk_forward, WalkForwardResult
 from core.retry import guarded_call, FYERS_BREAKER, YFINANCE_BREAKER, TELEGRAM_BREAKER
 
 # sovereign_improvements is an optional monkey-patch layer.  Guard the import
@@ -136,7 +137,7 @@ class ScanState:
 
     # Per-scan cache — created fresh so different scan cycles never
     # share cached volume profiles or correlation matrices.
-    cache: object = field(default_factory=lambda: __import__("core.cache", fromlist=["ScanCache"]).ScanCache())
+    cache: "ScanCache" = field(default_factory=lambda: ScanCache())  # ScanCache imported below
 
     def load_platt(self) -> None:
         """Load Platt A/B from file if present; fall back to config defaults."""
@@ -438,6 +439,104 @@ def run_calibration() -> None:
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BACKTEST RUNNER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_backtest(
+    config:      SystemConfig = CONFIG,
+    train_days:  int = 120,
+    test_days:   int = 20,
+    step_days:   int = 10,
+    out_csv:     str = "backtest_results.csv",
+    direction:   str = "LONG",
+    debug:       bool = False,
+) -> WalkForwardResult:
+    """
+    Fetch data for the full universe, run walk-forward backtest, print summary.
+
+    Called by: ``python screener_v14_modular.py --backtest``
+
+    Parameters
+    ----------
+    config:       SystemConfig instance.
+    train_days:   Bars in each train window (default 120 ~ 6 months).
+    test_days:    Bars in each forward test window (default 20 ~ 1 month).
+    step_days:    Step between fold start dates (default 10 ~ 2 weeks).
+    out_csv:      Path to write per-trade CSV output.
+    direction:    "LONG", "SHORT", or "BOTH".
+    debug:        Enable DEBUG logging.
+
+    Returns
+    -------
+    WalkForwardResult with .overall, .fold_stats, .trades.
+    """
+    if debug:
+        logging.getLogger("sovereign").setLevel(logging.DEBUG)
+
+    log.info(
+        "Starting walk-forward backtest | train=%d test=%d step=%d direction=%s",
+        train_days, test_days, step_days, direction,
+    )
+
+    # Fetch raw data (no indicators — backtest adds them per fold)
+    t0 = time.monotonic()
+    raw_data = fetch_daily_batch(ALL_TICKERS, config)
+    elapsed = time.monotonic() - t0
+    log.info("Data fetched: %d symbols in %.1fs", len(raw_data), elapsed)
+
+    if not raw_data:
+        log.error("No data fetched — aborting backtest.")
+        return WalkForwardResult(trades=[], fold_stats=[], overall=None)  # type: ignore
+
+    # Run walk-forward
+    results = walk_forward(
+        raw_data=raw_data,
+        config=config,
+        train_days=train_days,
+        test_days=test_days,
+        step_days=step_days,
+        direction=direction,
+    )
+
+    # Print summary table
+    o = results.overall
+    print("\n" + "=" * 60)
+    print(f"  Walk-Forward Backtest Summary  (v{VERSION})")
+    print("=" * 60)
+    print(f"  Folds          : {o.n_folds}")
+    print(f"  Total trades   : {o.n_trades}")
+    print(f"  Hit rate       : {o.hit_rate:.1%}")
+    print(f"  Mean R         : {o.mean_r:+.3f}")
+    print(f"  Total R        : {o.total_r:+.2f}")
+    print(f"  Sharpe (ann.)  : {o.sharpe:+.2f}")
+    print(f"  Max drawdown   : {o.max_dd:.2f} R")
+    print(f"  Profit factor  : {o.profit_factor:.2f}")
+    print(f"  Expectancy R   : {o.expectancy_r:+.4f}")
+    print("=" * 60)
+
+    if o.fold_stats:
+        print("\nPer-fold breakdown:")
+        print(f"  {'Fold':>4}  {'Start':>12}  {'End':>12}  "
+              f"{'Trades':>6}  {'Hit%':>5}  {'MeanR':>6}  {'TotalR':>7}")
+        for fs in o.fold_stats:
+            print(f"  {fs.fold:>4}  {str(fs.start_date.date()):>12}  "
+                  f"{str(fs.end_date.date()):>12}  "
+                  f"{fs.n_trades:>6}  {fs.hit_rate:>4.0%}  "
+                  f"{fs.mean_r:>+6.3f}  {fs.total_r:>+7.2f}")
+
+    # Save CSV
+    if results.trades:
+        results.to_csv(out_csv)
+        print(f"\nTrade log saved → {out_csv}")
+    else:
+        log.warning("No trades generated — check min_prob threshold and data quality.")
+
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=f"Sovereign Engine v{VERSION}")
     parser.add_argument("--watch",       type=int,  default=None, metavar="MINUTES")
@@ -446,6 +545,12 @@ def main() -> None:
     parser.add_argument("--no-telegram", action="store_true")
     parser.add_argument("--no-intraday", action="store_true")
     parser.add_argument("--calibrate",   action="store_true", help="Re-fit Platt A/B from trade_log.json")
+    parser.add_argument("--backtest",      action="store_true",  help="Run walk-forward backtest and exit")
+    parser.add_argument("--bt-train",      type=int, default=120, metavar="DAYS", help="Backtest train window (default 120)")
+    parser.add_argument("--bt-test",       type=int, default=20,  metavar="DAYS", help="Backtest test window (default 20)")
+    parser.add_argument("--bt-step",       type=int, default=10,  metavar="DAYS", help="Backtest step between folds (default 10)")
+    parser.add_argument("--bt-out",        type=str, default="backtest_results.csv", metavar="FILE", help="CSV output path")
+    parser.add_argument("--bt-direction",  type=str, default="LONG", choices=["LONG","SHORT","BOTH"], help="Trade direction")
     args = parser.parse_args()
 
     if args.version:
@@ -473,7 +578,18 @@ def main() -> None:
         if patch.get("calibrator"):
             pass  # placeholder — wire in broker PnL events here
 
-    if args.calibrate:
+    if args.backtest:
+        run_backtest(
+            config=config,
+            train_days=args.bt_train,
+            test_days=args.bt_test,
+            step_days=args.bt_step,
+            out_csv=args.bt_out,
+            direction=args.bt_direction,
+            debug=args.debug,
+        )
+        return
+    elif args.calibrate:
         run_calibration()
     elif args.watch:
         log.info("Watch mode — scanning every %d minutes", args.watch)
