@@ -34,3 +34,11 @@ jobs:
         run: |
           pip install ruff
           ruff check core/ tests/ --output-format=github
+
+      - name: Type-check with mypy
+        run: |
+          mypy core/ run.py \
+            --ignore-missing-imports \
+            --disallow-untyped-defs \
+            --warn-return-any \
+            --warn-unused-ignores
