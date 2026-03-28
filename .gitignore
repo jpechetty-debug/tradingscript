@@ -26,3 +26,7 @@ package-lock.json
  
 # Generated backtest equity-curve HTML reports
 backtest_equity_*.html
+
+# Output and scan results
+*.out
+scan_results*.txt
