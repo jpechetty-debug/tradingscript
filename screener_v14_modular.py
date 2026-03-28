@@ -13,8 +13,8 @@ This module intentionally stays thin so existing imports continue to work.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
-from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 from core.backtest import WalkForwardResult
@@ -33,50 +33,83 @@ setup_logging(level="INFO", json_log_file=str(RUNTIME_PATHS.telemetry_log_file))
 log = logging.getLogger("sovereign")
 
 
-try:
-    import sovereign_improvements as _SE_PATCH_MODULE
+class _LegacyPatchShim:
+    def create_components(self, *args: Any, **kwargs: Any) -> Any:
+        from sovereign_improvements import create_components
 
-    SE_PATCH: Any = _SE_PATCH_MODULE
-    _SE_PATCH_AVAILABLE = True
-except Exception as _se_err:
+        return create_components(*args, **kwargs)
 
-    class _NoOpPatch:
-        def create_components(self, *args: object, **kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace(
-                gate=None,
-                scaler=None,
-                data=None,
-                calibrator=None,
-                backoff=None,
-                watch=None,
-                alerter=None,
-            )
+    def apply(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        from sovereign_improvements import apply
 
-        def apply(self, *args: object, **kwargs: object) -> dict[str, Any]:
-            return {}
+        return apply(*args, **kwargs)
 
-        def __getattr__(self, name: str) -> Callable[..., None]:
-            def _noop(*args: object, **kwargs: object) -> None:
-                return None
+    def __getattr__(self, name: str) -> Callable[..., None]:
+        def _noop(*args: object, **kwargs: object) -> None:
+            return None
 
-            return _noop
-
-    SE_PATCH = _NoOpPatch()
-    _SE_PATCH_AVAILABLE = False
-    _SE_PATCH_LOAD_ERROR = _se_err
+        return _noop
 
 
-if not _SE_PATCH_AVAILABLE:
-    log.warning(
-        "sovereign_improvements could not be loaded (%s: %s). Running without patch components.",
-        type(_SE_PATCH_LOAD_ERROR).__name__,
-        _SE_PATCH_LOAD_ERROR,
+SE_PATCH: Any = _LegacyPatchShim()
+
+
+@dataclass(frozen=True)
+class ServiceBundle:
+    persistence: PersistenceService
+    scan_service: ScanService
+    alert_service: AlertService
+
+    def __iter__(self):
+        yield self.scan_service
+        yield self.alert_service
+
+
+def _build_services(
+    *,
+    data_service: Optional[Any] = None,
+    persistence: Optional[PersistenceService] = None,
+    probability_gate: Optional[Any] = None,
+    capital_scaler: Optional[Any] = None,
+    factor_calibrator: Optional[Any] = None,
+    alerter: Optional[Any] = None,
+    current_nav_provider: Optional[Any] = None,
+    alert_service: Optional[AlertService] = None,
+) -> ServiceBundle:
+    resolved_persistence = persistence or PersistenceService()
+    scan_service = ScanService(
+        version=VERSION,
+        data_service=data_service,
+        persistence=resolved_persistence,
+        probability_gate=probability_gate,
+        capital_scaler=capital_scaler,
+        factor_calibrator=factor_calibrator,
+        alerter=alerter,
+        current_nav_provider=current_nav_provider,
+    )
+    resolved_alert_service = alert_service or scan_service.create_alert_service()
+    return ServiceBundle(
+        persistence=resolved_persistence,
+        scan_service=scan_service,
+        alert_service=resolved_alert_service,
     )
 
 
-PERSISTENCE = PersistenceService()
-SCAN_SERVICE = ScanService(version=VERSION, persistence=PERSISTENCE)
-ALERT_SERVICE = SCAN_SERVICE.create_alert_service()
+DEFAULT_SERVICES = _build_services()
+
+
+def _resolve_services(services: Optional[ServiceBundle]) -> ServiceBundle:
+    return services or DEFAULT_SERVICES
+
+
+def __getattr__(name: str) -> Any:
+    if name == "PERSISTENCE":
+        return DEFAULT_SERVICES.persistence
+    if name == "SCAN_SERVICE":
+        return DEFAULT_SERVICES.scan_service
+    if name == "ALERT_SERVICE":
+        return DEFAULT_SERVICES.alert_service
+    raise AttributeError(name)
 
 
 def configure_services(
@@ -87,22 +120,19 @@ def configure_services(
     capital_scaler: Optional[Any] = None,
     factor_calibrator: Optional[Any] = None,
     alerter: Optional[Any] = None,
+    current_nav_provider: Optional[Any] = None,
     alert_service: Optional[AlertService] = None,
-) -> tuple[ScanService, AlertService]:
-    global PERSISTENCE, SCAN_SERVICE, ALERT_SERVICE
-
-    PERSISTENCE = persistence or PERSISTENCE
-    SCAN_SERVICE = ScanService(
-        version=VERSION,
+) -> ServiceBundle:
+    return _build_services(
         data_service=data_service,
-        persistence=PERSISTENCE,
+        persistence=persistence,
         probability_gate=probability_gate,
         capital_scaler=capital_scaler,
         factor_calibrator=factor_calibrator,
         alerter=alerter,
+        current_nav_provider=current_nav_provider,
+        alert_service=alert_service,
     )
-    ALERT_SERVICE = alert_service or SCAN_SERVICE.create_alert_service()
-    return SCAN_SERVICE, ALERT_SERVICE
 
 
 def run_scan(
@@ -113,6 +143,7 @@ def run_scan(
     regime_override: Optional[str] = None,
     no_ema_filter: bool = False,
     force_score: bool = False,
+    services: Optional[ServiceBundle] = None,
 ) -> tuple[list[TickerResult], list[TickerResult], Optional[MarketRegime]]:
     """
     Compatibility wrapper over ``ScanService.scan``.
@@ -121,7 +152,8 @@ def run_scan(
     modular runtime no longer branches on it directly.
     """
     _ = no_intraday
-    return SCAN_SERVICE.scan(
+    bundle = _resolve_services(services)
+    return bundle.scan_service.scan(
         config=config,
         debug=debug,
         regime_tracker=regime_tracker,
@@ -135,13 +167,16 @@ def _send_alert(
     portfolio: list[TickerResult],
     regime: MarketRegime,
     config: SystemConfig,
+    services: Optional[ServiceBundle] = None,
 ) -> None:
-    ALERT_SERVICE.send_portfolio_summary(portfolio, regime, config)
+    bundle = _resolve_services(services)
+    bundle.alert_service.send_portfolio_summary(portfolio, regime, config)
 
 
-def run_calibration() -> None:
-    log.info("Starting Platt calibration from %s...", PERSISTENCE.paths.trade_log_file)
-    SCAN_SERVICE.run_calibration()
+def run_calibration(*, services: Optional[ServiceBundle] = None) -> None:
+    bundle = _resolve_services(services)
+    log.info("Starting Platt calibration from %s...", bundle.persistence.paths.trade_log_file)
+    bundle.scan_service.run_calibration()
 
 
 def run_backtest(
@@ -152,7 +187,9 @@ def run_backtest(
     out_csv: str = "backtest_results.csv",
     direction: str = "LONG",
     debug: bool = False,
+    services: Optional[ServiceBundle] = None,
 ) -> WalkForwardResult:
+    bundle = _resolve_services(services)
     log.info(
         "Starting walk-forward backtest | train=%d test=%d step=%d direction=%s",
         train_days,
@@ -161,7 +198,7 @@ def run_backtest(
         direction,
     )
 
-    results = SCAN_SERVICE.run_backtest(
+    results = bundle.scan_service.run_backtest(
         config=config,
         train_days=train_days,
         test_days=test_days,
@@ -204,7 +241,7 @@ def run_backtest(
             )
 
     if results.trades:
-        print(f"\nTrade log saved -> {PERSISTENCE.artifact_path(out_csv)}")
+        print(f"\nTrade log saved -> {bundle.persistence.artifact_path(out_csv)}")
     else:
         log.warning("No trades generated - check min_prob threshold and data quality.")
 

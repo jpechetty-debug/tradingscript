@@ -65,6 +65,23 @@ def test_persistence_service_scopes_relative_artifacts(tmp_path):
     assert target.parent.exists()
 
 
+def test_persistence_service_reads_portfolio_state_from_state_dir(tmp_path):
+    paths = _paths(tmp_path)
+    portfolio_state = paths.portfolio_state_file
+    portfolio_state.parent.mkdir(parents=True, exist_ok=True)
+    portfolio_state.write_text(
+        '{"current_nav": 875000, "peak_nav": 1000000}',
+        encoding="utf-8",
+    )
+
+    service = PersistenceService(paths)
+    snapshot = service.load_portfolio_state()
+
+    assert snapshot is not None
+    assert snapshot.current_nav == pytest.approx(875000)
+    assert snapshot.peak_nav == pytest.approx(1000000)
+
+
 def test_alert_service_filters_by_threshold_and_uses_messenger():
     sent: list[tuple[str, str, str]] = []
 
@@ -125,9 +142,15 @@ def test_alert_service_uses_injected_alerter():
     captured: dict[str, object] = {}
 
     class FakeAlerter:
-        def send_daily_summary(self, regime: str, top_picks: list[dict[str, object]]) -> None:
+        def send_daily_summary(
+            self,
+            regime: str,
+            top_picks: list[dict[str, object]],
+            current_nav: float | None = None,
+        ) -> None:
             captured["regime"] = regime
             captured["tickers"] = [pick["ticker"] for pick in top_picks]
+            captured["current_nav"] = current_nav
 
     service = AlertService(version="test", alerter=FakeAlerter())
     config = replace(
@@ -159,7 +182,7 @@ def test_alert_service_uses_injected_alerter():
 
     service.send_portfolio_summary(portfolio, regime, config)
 
-    assert captured == {"regime": "TREND_UP", "tickers": ["AAA"]}
+    assert captured == {"regime": "TREND_UP", "tickers": ["AAA"], "current_nav": None}
 
 
 def test_scan_service_scan_uses_injected_fetcher_and_dependencies(monkeypatch):
@@ -241,6 +264,7 @@ def test_scan_service_scan_uses_injected_fetcher_and_dependencies(monkeypatch):
         probability_gate=gate,
         capital_scaler=scaler,
         factor_calibrator=calibrator,
+        current_nav_provider=lambda: 875_000.0,
     )
 
     all_results, portfolio, observed_regime = service.scan(config=config, regime_tracker=RegimeTracker())
@@ -251,7 +275,7 @@ def test_scan_service_scan_uses_injected_fetcher_and_dependencies(monkeypatch):
     assert portfolio == [result]
     assert observed_regime == regime
     assert gate.calls == [regime.regime]
-    assert scaler.calls == [(1_000_000, regime.regime)]
+    assert scaler.calls == [(875_000.0, regime.regime)]
     assert calibrator.calls == 1
     assert score_calls[0]["config"].MIN_PROB_WIN == 0.61
     assert score_calls[0]["config"].PLATT_A == -1.5

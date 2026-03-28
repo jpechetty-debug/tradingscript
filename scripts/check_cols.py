@@ -1,5 +1,4 @@
 import yfinance as yf
-import pandas as pd
 
 def check_multiindex():
     tickers = ["SBIN.NS", "RELIANCE.NS"]

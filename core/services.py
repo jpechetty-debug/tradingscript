@@ -62,7 +62,15 @@ class FactorWeightProvider(Protocol):
 
 
 class SummaryAlerter(Protocol):
-    def send_daily_summary(self, regime: str, top_picks: list[dict[str, Any]]) -> Any: ...
+    def send_daily_summary(
+        self,
+        regime: str,
+        top_picks: list[dict[str, Any]],
+        current_nav: Optional[float] = None,
+    ) -> Any: ...
+
+
+CurrentNavProvider = Callable[[], Optional[float]]
 
 
 @dataclass
@@ -91,6 +99,12 @@ class PreparedScanData:
     bench_series: pd.Series
     sector_rs: dict[str, float]
     sector_ranks: dict[str, int]
+
+
+@dataclass(frozen=True)
+class PortfolioStateSnapshot:
+    current_nav: float
+    peak_nav: Optional[float] = None
 
 
 def _rank_sectors(sector_rs: dict[str, float]) -> dict[str, int]:
@@ -164,6 +178,38 @@ class PersistenceService:
                 log.error("Could not load trade log %s: %s", candidate, exc)
                 return []
         return []
+
+    def load_portfolio_state(self) -> Optional[PortfolioStateSnapshot]:
+        for candidate in self._candidate_paths(self.paths.portfolio_state_file, "portfolio_state.json"):
+            if not candidate.exists():
+                continue
+            try:
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    continue
+                current_nav = float(payload["current_nav"])
+                peak_raw = payload.get("peak_nav")
+                peak_nav = float(peak_raw) if peak_raw is not None else None
+                if current_nav <= 0:
+                    raise ValueError("current_nav must be positive")
+                if peak_nav is not None and peak_nav <= 0:
+                    raise ValueError("peak_nav must be positive when provided")
+                return PortfolioStateSnapshot(current_nav=current_nav, peak_nav=peak_nav)
+            except Exception as exc:
+                log.warning("Could not load portfolio state %s: %s", candidate, exc)
+                return None
+        return None
+
+    def save_portfolio_state(self, current_nav: float, peak_nav: Optional[float] = None) -> None:
+        payload: dict[str, Any] = {
+            "current_nav": float(current_nav),
+            "updated_at": datetime.now(IST).isoformat(),
+        }
+        if peak_nav is not None:
+            payload["peak_nav"] = float(peak_nav)
+        target = ensure_parent(self.paths.portfolio_state_file)
+        target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        log.info("Portfolio state saved to %s", target)
 
     def artifact_path(self, output_path: str | Path) -> Path:
         return ensure_parent(resolve_artifact_path(output_path, self.paths))
@@ -249,10 +295,12 @@ class AlertService:
         version: str,
         messenger: Callable[[str, str, str], bool] = send_telegram,
         alerter: Optional[SummaryAlerter] = None,
+        current_nav_provider: Optional[CurrentNavProvider] = None,
     ) -> None:
         self._version = version
         self._messenger = messenger
         self._alerter = alerter
+        self._current_nav_provider = current_nav_provider
 
     def send_portfolio_summary(
         self,
@@ -269,7 +317,11 @@ class AlertService:
             return
 
         if self._alerter is not None:
-            self._alerter.send_daily_summary(regime.label, [result.__dict__ for result in top])
+            self._alerter.send_daily_summary(
+                regime.label,
+                [result.__dict__ for result in top],
+                current_nav=self._resolve_current_nav(),
+            )
             return
 
         lines = [
@@ -283,6 +335,16 @@ class AlertService:
             )
         self._messenger("\n".join(lines), str(config.TELEGRAM_BOT_TOKEN), config.TELEGRAM_CHAT_ID)
 
+    def _resolve_current_nav(self) -> Optional[float]:
+        if self._current_nav_provider is None:
+            return None
+        try:
+            current_nav = self._current_nav_provider()
+            return float(current_nav) if current_nav is not None and current_nav > 0 else None
+        except Exception:
+            log.debug("Current NAV provider failed while building alert summary.", exc_info=True)
+            return None
+
 
 class ScanService:
     def __init__(
@@ -295,6 +357,8 @@ class ScanService:
         capital_scaler: Optional[CapitalFractionScaler] = None,
         factor_calibrator: Optional[FactorWeightProvider] = None,
         alerter: Optional[SummaryAlerter] = None,
+        current_nav_provider: Optional[CurrentNavProvider] = None,
+        default_current_nav: float = 1_000_000.0,
     ) -> None:
         self._version = version
         self._data_service = data_service or MarketDataService()
@@ -303,12 +367,19 @@ class ScanService:
         self._capital_scaler = capital_scaler
         self._factor_calibrator = factor_calibrator
         self._alerter = alerter
+        self._current_nav_provider = current_nav_provider
+        self._default_current_nav = default_current_nav
 
     def create_alert_service(
         self,
         messenger: Callable[[str, str, str], bool] = send_telegram,
     ) -> AlertService:
-        return AlertService(version=self._version, messenger=messenger, alerter=self._alerter)
+        return AlertService(
+            version=self._version,
+            messenger=messenger,
+            alerter=self._alerter,
+            current_nav_provider=self._current_nav_provider,
+        )
 
     def scan(
         self,
@@ -519,6 +590,7 @@ class ScanService:
     ) -> tuple[list[TickerResult], float]:
         started = time.monotonic()
         all_results: list[TickerResult] = []
+        current_nav = self._resolve_current_nav()
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
             futures: dict[Any, str] = {}
             for ticker, df in prepared.processed.items():
@@ -531,7 +603,7 @@ class ScanService:
                 if self._capital_scaler is not None:
                     try:
                         capital_fraction *= float(
-                            self._capital_scaler.capital_fraction(1_000_000, regime.regime)
+                            self._capital_scaler.capital_fraction(current_nav, regime.regime)
                         )
                     except Exception:
                         log.debug("Injected capital scaler failed for %s.", ticker, exc_info=debug)
@@ -565,6 +637,23 @@ class ScanService:
         elapsed = time.monotonic() - started
         log.debug("Scoring completed in %.3fs.", elapsed)
         return all_results, elapsed
+
+    def _resolve_current_nav(self) -> float:
+        if self._current_nav_provider is not None:
+            try:
+                current_nav = self._current_nav_provider()
+                if current_nav is not None and current_nav > 0:
+                    return float(current_nav)
+            except Exception:
+                log.warning("Current NAV provider failed; using default NAV %.0f.", self._default_current_nav)
+
+        loader = getattr(self._persistence, "load_portfolio_state", None)
+        if callable(loader):
+            snapshot = loader()
+            if snapshot is not None:
+                return snapshot.current_nav
+
+        return self._default_current_nav
 
     def _maybe_recalibrate_ic_weights(
         self,

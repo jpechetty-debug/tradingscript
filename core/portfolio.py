@@ -27,17 +27,10 @@ How it works
     * fraction < 1  drawdown, size scales down automatically.
     * fraction = 1.0 (default)  identical to v14 behaviour; backtests safe.
 
-Wire-up in screener_v14_modular.py::
-
-    # Once, at session start:
-    state.capital_scaler = CapitalScaler(par_nav=live_portfolio_value_inr)
-
-    # Each scan cycle, before score_ticker calls:
-    state.capital_scaler.update_nav(broker.get_portfolio_value())
-    cf = state.capital_scaler.capital_fraction()
-
-    # Inside score_ticker (already threaded through):
-    shares, risk, kf, kc = calculate_kelly_size(..., capital_fraction=cf)
+In the modular runtime, the live NAV source is read per scan from
+``state/portfolio_state.json`` (override via ``PORTFOLIO_STATE_PATH``).
+External broker syncs can update that file between scans without changing
+application code.
 
 v14 changes (carried forward)
 ------------------------------

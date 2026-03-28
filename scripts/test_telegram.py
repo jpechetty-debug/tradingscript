@@ -1,8 +1,5 @@
 import os
 import sys
-from datetime import datetime
-import pandas as pd
-import pytz
 from dotenv import load_dotenv
 
 # Add current dir to path to import screener
@@ -11,14 +8,14 @@ import screener
 
 def test_telegram():
     load_dotenv()
-    
+
     # Create a mock TickerResult
     mock_factors = screener.FactorScores(
-        trend=0.9, momentum=0.8, volume=0.7, 
-        volatility=0.6, rs=0.8, breakout=0.5, 
+        trend=0.9, momentum=0.8, volume=0.7,
+        volatility=0.6, rs=0.8, breakout=0.5,
         quality=0.9, composite=0.85
     )
-    
+
     res = screener.TickerResult(
         ticker="TEST",
         sector="TEST_SECTOR",
@@ -61,12 +58,12 @@ def test_telegram():
         sector_rs_rank=1,
         sector_rs_pct=2.5
     )
-    
+
     regime = screener.MarketRegime("TREND_UP", 0.6, 25.0, 1.1, 0.8)
-    
+
     print("Testing Telegram alert with mock data...")
     success = screener.send_telegram_alert([res], "TEST_SESSION", regime)
-    
+
     if success:
         print("✅ Test alert sent successfully!")
     else:

@@ -89,9 +89,19 @@ class FyersSessionManager:
     _TOKEN_MAX_AGE_HOURS: int = 20   # warn if .env was last written > 20h ago
 
     @classmethod
-    def _warn_if_token_stale(cls, config: SystemConfig) -> None:
+    def _env_token(cls, env_path: Path) -> Optional[str]:
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("FYERS_ACCESS_TOKEN="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+        except OSError:
+            return None
+        return None
+
+    @classmethod
+    def _warn_if_token_stale(cls, config: SystemConfig) -> bool:
         """
-        Emit a WARNING if the access token is likely stale.
+        Emit a WARNING if the loaded access token is likely stale.
 
         Strategy: check the mtime of the .env file that was loaded by
         python-dotenv.  If it was last written more than ``_TOKEN_MAX_AGE_HOURS``
@@ -100,10 +110,14 @@ class FyersSessionManager:
         via the environment directly, in which case we cannot check age).
         """
         from datetime import timezone
+
         env_path = Path(".env")
         if not env_path.exists():
             # Token came from the shell environment — we cannot check age.
-            return
+            return False
+        env_token = cls._env_token(env_path)
+        if not env_token or env_token != str(config.FYERS_ACCESS_TOKEN):
+            return False
         try:
             mtime = env_path.stat().st_mtime
             age_hours = (datetime.now(timezone.utc).timestamp() - mtime) / 3600
@@ -116,8 +130,10 @@ class FyersSessionManager:
                     age_hours,
                     cls._TOKEN_MAX_AGE_HOURS,
                 )
+                return True
         except OSError:
             pass   # stat failed — ignore, not worth crashing over
+        return False
 
     @classmethod
     def get_client(cls, config: SystemConfig) -> Optional[_HistoryClient]:
@@ -138,7 +154,12 @@ class FyersSessionManager:
             return None
 
         # Check token age before attempting to construct the client.
-        cls._warn_if_token_stale(config)
+        if cls._warn_if_token_stale(config):
+            log.warning(
+                "Skipping Fyers initialisation because the loaded token appears stale; "
+                "using yfinance until scripts/fyers_setup.py refreshes .env."
+            )
+            return None
 
         try:
             from fyers_apiv3 import fyersModel

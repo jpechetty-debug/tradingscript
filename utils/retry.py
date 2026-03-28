@@ -135,12 +135,12 @@ def retry_with_backoff(
                     time.sleep(sleep_s)
 
             # Should never reach here, but satisfy type checkers.
-            raise RuntimeError(f"Retry loop exited unexpectedly") from last_exc  # noqa: EM101
+            raise RuntimeError("Retry loop exited unexpectedly") from last_exc  # noqa: EM101
 
         return wrapper  # type: ignore[return-value]
     return decorator
 
-from core.retry import (  # noqa: F401 — re-export for unified import surface
+from core.retry import (  # noqa: E402, F401 — re-export for unified import surface
     CircuitBreaker,
     CircuitBreakerOpen,
     guarded_call,

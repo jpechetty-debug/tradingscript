@@ -3,11 +3,11 @@ from _bootstrap import ensure_repo_root
 
 ensure_repo_root()
 
-from core.config import CONFIG
-from core.regime import MarketRegime, MarketRegimeType
-from core.scorer import TickerResult
-from core.factors import FactorScores
-from screener_v14_modular import _send_alert
+from core.config import CONFIG  # noqa: E402
+from core.regime import MarketRegime, MarketRegimeType  # noqa: E402
+from core.scorer import TickerResult  # noqa: E402
+from core.factors import FactorScores  # noqa: E402
+from screener_v14_modular import _send_alert  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 

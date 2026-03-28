@@ -1,14 +1,13 @@
 import pandas as pd
-import numpy as np
 from _bootstrap import ensure_repo_root
 
 ensure_repo_root()
 
-from core.factors import calibrate_ic_weights, DEFAULT_WEIGHTS
-from core.config import CONFIG
-from core.data_provider import fetch_daily_batch
-from core.indicators import add_indicators
-from core.universe import ALL_TICKERS
+from core.factors import calibrate_ic_weights  # noqa: E402
+from core.config import CONFIG  # noqa: E402
+from core.data_provider import fetch_daily_batch  # noqa: E402
+from core.indicators import add_indicators  # noqa: E402
+from core.universe import ALL_TICKERS  # noqa: E402
 
 class MockResult:
     def __init__(self, ticker):

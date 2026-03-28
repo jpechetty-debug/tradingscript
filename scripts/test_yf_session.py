@@ -1,6 +1,5 @@
 
 import yfinance as yf
-import pandas as pd
 import logging
 import requests
 
@@ -14,10 +13,10 @@ def test_fetch_with_session():
     }
     session = requests.Session()
     session.headers.update(headers)
-    
+
     tickers = ["RELIANCE.NS", "TCS.NS", "INFY.NS"]
     logger.info(f"Testing yfinance fetch with session for {tickers}")
-    
+
     try:
         # yfinance 0.2.x supports passing a session
         data = yf.download(tickers, period="1mo", interval="1d", progress=False, session=session)

@@ -37,3 +37,9 @@ ignore = ["E501"]  # line-length handled by line-length setting
 "tests/test_indicators.py" = ["E402"]
 "tests/test_regime.py" = ["E402"]
 "tests/test_scorer_portfolio.py" = ["E402"]
+
+[tool.mypy]
+exclude = ['(?i)^tmp/', '(?i)^artifacts/', '(?i)^\\.agent/']
+ignore_missing_imports = true
+explicit_package_bases = true
+namespace_packages = true

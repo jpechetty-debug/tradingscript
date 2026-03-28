@@ -34,8 +34,8 @@ def _stub_modules() -> None:
         "fyers_apiv3":            types.ModuleType("fyers_apiv3"),
         "fyers_apiv3.fyersModel": types.ModuleType("fyers_apiv3.fyersModel"),
     }
-    stubs["fyers_apiv3.fyersModel"].FyersModel = MagicMock
-    stubs["fyers_apiv3"].fyersModel = stubs["fyers_apiv3.fyersModel"]
+    stubs["fyers_apiv3.fyersModel"].FyersModel = MagicMock  # type: ignore[attr-defined]
+    stubs["fyers_apiv3"].fyersModel = stubs["fyers_apiv3.fyersModel"]  # type: ignore[attr-defined]
     for name, mod in stubs.items():
         sys.modules.setdefault(name, mod)
 

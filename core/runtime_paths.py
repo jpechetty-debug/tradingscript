@@ -30,6 +30,7 @@ class RuntimePaths:
     state_dir: Path
     artifacts_dir: Path
     logs_dir: Path
+    portfolio_state_file: Path
     platt_calibration_file: Path
     trade_log_file: Path
     factor_weights_file: Path
@@ -48,6 +49,10 @@ class RuntimePaths:
             state_dir=state_dir,
             artifacts_dir=artifacts_dir,
             logs_dir=logs_dir,
+            portfolio_state_file=_resolve_repo_path(
+                os.getenv("PORTFOLIO_STATE_PATH", state_dir / "portfolio_state.json"),
+                root=repo_root,
+            ),
             platt_calibration_file=_resolve_repo_path(
                 os.getenv("PLATT_CALIB_PATH", state_dir / "platt_calibration.json"),
                 root=repo_root,

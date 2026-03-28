@@ -116,3 +116,42 @@ class TestFetchDailyBatch:
             assert all(c[0].isupper() for c in cols)
         else:
             pytest.fail("RELIANCE.NS missing from result")
+
+    def test_fyers_session_manager_skips_stale_dotenv_token(self, tmp_path, monkeypatch):
+        from core.data_provider import FyersSessionManager
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("FYERS_ACCESS_TOKEN=stale-token\n", encoding="utf-8")
+        stale_timestamp = 1_700_000_000
+        os.utime(env_path, (stale_timestamp, stale_timestamp))
+        monkeypatch.chdir(tmp_path)
+
+        FyersSessionManager._instance = None
+        cfg = _cfg(USE_FYERS=True, FYERS_CLIENT_ID="client", FYERS_ACCESS_TOKEN="stale-token")
+
+        with patch("fyers_apiv3.fyersModel.FyersModel") as model:
+            client = FyersSessionManager.get_client(cfg)
+
+        assert client is None
+        model.assert_not_called()
+        FyersSessionManager._instance = None
+
+    def test_fyers_session_manager_allows_shell_overrides_when_dotenv_is_stale(self, tmp_path, monkeypatch):
+        from core.data_provider import FyersSessionManager
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("FYERS_ACCESS_TOKEN=old-file-token\n", encoding="utf-8")
+        stale_timestamp = 1_700_000_000
+        os.utime(env_path, (stale_timestamp, stale_timestamp))
+        monkeypatch.chdir(tmp_path)
+
+        FyersSessionManager._instance = None
+        cfg = _cfg(USE_FYERS=True, FYERS_CLIENT_ID="client", FYERS_ACCESS_TOKEN="fresh-shell-token")
+        sentinel = object()
+
+        with patch("fyers_apiv3.fyersModel.FyersModel", return_value=sentinel) as model:
+            client = FyersSessionManager.get_client(cfg)
+
+        assert client is sentinel
+        model.assert_called_once()
+        FyersSessionManager._instance = None

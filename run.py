@@ -25,9 +25,10 @@ import sys
 import time
 
 from core.regime import RegimeTracker
+from core.runtime_components import create_runtime_components
+from core.services import PersistenceService
 from screener_v14_modular import (
     CONFIG,
-    SE_PATCH,
     VERSION,
     _send_alert,
     configure_services,
@@ -37,6 +38,14 @@ from screener_v14_modular import (
 )
 
 log = logging.getLogger("sovereign")
+
+
+def _build_current_nav_provider(persistence: PersistenceService):
+    def _current_nav() -> float | None:
+        snapshot = persistence.load_portfolio_state()
+        return snapshot.current_nav if snapshot is not None else None
+
+    return _current_nav
 
 
 def main(argv: list[str] | None = None, prog: str | None = None) -> None:
@@ -63,13 +72,23 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
         return
 
     config = CONFIG
-
-    components = SE_PATCH.create_components(portfolio_peak=1_000_000)
-    configure_services(
+    persistence = PersistenceService()
+    portfolio_state = persistence.load_portfolio_state()
+    portfolio_peak = (
+        portfolio_state.peak_nav
+        if portfolio_state is not None and portfolio_state.peak_nav is not None
+        else portfolio_state.current_nav
+        if portfolio_state is not None
+        else 1_000_000.0
+    )
+    components = create_runtime_components(portfolio_peak=portfolio_peak)
+    services = configure_services(
+        persistence=persistence,
         probability_gate=components.gate,
         capital_scaler=components.scaler,
         factor_calibrator=components.calibrator,
         alerter=components.alerter,
+        current_nav_provider=_build_current_nav_provider(persistence),
     )
     regime_tracker = RegimeTracker()
 
@@ -82,9 +101,10 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
             regime_override=args.regime_override,
             no_ema_filter=args.no_ema_filter,
             force_score=args.force_score,
+            services=services,
         )
         if not args.no_telegram and portfolio and regime:
-            _send_alert(portfolio, regime, config)
+            _send_alert(portfolio, regime, config, services=services)
 
         # Feed completed trades into the calibrator buffer for live updates.
         # In a real live environment, record actual closed trades here.
@@ -100,10 +120,11 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
             out_csv=args.bt_out,
             direction=args.bt_direction,
             debug=args.debug,
+            services=services,
         )
         return
     elif args.calibrate:
-        run_calibration()
+        run_calibration(services=services)
     elif args.watch:
         log.info("Watch mode — scanning every %d minutes", args.watch)
         while True:

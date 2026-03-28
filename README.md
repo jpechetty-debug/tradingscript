@@ -74,7 +74,7 @@ Factor weights are not static. The engine periodically re-calculates the **Infor
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `TELEGRAM_BOT_TOKEN` | — | Token for the alert delivery layer. |
-| `FYERS_ACCESS_TOKEN` | — | Daily token for high-priority market data. |
+| `FYERS_ACCESS_TOKEN` | — | Daily token for high-priority market data, refreshed by `scripts/fyers_setup.py`. |
 | `RISK_PER_TRADE_INR` | `10000` | Target risk in Rs. per trade. |
 | `PORTFOLIO_SIZE` | `5` | Maximum candidates to select in optimized portfolio. |
 | `MAX_SECTOR_PICKS` | `2` | Maximum tickers from the same sector. |
@@ -111,9 +111,10 @@ To enable dynamic position sizing that responds to portfolio performance between
 - **peak_nav**: Historical peak value. Used for **Tiered PANIC** drawdown calculation.
 
 ### Diagnostic Scripts
-- `scripts/fyers_setup.py`: Daily token refreshment and account verification.
+- `scripts/fyers_setup.py`: Daily token refreshment, `.env` update, and account verification.
 - `scripts/test_yf_diagnostic.py`: Verify yfinance connectivity and data health.
 - `scripts/test_icir.py`: Audit current factor Information Coefficients.
+- `python sovereign_quant_layer.py --capital-plan --regime TREND_UP`: Legacy compatibility wrapper for modular calibration and capital-plan inspection.
 
 ---
 *Built for Quantitative Precision — Sovereign Engine v14.4-Modular*

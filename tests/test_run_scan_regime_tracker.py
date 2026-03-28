@@ -21,13 +21,22 @@ class _FakePersistence:
 
 
 def _install_scan_service(monkeypatch, *, gate=None, scaler=None):
+    persistence = _FakePersistence()
     scan_service = services.ScanService(
         version=svm.VERSION,
-        persistence=_FakePersistence(),
+        persistence=persistence,
         probability_gate=gate,
         capital_scaler=scaler,
     )
-    monkeypatch.setattr(svm, "SCAN_SERVICE", scan_service)
+    monkeypatch.setattr(
+        svm,
+        "DEFAULT_SERVICES",
+        svm.ServiceBundle(
+            persistence=persistence,
+            scan_service=scan_service,
+            alert_service=scan_service.create_alert_service(),
+        ),
+    )
     return scan_service
 
 
@@ -106,7 +115,7 @@ def test_run_scan_applies_regime_gate_and_confidence_sizing(monkeypatch) -> None
         "RELIANCE.NS": _make_regime_df(close_mult=1.05, seed=3),
         config.BENCHMARK: _make_regime_df(close_mult=1.01, seed=4),
     }
-    captured: dict[str, object] = {}
+    captured: dict = {}
 
     class _FakeGate:
         def __init__(self) -> None:
