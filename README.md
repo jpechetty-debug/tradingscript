@@ -80,6 +80,7 @@ Factor weights are not static. The engine periodically re-calculates the **Infor
 | `MAX_SECTOR_PICKS` | `2` | Maximum tickers from the same sector. |
 | `MIN_PROB_WIN` | `0.52` | Minimum Platt-scaled probability to qualify. |
 | `REGIME_ADX_TREND` | `25.0` | ADX threshold to define a trending regime. |
+| `PORTFOLIO_STATE_PATH` | `state/portfolio_state.json` | JSON path for live NAV and peak tracking. |
 
 ---
 
@@ -96,6 +97,18 @@ Run high-frequency scans with exponential backoff and Telegram state updates:
 ```bash
 python run.py --watch 15
 ```
+
+### Live Capital Scaling
+To enable dynamic position sizing that responds to portfolio performance between scans, update the `state/portfolio_state.json` file. The engine reads this file at the start of every scan cycle:
+
+```json
+{
+  "current_nav": 875000,
+  "peak_nav": 1000000
+}
+```
+- **current_nav**: Current portfolio value in INR. Scales the Kelly fraction proportionally.
+- **peak_nav**: Historical peak value. Used for **Tiered PANIC** drawdown calculation.
 
 ### Diagnostic Scripts
 - `scripts/fyers_setup.py`: Daily token refreshment and account verification.
