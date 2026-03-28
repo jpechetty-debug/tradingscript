@@ -21,19 +21,25 @@ Fixes vs original
 from __future__ import annotations
 
 import logging
-import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Protocol
 
 import pandas as pd
 import yfinance as yf
 
 from .config import IST, SystemConfig
+from .runtime_paths import RUNTIME_PATHS, ensure_runtime_dirs
 from .retry import retry_with_backoff, YFINANCE_BREAKER, guarded_call
 
 log = logging.getLogger("sovereign.data")
+ensure_runtime_dirs()
+
+
+class _HistoryClient(Protocol):
+    def history(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        ...
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 FYERS_RESOLUTION: str    = "D"
@@ -71,7 +77,7 @@ def _yf_download_chunk(
 class FyersSessionManager:
     """Lazy singleton for the Fyers API client."""
 
-    _instance: Optional[object] = None
+    _instance: Optional[_HistoryClient] = None
 
     # Fyers access tokens are issued daily and expire at midnight IST.
     # Keeping a stale token in .env causes every history() call to return
@@ -114,7 +120,7 @@ class FyersSessionManager:
             pass   # stat failed — ignore, not worth crashing over
 
     @classmethod
-    def get_client(cls, config: SystemConfig) -> Optional[object]:
+    def get_client(cls, config: SystemConfig) -> Optional[_HistoryClient]:
         """
         Return a cached Fyers client, constructing it on first call.
 
@@ -135,12 +141,12 @@ class FyersSessionManager:
         cls._warn_if_token_stale(config)
 
         try:
-            from fyers_apiv3 import fyersModel  # type: ignore[import]
+            from fyers_apiv3 import fyersModel
 
             cls._instance = fyersModel.FyersModel(
                 client_id=config.FYERS_CLIENT_ID,
                 token=config.FYERS_ACCESS_TOKEN,
-                log_path=os.getcwd(),
+                log_path=str(RUNTIME_PATHS.logs_dir),
             )
             log.info("Fyers client initialised (client_id=%s).", config.FYERS_CLIENT_ID)
             return cls._instance

@@ -1,7 +1,9 @@
 import os
+from _bootstrap import ensure_repo_root
 from fyers_apiv3 import fyersModel
 from dotenv import load_dotenv
 
+ensure_repo_root()
 load_dotenv()
 
 def generate_access_token():

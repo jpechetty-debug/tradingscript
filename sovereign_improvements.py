@@ -19,30 +19,32 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import time
 import threading
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 import numpy as np
+
+from core.runtime_paths import RUNTIME_PATHS, ensure_parent, ensure_runtime_dirs
 
 # Fix #9: never call logging.basicConfig in a library module — it
 # reconfigures the root logger and overrides whatever the application
 # set up via core.telemetry.setup_logging.  The caller owns logging
 # configuration; this module just gets a named logger.
 logger = logging.getLogger("sovereign.patch")
+ensure_runtime_dirs()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS & DEFAULTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-WEIGHTS_PATH   = Path(os.getenv("WEIGHTS_PATH",   "factor_weights.json"))
-TRADE_LOG_PATH = Path(os.getenv("TRADE_LOG_PATH", "trade_log.json"))
-DEGRADATION_LOG_PATH = Path("data_provider_degradation.log")
+WEIGHTS_PATH = RUNTIME_PATHS.factor_weights_file
+TRADE_LOG_PATH = RUNTIME_PATHS.trade_log_file
+DEGRADATION_LOG_PATH = RUNTIME_PATHS.degradation_log_file
 
 REGIME_GATE: dict[str, float] = {
     "TREND_UP":   0.50,   # more permissive in confirmed uptrend
@@ -77,6 +79,13 @@ BACKOFF_JITTER  = 0.25
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "")
+T = TypeVar("T")
+
+
+def _regime_str(r: Any) -> str:
+    """Normalise regime to plain string — works with MarketRegimeType or str."""
+    value = getattr(r, "value", None)
+    return str(value if value is not None else r)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -108,6 +117,7 @@ class TieredCapitalScaler:
 
     def capital_fraction(self, current_nav: float, regime: str) -> float:
         """Return [0, 1] fraction of capital allowed for new positions."""
+        regime = _regime_str(regime)
         self.update_peak(current_nav)
         dd = self.current_drawdown(current_nav)
 
@@ -161,9 +171,11 @@ class RegimeProbabilityGate:
         self._gates = {**REGIME_GATE, **(overrides or {})}
 
     def threshold(self, regime: str) -> float:
+        regime = _regime_str(regime)
         return self._gates.get(regime, 0.52)
 
     def passes(self, p_win: float, regime: str) -> bool:
+        regime = _regime_str(regime)
         t = self.threshold(regime)
         result = p_win >= t
         logger.debug(
@@ -198,7 +210,7 @@ class ResilientDataProvider:
         self._fyers    = fyers_client
         self._degraded = False
         self._fail_count = 0
-        self._degradation_log: list[dict] = []
+        self._degradation_log: list[dict[str, Any]] = []
 
         try:
             import yfinance as yf
@@ -213,7 +225,7 @@ class ResilientDataProvider:
         symbol: str,
         period: str = "1d",
         interval: str = "15m",
-        **kwargs,
+        **kwargs: Any,
     ) -> Any:
         """Fetch OHLCV data. Returns pandas DataFrame."""
         if self._fyers and not self._degraded:
@@ -230,13 +242,20 @@ class ResilientDataProvider:
         self._fail_count = 0
         logger.info("Fyers provider restored — resuming primary data source.")
 
-    def degradation_report(self) -> list[dict]:
+    def degradation_report(self) -> list[dict[str, Any]]:
         return list(self._degradation_log)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _fetch_fyers(self, symbol, period, interval, **kwargs) -> Any:
+    def _fetch_fyers(
+        self,
+        symbol: str,
+        period: str,
+        interval: str,
+        **kwargs: Any,
+    ) -> Any:
         # Adapt to your actual Fyers client API signature
+        _ = period, kwargs
         if symbol == "^NSEI":
             fsym = "NSE:NIFTY50-INDEX"
         elif symbol == "^NSEBANK":
@@ -259,7 +278,13 @@ class ResilientDataProvider:
         df.set_index("timestamp", inplace=True)
         return df
 
-    def _fetch_yfinance(self, symbol, period, interval, **kwargs) -> Any:
+    def _fetch_yfinance(
+        self,
+        symbol: str,
+        period: str,
+        interval: str,
+        **kwargs: Any,
+    ) -> Any:
         # Don't append .NS to indices (starting with ^)
         if symbol.startswith("^"):
             ticker = symbol
@@ -303,9 +328,9 @@ class ResilientDataProvider:
             )
 
     @staticmethod
-    def _write_degradation_log(event: dict) -> None:
+    def _write_degradation_log(event: dict[str, Any]) -> None:
         try:
-            with DEGRADATION_LOG_PATH.open("a") as f:
+            with ensure_parent(DEGRADATION_LOG_PATH).open("a", encoding="utf-8") as f:
                 f.write(json.dumps(event) + "\n")
         except OSError:
             pass
@@ -342,7 +367,7 @@ class RollingFactorCalibrator:
         self._wpath    = weights_path
         self._tpath    = trade_log_path
 
-        self._buffer: deque[dict] = deque(maxlen=window)
+        self._buffer: deque[dict[str, Any]] = deque(maxlen=window)
         self._weights: dict[str, float] = self._load_weights()
         self._lock    = threading.Lock()
         self._running = False
@@ -441,7 +466,9 @@ class RollingFactorCalibrator:
     def _load_weights(self) -> dict[str, float]:
         if self._wpath.exists():
             try:
-                return json.loads(self._wpath.read_text())
+                loaded = json.loads(self._wpath.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    return {str(k): float(v) for k, v in loaded.items()}
             except Exception:
                 pass
         # Default v13.0 weights
@@ -453,16 +480,21 @@ class RollingFactorCalibrator:
 
     def _save_weights(self, weights: dict[str, float]) -> None:
         try:
-            self._wpath.write_text(json.dumps(weights, indent=2))
+            ensure_parent(self._wpath).write_text(json.dumps(weights, indent=2), encoding="utf-8")
         except OSError as e:
             logger.error("Could not save weights: %s", e)
 
-    def _persist_trade(self, entry: dict) -> None:
+    def _persist_trade(self, entry: dict[str, Any]) -> None:
         try:
-            log: list = json.loads(self._tpath.read_text()) if self._tpath.exists() else []
-            log.append(entry)
-            log = log[-2000:]   # keep last 2000 trades max
-            self._tpath.write_text(json.dumps(log, indent=2))
+            log_entries: list[dict[str, Any]]
+            if self._tpath.exists():
+                loaded = json.loads(self._tpath.read_text(encoding="utf-8"))
+                log_entries = [item for item in loaded if isinstance(item, dict)] if isinstance(loaded, list) else []
+            else:
+                log_entries = []
+            log_entries.append(entry)
+            log_entries = log_entries[-2000:]   # keep last 2000 trades max
+            ensure_parent(self._tpath).write_text(json.dumps(log_entries, indent=2), encoding="utf-8")
         except OSError:
             pass
 
@@ -492,7 +524,7 @@ class ExponentialBackoff:
         base:        float = BACKOFF_BASE,
         cap:         float = BACKOFF_MAX,
         jitter:      float = BACKOFF_JITTER,
-        retryable_exceptions: tuple = (
+        retryable_exceptions: tuple[type[BaseException], ...] = (
             ConnectionError, TimeoutError, OSError,
         ),
     ) -> None:
@@ -504,7 +536,7 @@ class ExponentialBackoff:
         self._attempt     = 0
         self._total_waits = 0.0
 
-    def call(self, fn, *args, **kwargs) -> Any:
+    def call(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         """Execute fn(*args, **kwargs) with retry on failure."""
         self._attempt    = 0
         self._total_waits = 0.0
@@ -540,21 +572,23 @@ class ExponentialBackoff:
     def _sleep_duration(self) -> float:
         """Full jitter: uniform(0, min(cap, base * 2^attempt))"""
         ceiling = min(self._cap, self._base * (2 ** self._attempt))
-        wait    = np.random.uniform(0, ceiling)
+        wait = float(np.random.uniform(0, ceiling))
         # Add a small fixed jitter floor to prevent thundering herd
-        wait   += self._jitter
+        wait += self._jitter
         self._total_waits += wait
         return round(wait, 2)
 
     @staticmethod
-    def wrap(max_retries: int = 5, **kwargs):
+    def wrap(max_retries: int = 5, **kwargs: Any) -> Callable[[Callable[..., T]], Callable[..., T]]:
         """Decorator factory."""
-        def decorator(fn):
+        def decorator(fn: Callable[..., T]) -> Callable[..., T]:
             backoff = ExponentialBackoff(max_retries=max_retries, **kwargs)
-            def wrapper(*args, **kw):
+            def wrapper(*args: Any, **kw: Any) -> T:
                 return backoff.call(fn, *args, **kw)
+
             wrapper.__name__ = fn.__name__
             return wrapper
+
         return decorator
 
 
@@ -582,7 +616,7 @@ class WatchModeRunner:
         self._backoff   = ExponentialBackoff(max_retries=4)
         self._consecutive_fails = 0
 
-    def run(self, scan_fn, *args, **kwargs) -> None:
+    def run(self, scan_fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
         logger.info("WatchMode started — interval=%ds", self._interval)
         _send_telegram(f"🟢 *Watch mode started*\nInterval: {self._interval}s")
 
@@ -691,6 +725,7 @@ class RegimeAwareTelegramAlerter:
         self._scaler = scaler
 
     def _regime_header(self, regime: str, current_nav: Optional[float] = None) -> str:
+        regime    = _regime_str(regime)
         emoji     = REGIME_EMOJI.get(regime, "⚪")
         cap_label = REGIME_CAPITAL_LABEL.get(regime, "—")
         threshold = self._gate.threshold(regime)
@@ -748,6 +783,8 @@ class RegimeAwareTelegramAlerter:
         return _send_telegram("\n".join(msg_lines))
 
     def send_regime_change(self, old_regime: str, new_regime: str) -> bool:
+        old_regime = _regime_str(old_regime)
+        new_regime = _regime_str(new_regime)
         old_e = REGIME_EMOJI.get(old_regime, "⚪")
         new_e = REGIME_EMOJI.get(new_regime, "⚪")
         old_c = REGIME_CAPITAL_LABEL.get(old_regime, "—")
@@ -778,7 +815,7 @@ class RegimeAwareTelegramAlerter:
     ) -> bool:
         header = self._regime_header(regime, current_nav)
         lines  = [
-            f"📊 *Daily Sovereign Engine Summary*",
+            "📊 *Daily Sovereign Engine Summary*",
             f"_{datetime.now().strftime('%d %b %Y')}_\n",
             header,
             "─" * 28,
@@ -805,6 +842,7 @@ class RegimeAwareTelegramAlerter:
         return _send_telegram("\n".join(lines))
 
     def send_calibration_update(self, new_weights: dict[str, float], regime: str) -> bool:
+        regime = _regime_str(regime)
         lines = [
             self._regime_header(regime),
             "─" * 28,
@@ -822,7 +860,7 @@ class RegimeAwareTelegramAlerter:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def apply(
-    engine,
+    engine: Any,
     portfolio_peak:    float = 1_000_000,
     current_nav:       float = 1_000_000,
     fyers_client:      Any   = None,

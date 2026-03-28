@@ -86,7 +86,7 @@ async def _async_fetch_fyers(
     The Fyers SDK is synchronous, so we run it in *executor*.
     """
     async with sem:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         fyers = FyersSessionManager.get_client(config)
         if fyers is None:
             return ticker, None
@@ -135,7 +135,7 @@ async def _async_fetch_yfinance_chunk(
     Returns a partial ``{ticker: df}`` dict for the tickers in this chunk.
     """
     async with sem:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _sync_download() -> dict[str, pd.DataFrame]:
             out: dict[str, pd.DataFrame] = {}
@@ -215,7 +215,6 @@ async def async_fetch_daily_batch(
     out: dict[str, pd.DataFrame] = {}
 
     max_workers = max(config.MAX_WORKERS, 4)
-    loop        = asyncio.get_event_loop()
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
 
@@ -233,11 +232,11 @@ async def async_fetch_daily_batch(
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            for item in results:
-                if isinstance(item, Exception):
-                    log.error("Async Fyers task raised: %s", item)
+            for fyers_item in results:
+                if isinstance(fyers_item, BaseException):
+                    log.error("Async Fyers task raised: %s", fyers_item)
                     continue
-                ticker, df = item
+                ticker, df = fyers_item
                 if df is not None:
                     out[ticker] = df
 
@@ -264,11 +263,11 @@ async def async_fetch_daily_batch(
         ]
         chunk_results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
 
-        for item in chunk_results:
-            if isinstance(item, Exception):
-                log.error("Async yfinance chunk raised: %s", item)
+        for chunk_item in chunk_results:
+            if isinstance(chunk_item, BaseException):
+                log.error("Async yfinance chunk raised: %s", chunk_item)
                 continue
-            out.update(item)
+            out.update(chunk_item)
 
     log.info("Async yfinance: %d / %d symbols fetched.", len(out), len(all_symbols))
     return out
@@ -296,7 +295,6 @@ def fetch_daily_batch_async(
     try:
         loop = asyncio.get_running_loop()
         # Already inside an event loop — schedule as a coroutine
-        import concurrent.futures
         future = asyncio.run_coroutine_threadsafe(
             async_fetch_daily_batch(tickers, config), loop
         )

@@ -1,4 +1,5 @@
-import types, sys
+import types
+import sys
 import os
 from unittest.mock import patch, MagicMock
 import pandas as pd
@@ -48,7 +49,6 @@ def _fake_multi_df(tickers):
 class TestFetchDailyBatch:
 
     def test_yfinance_multiindex_parsed_correctly(self):
-        tickers = ["RELIANCE.NS", "INFY.NS"]
         # fetch_daily_batch adds benchmark. Deduping might result in 2 or 3 tickers.
         # We'll use 3 to force MultiIndex.
         fake = _fake_multi_df(["RELIANCE.NS", "INFY.NS", "^NSEI"])
@@ -96,7 +96,6 @@ class TestFetchDailyBatch:
         assert "^NSEI" in captured
 
     def test_columns_title_cased(self):
-        n = 10
         tickers = ["RELIANCE.NS", "^NSEI"]
         fake = _fake_multi_df(tickers)
         with patch("core.data_provider._yf_download_chunk", return_value=fake):

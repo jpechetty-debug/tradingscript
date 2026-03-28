@@ -1,6 +1,9 @@
-
 import pandas as pd
 import numpy as np
+from _bootstrap import ensure_repo_root
+
+ensure_repo_root()
+
 from core.factors import calibrate_ic_weights, DEFAULT_WEIGHTS
 from core.config import CONFIG
 from core.data_provider import fetch_daily_batch

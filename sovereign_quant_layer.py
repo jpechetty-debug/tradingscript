@@ -3,11 +3,11 @@ sovereign_quant_layer.py
 ========================
 THE QUANTITATIVE INFRASTRUCTURE LAYER (v9.0)
 =============================================
-Wraps sovereign_engine_v8.py with advanced portfolio intelligence.
+Standalone quantitative analysis layer for the Sovereign Engine.
 
-This is NOT a replacement for v8.
-v8 = signal engine (factors, regime, scoring)
-This = portfolio brain (weights, sizing, risk, validation)
+Provides portfolio-level intelligence: factor weight optimisation,
+probability calibration, capital allocation, and transaction cost
+sensitivity analysis. Operates independently of the live scan pipeline.
 
 The 10 components implemented here:
 ──────────────────────────────
@@ -45,6 +45,7 @@ import time
 import warnings
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -54,6 +55,8 @@ import yfinance as yf
 from scipy import stats
 from scipy.optimize import minimize
 from scipy.special import expit as sigmoid
+
+from core.runtime_paths import RUNTIME_PATHS, ensure_parent, ensure_runtime_dirs
 
 try:
     from sklearn.calibration import CalibratedClassifierCV
@@ -70,6 +73,16 @@ warnings.filterwarnings("ignore")
 
 IST     = pytz.timezone("Asia/Kolkata")
 VERSION = "9.0-QL"
+FACTOR_WEIGHTS_PATH = RUNTIME_PATHS.state_dir / "factor_weights.json"
+PROB_CALIBRATION_PATH = RUNTIME_PATHS.state_dir / "prob_calibration.json"
+DEFAULT_TRADE_LOG_PATH = RUNTIME_PATHS.artifacts_dir / "backtest_latest.csv"
+
+ensure_runtime_dirs()
+
+
+def _resolve_state_path(path: str, default_path: Path) -> Path:
+    candidate = Path(path)
+    return candidate if candidate.is_absolute() else default_path.parent / candidate
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TERMINAL COLOURS
@@ -164,15 +177,17 @@ class FactorWeightOptimizer:
             print(f"  {fname:<12} {opt:>10.4f} {dflt:>10.4f} {ir:>8.3f}")
         return self
 
-    def save(self, path: str = "factor_weights.json") -> None:
-        with open(path, "w") as f:
+    def save(self, path: str = str(FACTOR_WEIGHTS_PATH)) -> None:
+        target = ensure_parent(_resolve_state_path(path, FACTOR_WEIGHTS_PATH))
+        with target.open("w", encoding="utf-8") as f:
             json.dump({"weights": self.weights_, "fitted": self.fitted_}, f, indent=2)
 
     @classmethod
-    def load(cls, path: str = "factor_weights.json") -> "FactorWeightOptimizer":
+    def load(cls, path: str = str(FACTOR_WEIGHTS_PATH)) -> "FactorWeightOptimizer":
         obj = cls()
-        if os.path.exists(path):
-            with open(path) as f:
+        target = _resolve_state_path(path, FACTOR_WEIGHTS_PATH)
+        if target.exists():
+            with target.open(encoding="utf-8") as f:
                 d = json.load(f)
             obj.weights_ = d.get("weights", cls.DEFAULT_WEIGHTS)
             obj.fitted_  = d.get("fitted", False)
@@ -225,11 +240,12 @@ class ProbabilityCalibrator:
             return float(np.interp(raw_prob, self.iso_x_, self.iso_y_))
         return raw_prob
 
-    def save(self, path: str = "prob_calibration.json") -> None:
+    def save(self, path: str = str(PROB_CALIBRATION_PATH)) -> None:
         d = {"method": self.method_, "platt_a": self.platt_a_, "platt_b": self.platt_b_}
         if self.iso_x_ is not None:
             d["iso_x"], d["iso_y"] = self.iso_x_.tolist(), self.iso_y_.tolist()
-        with open(path, "w") as f:
+        target = ensure_parent(_resolve_state_path(path, PROB_CALIBRATION_PATH))
+        with target.open("w", encoding="utf-8") as f:
             json.dump(d, f, indent=2)
 
 
@@ -270,14 +286,14 @@ class TCostSensitivityAnalyzer:
 class WalkForwardValidator:
     def validate(self, trade_log: pd.DataFrame):
         print(BOLD("\n  Walk-Forward Weight Validation (Manual Check Required)"))
-        print(DIM("  Split log into temporal buckets and check weight stability in factor_weights.json over time."))
+        print(DIM(f"  Split log into temporal buckets and check weight stability in {FACTOR_WEIGHTS_PATH} over time."))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trade-log", default="backtest_latest.csv")
+    parser.add_argument("--trade-log", default=str(DEFAULT_TRADE_LOG_PATH))
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--capital-plan", action="store_true")
     parser.add_argument("--regime", default="TREND_UP")

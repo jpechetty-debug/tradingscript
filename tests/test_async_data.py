@@ -1,7 +1,7 @@
 import asyncio
 import pandas as pd
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import patch, MagicMock
 
 def _make_config():
     cfg = MagicMock()
@@ -57,7 +57,6 @@ async def test_async_fetch_fyers_returns_none_without_client():
 async def test_async_yfinance_chunk_assembles_results():
     """yfinance async path: mock executor, verify chunk is assembled into dict."""
     from core.async_data import async_fetch_daily_batch
-    import asyncio
 
     n = 50
     fake = pd.DataFrame({
@@ -72,7 +71,7 @@ async def test_async_yfinance_chunk_assembles_results():
         )
     assert isinstance(result, dict)
 
-@pytest.mark.asyncio  
+@pytest.mark.asyncio
 async def test_async_fetch_respects_semaphore_limit():
     """Concurrent fetches are bounded by the semaphore — no deadlock."""
     from core.async_data import async_fetch_daily_batch

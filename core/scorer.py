@@ -24,7 +24,7 @@ from scipy.special import expit as _sigmoid
 from .config import SystemConfig
 from .factors import FactorScores, compute_factors, true_volume_profile
 from .portfolio import compute_targets, calculate_kelly_size
-from .regime import MarketRegime, compute_rs
+from .regime import MarketRegime, MarketRegimeType, compute_rs
 from .universe import TICKER_TO_SECTOR, N_SECTORS
 
 log = logging.getLogger("sovereign.scorer")
@@ -363,20 +363,24 @@ def score_ticker(
 
     # ── 3. Regime gate ───────────────────────────────────────────────────────
     if direction == "LONG"  and not regime.allows_long():
-        if debug: log.debug("%s: regime blocks LONG (%s)", ticker, regime.regime)
+        if debug:
+            log.debug("%s: regime blocks LONG (%s)", ticker, regime.regime)
         return None
     if direction == "SHORT" and not regime.allows_short():
-        if debug: log.debug("%s: regime blocks SHORT (%s)", ticker, regime.regime)
+        if debug:
+            log.debug("%s: regime blocks SHORT (%s)", ticker, regime.regime)
         return None
 
     # ── 4. EMA-200 structural filter ─────────────────────────────────────────
     if config.USE_EMA200_FILTER:
         above200 = close > ema200
         if direction == "LONG"  and not above200:
-            if debug: log.debug("%s: EMA-200 VETO (LONG below 200)", ticker)
+            if debug:
+                log.debug("%s: EMA-200 VETO (LONG below 200)", ticker)
             return None
         if direction == "SHORT" and above200:
-            if debug: log.debug("%s: EMA-200 VETO (SHORT above 200)", ticker)
+            if debug:
+                log.debug("%s: EMA-200 VETO (SHORT above 200)", ticker)
             return None
 
     # ── 5. Factor model ──────────────────────────────────────────────────────
@@ -404,7 +408,7 @@ def score_ticker(
 
     # ── 6. Session + regime composite adjustment ──────────────────────────────
     sess_mult = _SESSION_MULT.get(session, 1.0)
-    if regime.regime == "RANGE":
+    if regime.regime == MarketRegimeType.RANGE:
         sess_mult *= 0.88
     adj_composite = float(np.clip(factors.composite * sess_mult, 0.0, 1.0))
 
@@ -447,10 +451,12 @@ def score_ticker(
 
     # ── 9. Probability & expectancy gates ────────────────────────────────────
     if prob_win < config.MIN_PROB_WIN:
-        if debug: log.debug("%s: prob %.2f < gate %.2f", ticker, prob_win, config.MIN_PROB_WIN)
+        if debug:
+            log.debug("%s: prob %.2f < gate %.2f", ticker, prob_win, config.MIN_PROB_WIN)
         return None
     if exp_r < config.MIN_EXPECTANCY_R:
-        if debug: log.debug("%s: E(R) %.3f < gate %.3f", ticker, exp_r, config.MIN_EXPECTANCY_R)
+        if debug:
+            log.debug("%s: E(R) %.3f < gate %.3f", ticker, exp_r, config.MIN_EXPECTANCY_R)
         return None
 
     # ── 10. Kelly position sizing ─────────────────────────────────────────────
@@ -496,27 +502,37 @@ def score_ticker(
     col = "Up_Day" if direction == "LONG" else "Dn_Day"
     streak = 0
     for v in reversed(daily_df[col].values[-10:]):
-        if v == 1: streak += 1
-        else: break
+        if v == 1:
+            streak += 1
+        else:
+            break
 
     tick_rs  = compute_rs(daily_df["Close"], bench, lookback=config.RS_LOOKBACK)
     sec_rank = sector_ranks.get(sector, N_SECTORS)
-    sec_rs   = sector_rs.get(sector, 0.0)
+    sec_rs = sector_rs.get(sector, 0.0)
 
     change_pct = ((close - float(daily_df["Open"].iloc[-1]))
                   / float(daily_df["Open"].iloc[-1])) * 100
 
     # ── 12. Signal reasons (human-readable) ───────────────────────────────────
     reasons: list[str] = []
-    if factors.trend      > 0.7: reasons.append("Trend✅")
-    if factors.momentum   > 0.6: reasons.append(f"Mom✅RSI{rsi:.0f}")
-    if factors.volume     > 0.6: reasons.append(f"Vol✅×{rvol:.1f}")
-    if factors.volatility > 0.6: reasons.append("Coiled")
-    if factors.rs         > 0.6: reasons.append(f"RS✅#{sec_rank}")
-    if factors.quality    > 0.6: reasons.append("Qual✅")
-    if adx >= 25:                 reasons.append(f"ADX{adx:.0f}")
-    if mtf_full:                  reasons.append("MTF✅")
-    reasons.append(f"Regime:{regime.regime}")
+    if factors.trend > 0.7:
+        reasons.append("Trend✅")
+    if factors.momentum > 0.6:
+        reasons.append(f"Mom✅RSI{rsi:.0f}")
+    if factors.volume > 0.6:
+        reasons.append(f"Vol✅×{rvol:.1f}")
+    if factors.volatility > 0.6:
+        reasons.append("Coiled")
+    if factors.rs > 0.6:
+        reasons.append(f"RS✅#{sec_rank}/{sec_rs:+.1f}")
+    if factors.quality > 0.6:
+        reasons.append("Qual✅")
+    if adx >= 25:
+        reasons.append(f"ADX{adx:.0f}")
+    if mtf_full:
+        reasons.append("MTF✅")
+    reasons.append(f"Regime:{regime.label}")
     reasons.append(f"RR:{targets.rr:.1f}x")
     reasons.append(f"Kurt:k={excess_kurt:.1f}->{kurt_corr:.0%}Kelly")
 
@@ -567,7 +583,7 @@ def score_ticker(
         poc=round(poc, 2),
         val=round(val, 2),
         vah=round(vah, 2),
-        regime=regime.regime,
+        regime=regime.label,
         session=session,
         reasons=reasons,
     )

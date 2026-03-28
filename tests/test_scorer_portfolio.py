@@ -820,6 +820,11 @@ class TestScoreTicker:
                     "stop", "t1", "shares", "regime", "session"):
             assert key in d
 
+    def test_happy_path_regime_serialised_as_string(self):
+        result = self._call()
+        assert result is not None
+        assert result.regime == "TREND_UP"
+
     def test_session_midday_chop_reduces_composite(self):
         """MIDDAY_CHOP multiplier (0.92) should produce lower composite than OPENING_RANGE."""
         df    = _make_ohlcv()

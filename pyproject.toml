@@ -30,3 +30,10 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "W"]
 ignore = ["E501"]  # line-length handled by line-length setting
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test_data_provider.py" = ["E402"]
+"tests/test_factors.py" = ["E402"]
+"tests/test_indicators.py" = ["E402"]
+"tests/test_regime.py" = ["E402"]
+"tests/test_scorer_portfolio.py" = ["E402"]

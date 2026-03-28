@@ -3,30 +3,39 @@
 __pycache__/
 *.log
 *.jsonl
-*.csv
-*.xlsx
-*.zip
-*.zip.*
 .coverage
 .cache/
 .pytest_cache/
 .ruff_cache/
-fyersApi.log
-fyersRequests.log
-tmp/
-!README.md
-!dashboard.html
+.mypy_cache/
 .vscode/
 .idea/
 .DS_Store
- 
-# JSON: only ignore package/build artifacts, NOT runtime calibration files.
-# platt_calibration.json, trade_log.json, factor_weights.json MUST persist.
-package-lock.json
- 
-# Generated backtest equity-curve HTML reports
-backtest_equity_*.html
+.agent/
+tmp/
 
-# Output and scan results
-*.out
-scan_results*.txt
+# Runtime directories
+/artifacts/*
+!/artifacts/.gitkeep
+/logs/*
+!/logs/.gitkeep
+/state/*
+!/state/.gitkeep
+
+# Legacy root-level runtime outputs
+/fyersApi.log
+/fyersRequests.log
+/*.out
+/scan_results*.txt
+/test_*.txt
+/test_*.log
+/backtest_*.csv
+/backtest_equity_*.html
+/sovereign_*.xlsx
+/sovereign_*.csv
+/sovereign_all_*.csv
+/sovereign_portfolio_*.csv
+
+# Misc generated content
+/temp_check/
+package-lock.json

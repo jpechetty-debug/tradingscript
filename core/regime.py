@@ -24,7 +24,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .config import MarketRegimeType
+from .config import MarketRegimeType, SystemConfig
 
 
 # ── RegimeTracker ─────────────────────────────────────────────────────────────
@@ -74,6 +74,11 @@ class MarketRegime:
     sector_concentration: float = 0.5   # Fix 7: fraction of sectors aligned with regime
     regime_locked: bool = False          # Fix 6: True during opening noise window
 
+    @property
+    def label(self) -> str:
+        """String label for logging / serialization boundaries."""
+        return self.regime.value
+
     def allows_long(self) -> bool:
         return (
             self.regime in (MarketRegimeType.TREND_UP, MarketRegimeType.EXPANSION)
@@ -93,7 +98,7 @@ class MarketRegime:
         s = {
             MarketRegimeType.TREND_UP:   "BREAKOUT / MOMENTUM (confirmed)",
             MarketRegimeType.TREND_DOWN: "SHORT MOMENTUM (confirmed)",
-            MarketRegimeType.RANGE:      "MEAN REVERSION — fade edges",
+            MarketRegimeType.RANGE:      "MEAN REVERSION ONLY — directional trades blocked",
             MarketRegimeType.EXPANSION:  "VOLATILITY BREAKOUT — both sides",
             MarketRegimeType.PANIC:      "NO TRADE — protect capital",
         }[self.regime]
@@ -111,7 +116,7 @@ def _regime_confidence(
     adx_med: float,
     breadth: float,
     atr_rat: float,
-    config,
+    config: SystemConfig,
     sector_conc: float = 0.5,
 ) -> float:
     """Strength-weighted confidence score in [0, 1].
@@ -141,6 +146,22 @@ def _regime_confidence(
         return round(float(np.clip(0.55 + adx_str * 0.25 + atr_str * 0.20, 0.0, 1.0)), 3)
 
     return 0.55  # RANGE — neutral baseline
+
+
+def confidence_position_scale(confidence: float) -> float:
+    """
+    Convert regime confidence into a gentle position-size multiplier.
+
+    The regime itself already gates directional eligibility. This helper
+    makes confidence operational without letting a middling confidence
+    reading collapse sizing too aggressively:
+
+    - 0.00 confidence -> 0.80x size
+    - 0.50 confidence -> 0.90x size
+    - 1.00 confidence -> 1.00x size
+    """
+    bounded = float(np.clip(confidence, 0.0, 1.0))
+    return round(0.80 + 0.20 * bounded, 3)
 
 
 # ── Sector concentration (Fix 7) ─────────────────────────────────────────────
@@ -176,7 +197,7 @@ def classify_regime(
     processed: dict[str, pd.DataFrame],
     breadth: float,
     tracker: RegimeTracker,
-    config,
+    config: SystemConfig,
     *,
     locked: bool = False,
     sector_rs: dict[str, float] | None = None,
@@ -291,7 +312,7 @@ def compute_rs(
     stock: pd.Series,
     bench: pd.Series,
     lookback: int | None = None,
-    config=None,
+    config: SystemConfig | None = None,
 ) -> float:
     """
     Log-return relative-strength of *stock* vs *bench* over *lookback* bars.
@@ -325,10 +346,10 @@ def compute_rs(
         return 0.0
     s = np.log(m["s"].iloc[-1] / m["s"].iloc[-lookback - 1])
     b = np.log(m["b"].iloc[-1] / m["b"].iloc[-lookback - 1])
-    return round((s - b) * 100, 3)
+    return round(float((s - b) * 100), 3)
 
 
-def compute_breadth(processed: dict[str, pd.DataFrame], config) -> float:
+def compute_breadth(processed: dict[str, pd.DataFrame], config: SystemConfig) -> float:
     total = above = 0
     for ticker, df in processed.items():
         if ticker == config.BENCHMARK or df.empty:
@@ -337,13 +358,13 @@ def compute_breadth(processed: dict[str, pd.DataFrame], config) -> float:
             total += 1
             if float(df["Close"].iloc[-1]) > float(df["EMA_50"].iloc[-1]):
                 above += 1
-    return above / total if total else 0.5
+    return float(above / total) if total else 0.5
 
 
 def compute_sector_rs(
     processed: dict[str, pd.DataFrame],
     bench: pd.Series,
-    config,
+    config: SystemConfig,
 ) -> dict[str, float]:
     from collections import defaultdict
     from .universe import TICKER_TO_SECTOR

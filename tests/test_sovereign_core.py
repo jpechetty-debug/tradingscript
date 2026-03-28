@@ -31,7 +31,6 @@ from core.portfolio import (
     calculate_kelly_size,
     compute_targets,
     optimize_portfolio,
-    TradeTargets,
 )
 from core.regime import (
     RegimeTracker,

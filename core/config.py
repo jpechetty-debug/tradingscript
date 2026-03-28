@@ -12,10 +12,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, fields
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from enum import Enum
-
-import pytz
+from zoneinfo import ZoneInfo
 
 
 class SecretStr(str):
@@ -47,8 +46,7 @@ class SecretStr(str):
         return "SecretStr('****')"
 
 
-
-IST = pytz.timezone("Asia/Kolkata")
+IST = ZoneInfo("Asia/Kolkata")
 
 # Fields whose values must never appear in repr / logs.
 _SECRET_FIELD_NAMES: frozenset[str] = frozenset({
@@ -162,7 +160,7 @@ class SystemConfig:
     # ── Data fetch ────────────────────────────────────────────────────────────
     DAILY_PERIOD: str = "1y"
     BENCHMARK:    str = "^NSEI"
-    MAX_WORKERS:  int = 20
+    MAX_WORKERS:  int = min(20, (os.cpu_count() or 4) * 2)
 
     # ── Session times (IST) ───────────────────────────────────────────────────
     SESSION_OPEN_END:   str = "10:15"
@@ -216,13 +214,13 @@ class SystemConfig:
 
     def session_from_time(self, now: datetime | None = None) -> str:
         """Return session label for the given IST datetime (defaults to now)."""
-        import datetime as dt
-        now = now or datetime.now(IST)
-        t = now.time() if hasattr(now, "time") else now
-        t1 = dt.datetime.strptime(self.SESSION_OPEN_END,   "%H:%M").time()
-        t2 = dt.datetime.strptime(self.SESSION_MIDDAY_END, "%H:%M").time()
-        if t < t1:  return "OPENING_RANGE"
-        if t < t2:  return "MIDDAY_CHOP"
+        current_time = (now.astimezone(IST) if now is not None else datetime.now(IST)).time()
+        t1 = datetime.strptime(self.SESSION_OPEN_END, "%H:%M").time()
+        t2 = datetime.strptime(self.SESSION_MIDDAY_END, "%H:%M").time()
+        if current_time < t1:
+            return "OPENING_RANGE"
+        if current_time < t2:
+            return "MIDDAY_CHOP"
         return "CLOSING_TREND"
 
     def is_regime_locked(self, now: datetime | None = None) -> bool:
@@ -238,15 +236,13 @@ class SystemConfig:
         Outside market hours (pre-open / post-close) this always returns
         ``False`` so off-hours backtests and unit tests are unaffected.
         """
-        import datetime as dt
-        now = now or datetime.now(IST)
-        t = now.time() if hasattr(now, "time") else now
-        open_t = dt.datetime.strptime(self.MARKET_OPEN_TIME, "%H:%M").time()
+        current_time = (now.astimezone(IST) if now is not None else datetime.now(IST)).time()
+        open_t = datetime.strptime(self.MARKET_OPEN_TIME, "%H:%M").time()
         lock_end = (
-            dt.datetime.combine(dt.date.today(), open_t)
-            + dt.timedelta(minutes=self.REGIME_LOCK_MINUTES)
+            datetime.combine(date.today(), open_t)
+            + timedelta(minutes=self.REGIME_LOCK_MINUTES)
         ).time()
-        return open_t <= t < lock_end
+        return open_t <= current_time < lock_end
 
 
 CONFIG = SystemConfig()

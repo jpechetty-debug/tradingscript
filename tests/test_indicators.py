@@ -269,11 +269,11 @@ class TestSupertrend:
 
     def test_super_up_true_in_uptrend(self, df_up):
         """In a strong uptrend, the last bar should have Super_Up = True."""
-        assert df_up["Super_Up"].iloc[-1] == True
+        assert df_up["Super_Up"].iloc[-1]
 
     def test_super_up_false_in_downtrend(self, df_down):
         """In a strong downtrend, the last bar should have Super_Up = False."""
-        assert df_down["Super_Up"].iloc[-1] == False
+        assert not df_down["Super_Up"].iloc[-1]
 
     def test_supertrend_no_nan_in_later_bars(self, df_std):
         """After warm-up, Supertrend should have no NaN values."""

@@ -32,13 +32,10 @@ Usage
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import time
-from functools import lru_cache
 from typing import Any, Optional
 
-import numpy as np
 import pandas as pd
 
 from .factors import true_volume_profile

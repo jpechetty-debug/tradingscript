@@ -633,7 +633,7 @@ class TestIsRegimeLocked:
     def _make_ist_time(self, hour: int, minute: int):
         from core.config import IST
         import datetime as dt
-        return IST.localize(dt.datetime(2024, 1, 15, hour, minute, 0))
+        return dt.datetime(2024, 1, 15, hour, minute, 0, tzinfo=IST)
 
     def test_locked_at_open(self):
         config = _make_config(MARKET_OPEN_TIME="09:15", REGIME_LOCK_MINUTES=20)

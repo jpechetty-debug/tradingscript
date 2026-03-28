@@ -1,124 +1,167 @@
-# 🦅 Sovereign Engine v14.5-Modular: Institutional Production Build
+# Sovereign Engine
 
-Sovereign Engine is a professional-grade quantitative trading architecture designed for high-fidelity scanning, probabilistic setup evaluation, and automated portfolio optimization. 
+Sovereign Engine is a modular quantitative trading runtime for market scans,
+regime-aware scoring, walk-forward backtests, and alert delivery.
 
-> [!IMPORTANT]
-> **Production Hardened (v14.5)**: This build introduces **ScanState-scoped isolation**, **Institutional CI/CD (Mypy/Ruff/Pytest)**, and a formal **`run.py`** entry point. It restores 61 core math tests and achieves 87.6% test coverage.
+The project is organized so source code, mutable runtime state, generated
+artifacts, and logs live in separate places. That keeps the repo easier to
+operate, cleaner to review, and safer to automate.
 
----
+## What It Does
 
-## 🌌 System Architecture
+- Fetches market data through the provider layer in `core/data_provider.py`
+- Computes indicators, factor scores, and market regime state
+- Builds ranked candidates and optimized portfolios
+- Supports walk-forward backtests and Platt calibration
+- Sends alert summaries through the messaging layer
 
-The project features a high-performance modular architecture where each component is an isolated logic bucket, optimized for concurrency and resilience.
+## Repo Layout
 
-```mermaid
-graph TD
-    A[Market Data Providers <br/> Fyers v3 / yfinance] --> B[Institutional Entry <br/> run.py]
-    B --> B2[Modular Core <br/> screener_v14_modular.py]
-    B2 --> C[Core Infrastructure <br/> /core]
-    
-    subgraph "Alpha Engine"
-        C --> E[Indicators <br/> indicators.py]
-        C --> F[Regime Tracking <br/> regime.py]
-        C --> G[7-Factor Scoring <br/> factors.py]
-    end
-    
-    subgraph "Execution & Optimization"
-        C --> H[Scoring Logic <br/> scorer.py]
-        C --> I[Risk & Portfolio <br/> portfolio.py]
-        C --> J[Scan Cache <br/> cache.py]
-    end
-    
-    subgraph "Institutional Pillars"
-        C --> K[CI/CD Workflow <br/> Mypy + Ruff + Pytest]
-        C --> L[Telemetry <br/> Structured JSON Logging]
-        C --> M[Resilience <br/> Circuit Breakers]
-    end
-    
-    B2 --> N[Persistence <br/> platt_calibration.json]
-    N --> B2
+```text
+core/         domain logic, service orchestration, scoring, regime, portfolio
+tests/        maintained automated test suite
+scripts/      diagnostics and operator helper scripts
+state/        mutable runtime state
+artifacts/    generated outputs such as backtests and exports
+logs/         structured logs and provider diagnostics
+run.py        canonical CLI entry point
 ```
 
----
+## Runtime Boundaries
 
-## 🧠 Core Methodology
+The current runtime is split around explicit services:
 
-### 1. Unified 7-Factor Model (v14.0)
-The engine evaluates the Nifty 200 universe using 7 orthogonal factors, fully implemented in `core/factors.py`:
-- **Trend (28%)**: Multi-timeframe EMA alignment (50/200) + vectorised Supertrend (10, 3).
-- **Momentum (20%)**: RSI-Wilder, MACD Histogram acceleration, and directional price streaks.
-- **Volume (18%)**: RVOL_20, POC proximity, and Value Area (VAH/VAL) positioning.
-- **Volatility (12%)**: ATR coiling (relative to 50d mean) + Bollinger Band Width squeeze.
-- **Relative Strength (12%)**: Sector-relative performance vs Nifty 50 Benchmark.
-- **Breakout (6%)**: 52-week high/low proximity and BB-Width expansion.
-- **Quality (4%)**: 63-day log-momentum and directional persistence metrics.
+- `core/services.py` contains `PersistenceService`, `MarketDataService`,
+  `AlertService`, and `ScanService`.
+- `core/runtime_paths.py` centralizes `state/`, `artifacts/`, and `logs/`
+  discovery.
+- `screener_v14_modular.py` is a thin compatibility wrapper over the service
+  layer.
+- `run.py` is the supported CLI surface for scans, watch mode, calibration,
+  and backtests.
 
-### 2. Probabilistic Framework (Platt Scaling)
-Every setup is transformed into a **Win Probability P(Win)** using calibrated **Platt scaling**. The v14.5 system automatically loads/saves `platt_calibration.json` to ensure consistency and prevent lookahead bias.
+## Quick Start
 
-### 3. Institutional Risk Management
-- **ScanState Isolation**: Each scan cycle uses a fresh state object, eliminating cross-ticker dependency or state bleed.
-- **CapitalScaler**: NAV-aware position sizing. Scales risk proportional to your live portfolio value.
-- **Fat-Tail Kelly Sizing**: Sizing is automatically penalized based on the **excess kurtosis** of the ticker's return distribution.
-- **Correlation Gate**: Filters candidates with |corr| > 0.70 to ensure diversified portfolio exposure.
+1. Create a virtual environment and install dependencies.
 
----
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-## 🏛️ Audit & Quality — **Gold-Standard: 9.1 / 10**
+2. Copy `.env.example` to `.env` and fill in the credentials you use.
 
-| Category | Score | Highlights |
-|:---|:---:|:---|
-| Architecture | **9.5** | ScanState isolation & clean modular boundaries. |
-| Resilience | **9.0** | Circuit Breakers for Fyers, yfinance, and Telegram APIs. |
-| Methodology | **9.0** | Calibrated Platt-scaling + NAV-aware Kelly scaling. |
-| Quality | **9.5** | **373 unit tests** with automated Mypy/Ruff CI gates. |
+3. Run a single scan.
 
----
+```bash
+python run.py
+```
 
-## 📦 Project Structure (`/core`)
+## Environment Variables
 
-| Module | Purpose |
-| :--- | :--- |
-| `run.py` | **Institutional Entry**: The formal entry point for production execution. |
-| `backtest.py` | **Walk-Forward Engine**: Multi-fold simulation with Sharpe and MaxDD metrics. |
-| `telemetry.py` | **JSON Logging**: Emits machine-readable logs to `logs/sovereign.jsonl`. |
-| `retry.py` | **Resilience**: Implements Circuit Breakers and custom retry decorators. |
-| `regime.py` | **Market State**: 5-state classification (PANIC, TREND_UP, etc.) with breadth veto. |
-| `portfolio.py` | **Optimizer**: Correlation-aware selection and dynamic risk scaling. |
+The engine supports a small runtime-path contract in addition to provider and
+Telegram credentials.
 
----
+```env
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
 
-## 🖥️ Operations
+FYERS_CLIENT_ID=your_client_id_here
+FYERS_SECRET_KEY=your_secret_key_here
+FYERS_ACCESS_TOKEN=your_access_token_here
+FYERS_REDIRECT_URI=your_redirect_uri_here
 
-### 🛠️ Fresh Installation
-1. `git clone https://github.com/jpechetty-debug/intradaybot.git`
-2. `python -m venv .venv`
-3. `.venv\Scripts\activate` (Windows)
-4. `pip install -r requirements.txt`
-5. Configure `.env` (use `.env.example` as a template).
+STATE_DIR=state
+ARTIFACTS_DIR=artifacts
+LOG_DIR=logs
 
-### 🚀 Running the Engine
-- **Normal Execution**: `python run.py`
-- **Watch Mode (15m)**: `python run.py --watch 15`
-- **Backtest**: `python run.py --backtest --days 180 --bt-out backtest_latest.csv`
-- **Calibration**: `python run.py --calibrate` 
-- **Debug Mode**: `python run.py --debug`
+WEIGHTS_PATH=state/factor_weights.json
+TRADE_LOG_PATH=state/trade_log.json
+PLATT_CALIB_PATH=state/platt_calibration.json
+TELEMETRY_LOG_PATH=logs/sovereign.jsonl
+DEGRADATION_LOG_PATH=logs/data_provider_degradation.log
+```
 
-### 🧪 Testing & CI
-Run the full institutional-grade test suite:
-- `pytest tests/ -v --cov=core --cov-report=term-missing`
-- `ruff check core/ tests/` (Linting)
-- `mypy core/ run.py` (Type Checking)
+If you leave the path variables unset, those defaults are used automatically.
 
----
+## Common Commands
 
-## ⚙️ CI/CD Pipeline
-The engine uses **GitHub Actions** (`ci.yml`) to enforce strict production standards:
-- **Python Support**: Verified on 3.10, 3.11, and 3.12.
-- **Mypy Gate**: Strict type-checking with `--disallow-untyped-defs`.
-- **Ruff Gate**: Enforces high-fidelity linting standards.
-- **Coverage Gate**: Build fails if code coverage drops below **80%**.
+Single scan:
 
----
+```bash
+python run.py
+```
 
-**Disclaimer**: *Sovereign Engine is a high-performance quantitative tool. All estimates are probabilistic. Trade responsibly.*
+Watch mode:
+
+```bash
+python run.py --watch 15
+```
+
+Regime override:
+
+```bash
+python run.py --regime-override TREND_UP
+```
+
+Calibration from the runtime trade log:
+
+```bash
+python run.py --calibrate
+```
+
+Walk-forward backtest:
+
+```bash
+python run.py --backtest --bt-train 120 --bt-test 20 --bt-step 10 --bt-out backtest_results.csv
+```
+
+Notes:
+
+- Relative `--bt-out` paths are written under `artifacts/`.
+- Runtime state is loaded from `state/` and still falls back to legacy root
+  files when present.
+- Structured telemetry is written to `logs/sovereign.jsonl`.
+
+## Quality Gates
+
+Run the maintained validation surface with:
+
+```bash
+pytest tests/ -v --cov=core --cov-report=term-missing
+ruff check core/ tests/ run.py screener_v14_modular.py sovereign_improvements.py
+mypy core/ run.py screener_v14_modular.py sovereign_improvements.py \
+  --ignore-missing-imports \
+  --disallow-untyped-defs \
+  --warn-return-any \
+  --warn-unused-ignores
+```
+
+The current maintained suite is green with `420` passing tests.
+
+## Diagnostics
+
+Operator and provider diagnostics live in `scripts/`. These are intentionally
+kept outside `tests/` so CI only runs the maintained automated surface.
+
+Examples:
+
+- `scripts/fyers_setup.py`
+- `scripts/test_alert.py`
+- `scripts/test_icir.py`
+- `scripts/test_yf_diagnostic.py`
+
+## Outputs and Persistence
+
+Typical runtime files now land in these locations:
+
+- `state/platt_calibration.json`
+- `state/trade_log.json`
+- `state/factor_weights.json`
+- `artifacts/backtest_results.csv`
+- `logs/sovereign.jsonl`
+- `logs/data_provider_degradation.log`
+
+This separation is intentional: source stays versioned, state stays mutable,
+and generated outputs are easy to inspect or clean up without touching code.

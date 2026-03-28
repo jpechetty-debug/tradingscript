@@ -235,7 +235,8 @@ class ScanMetrics:
 
     def record_regime(self, regime: Any) -> None:
         """Accept a ``MarketRegime`` dataclass instance."""
-        self.regime      = str(getattr(regime, "regime", regime))
+        raw_regime = getattr(regime, "regime", regime)
+        self.regime = getattr(raw_regime, "value", str(raw_regime))
         self.regime_conf = float(getattr(regime, "confidence", 0.0))
         self.breadth     = float(getattr(regime, "breadth", 0.0))
         emit("regime_classified", scan_id=self.scan_id,

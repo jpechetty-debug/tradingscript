@@ -242,7 +242,10 @@ class TestFactorMomentum:
 
     def test_streak_increases_score(self):
         df = _make_ohlcv()
-        df["RSI"] = 58; df["ADX"] = 28; df["MACD_Hist"] = 0.5; df["StochRSI_K"] = 55
+        df["RSI"] = 58
+        df["ADX"] = 28
+        df["MACD_Hist"] = 0.5
+        df["StochRSI_K"] = 55
         df["Up_Day"] = 0
         row_no_streak = _make_row(df)
         score_no = factor_momentum(row_no_streak, df, "LONG")
@@ -477,14 +480,17 @@ class TestFactorQuality:
     def test_missing_up_day_column_no_crash(self):
         df = _make_ohlcv(n=80)
         df = df.drop(columns=["Up_Day"])
-        df["ATR"] = 1.0; df["ATR_50_mean"] = 1.0
+        df["ATR"] = 1.0
+        df["ATR_50_mean"] = 1.0
         row = _make_row(df)
         score = factor_quality(daily_df=df, row=row, close=float(df["Close"].iloc[-1]))
         assert 0.0 <= score <= 1.0
 
     def test_output_clipped(self):
-        df  = _make_ohlcv(n=120)
-        df["Up_Day"] = 1; df["ATR"] = 0.0; df["ATR_50_mean"] = 0.0
+        df = _make_ohlcv(n=120)
+        df["Up_Day"] = 1
+        df["ATR"] = 0.0
+        df["ATR_50_mean"] = 0.0
         row = _make_row(df)
         score = factor_quality(daily_df=df, row=row, close=float(df["Close"].iloc[-1]))
         assert 0.0 <= score <= 1.0
@@ -590,10 +596,13 @@ class TestAddIndicators:
         dates = pd.date_range("2023-01-01", periods=n, freq="B")
         c = 500 * np.cumprod(1 + np.random.normal(0.001, 0.012, n))
         h = c * (1 + np.abs(np.random.normal(0, 0.005, n)))
-        l = c * (1 - np.abs(np.random.normal(0, 0.005, n)))
+        low = c * (1 - np.abs(np.random.normal(0, 0.005, n)))
         o = c * (1 + np.random.normal(0, 0.004, n))
         v = np.random.randint(1_000_000, 3_000_000, n).astype(float)
-        return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c, "Volume": v}, index=dates)
+        return pd.DataFrame(
+            {"Open": o, "High": h, "Low": low, "Close": c, "Volume": v},
+            index=dates,
+        )
 
     def test_required_columns_present(self):
         from core.indicators import add_indicators
@@ -627,9 +636,10 @@ class TestAddIndicators:
 
     def test_stochrsi_in_range(self):
         from core.indicators import add_indicators
-        df  = self._make_raw_ohlcv()
+        df = self._make_raw_ohlcv()
         out = add_indicators(df, self._config())
-        valid = out["StochRSI_K"].dropna(); assert valid.between(0, 100).all()
+        valid = out["StochRSI_K"].dropna()
+        assert valid.between(0, 100).all()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

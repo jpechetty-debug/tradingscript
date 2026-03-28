@@ -1,5 +1,8 @@
-
 import logging
+from _bootstrap import ensure_repo_root
+
+ensure_repo_root()
+
 from core.config import CONFIG
 from core.regime import MarketRegime, MarketRegimeType
 from core.scorer import TickerResult

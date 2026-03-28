@@ -10,13 +10,12 @@ Tests for Phase 3 & 4 deliverables:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import sys
 import os
 import time
 import types
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
@@ -41,10 +40,13 @@ def _make_ohlcv(n=150, base=100.0, seed=42) -> pd.DataFrame:
     dates = pd.date_range("2023-01-01", periods=n, freq="B")
     c = base * np.cumprod(1 + np.random.normal(0.001, 0.012, n))
     h = c * (1 + np.abs(np.random.normal(0, 0.005, n)))
-    l = c * (1 - np.abs(np.random.normal(0, 0.005, n)))
+    low = c * (1 - np.abs(np.random.normal(0, 0.005, n)))
     o = c * (1 + np.random.normal(0, 0.004, n))
     v = np.random.randint(1_000_000, 3_000_000, n).astype(float)
-    return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c, "Volume": v}, index=dates)
+    return pd.DataFrame(
+        {"Open": o, "High": h, "Low": low, "Close": c, "Volume": v},
+        index=dates,
+    )
 
 
 def _make_config():
@@ -105,8 +107,12 @@ class TestTelemetry:
         from core.telemetry import ScanMetrics
         m = ScanMetrics()
         r1, r2 = MagicMock(), MagicMock()
-        r1.ticker = "RELIANCE"; r1.prob_win = 0.62; r1.expectancy_r = 0.3
-        r2.ticker = "INFY";     r2.prob_win = 0.58; r2.expectancy_r = 0.2
+        r1.ticker = "RELIANCE"
+        r1.prob_win = 0.62
+        r1.expectancy_r = 0.3
+        r2.ticker = "INFY"
+        r2.prob_win = 0.58
+        r2.expectancy_r = 0.2
         m.record_portfolio([r1, r2])
         assert m.portfolio_size == 2
         assert "RELIANCE" in m.portfolio_tickers
@@ -362,8 +368,8 @@ class TestBacktestHelpers:
         dates = pd.date_range("2024-06-01", periods=n, freq="B")
         c = start * np.cumprod(1 + trend + np.random.normal(0, 0.005, n))
         h = c * 1.005
-        l = c * 0.995
-        return pd.DataFrame({"High": h, "Low": l, "Close": c}, index=dates)
+        low = c * 0.995
+        return pd.DataFrame({"High": h, "Low": low, "Close": c}, index=dates)
 
     def test_realised_r_long_stop_hit(self):
         from core.backtest import _realised_r

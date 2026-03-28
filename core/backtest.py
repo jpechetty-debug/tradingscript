@@ -340,6 +340,7 @@ def walk_forward(
         "Walk-forward: %d folds | train=%d test=%d step=%d | tickers=%d",
         n_folds, train_days, test_days, step_days, len(tickers),
     )
+    regime_tracker = RegimeTracker()
 
     for fold_idx, start_i in enumerate(range(0, total_bars - required + 1, step_days)):
         train_end_i = start_i + train_days
@@ -379,8 +380,14 @@ def walk_forward(
 
         # ── Regime (on train window) ──────────────────────────────────────────
         breadth = compute_breadth(processed, config)
-        tracker = RegimeTracker()
-        regime  = classify_regime(processed, breadth, tracker, config)
+        sector_rs = compute_sector_rs(processed, bench_series, config)
+        regime = classify_regime(
+            processed,
+            breadth,
+            regime_tracker,
+            config,
+            sector_rs=sector_rs,
+        )
 
         directions = ["LONG", "SHORT"] if direction == "BOTH" else [direction]
 
@@ -388,7 +395,6 @@ def walk_forward(
         candidates: list[tuple[float, float, str, str, pd.Series, pd.DataFrame]] = []
         # (composite, prob_win, ticker, direction, last_row, full_ticker_df)
 
-        sector_rs    = compute_sector_rs(processed, bench_series, config)
         sector_ranks = {s: i+1 for i, (s, _) in enumerate(
             sorted(sector_rs.items(), key=lambda x: x[1], reverse=True)
         )}
@@ -408,6 +414,10 @@ def walk_forward(
             sector = TICKER_TO_SECTOR.get(ticker, "")
 
             for d in directions:
+                if d == "LONG" and not regime.allows_long():
+                    continue
+                if d == "SHORT" and not regime.allows_short():
+                    continue
                 try:
                     factors = compute_factors(
                         ticker=ticker,

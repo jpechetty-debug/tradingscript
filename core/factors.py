@@ -18,7 +18,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
+
+from .config import SystemConfig
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -532,12 +534,12 @@ def compute_factors(
 
 
 def calibrate_ic_weights(
-    results: list,  # list[TickerResult]
+    results: list[Any],  # list[TickerResult]
     processed: dict[str, pd.DataFrame],
     bench: pd.Series,
     sector_ranks: dict[str, int],
     n_sectors: int,
-    config,
+    config: SystemConfig,
     lookback: int = 60,
     calib_offset: int = 5,
     fwd_bars: int = 5,
@@ -566,20 +568,17 @@ def calibrate_ic_weights(
     # bias: if a regime flip occurred within the last ``calib_offset`` bars,
     # the imputed direction will be wrong.  We log a warning on first use
     # and skip the bar rather than silently propagate the bias.
-    result_direction: dict[str, str] = {
-        r.ticker.replace(".NS", ""): r.direction for r in results
-    }
     _direction_fallback_warned: set[str] = set()
 
     factors_list = ["trend", "momentum", "volume", "volatility", "rs", "breakout", "quality"]
-    daily_ics = {f: [] for f in factors_list}
+    daily_ics: dict[str, list[float]] = {factor: [] for factor in factors_list}
 
     tickers = [r.ticker for r in results]
 
     # Sample every other bar for efficiency over the lookback window.
     step = 2
     for offset in range(calib_offset + 1, calib_offset + lookback + 1, step):
-        f_vals = {f: [] for f in factors_list}
+        f_vals: dict[str, list[float]] = {factor: [] for factor in factors_list}
         rets: list[float] = []
 
         for ticker in tickers:

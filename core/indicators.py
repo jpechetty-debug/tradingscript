@@ -20,6 +20,8 @@ from __future__ import annotations
 import pandas as pd
 import numpy as np
 
+from .config import SystemConfig
+
 # ── Indicator parameter constants ─────────────────────────────────────────────
 EMA_FAST_SPAN: int      = 12
 EMA_SLOW_SPAN: int      = 26
@@ -126,7 +128,7 @@ def _supertrend_vectorised(
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def add_indicators(df: pd.DataFrame, config) -> pd.DataFrame:
+def add_indicators(df: pd.DataFrame, config: SystemConfig) -> pd.DataFrame:
     """
     Compute all technical indicators and append them as new columns.
 
