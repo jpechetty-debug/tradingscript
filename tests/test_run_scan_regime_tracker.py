@@ -15,6 +15,22 @@ from core.regime import (
 )
 
 
+class _FakePersistence:
+    def create_scan_state(self, config):
+        return services.ScanState(platt_a=config.PLATT_A, platt_b=config.PLATT_B)
+
+
+def _install_scan_service(monkeypatch, *, gate=None, scaler=None):
+    scan_service = services.ScanService(
+        version=svm.VERSION,
+        persistence=_FakePersistence(),
+        probability_gate=gate,
+        capital_scaler=scaler,
+    )
+    monkeypatch.setattr(svm, "SCAN_SERVICE", scan_service)
+    return scan_service
+
+
 def _make_regime_df(
     *,
     close_mult: float,
@@ -57,7 +73,9 @@ def test_run_scan_preserves_regime_confirmation_across_calls(monkeypatch) -> Non
         config.BENCHMARK: _make_regime_df(close_mult=1.01, seed=2),
     }
 
-    monkeypatch.setattr(svm.SCAN_SERVICE._data_service, "_fetcher", lambda tickers, cfg: raw_data)
+    scan_service = _install_scan_service(monkeypatch)
+
+    monkeypatch.setattr(scan_service._data_service, "_fetcher", lambda tickers, cfg: raw_data)
     monkeypatch.setattr(services, "add_indicators", lambda df, cfg: df)
     monkeypatch.setattr(services, "passes_static_filters", lambda df, cfg: True)
     monkeypatch.setattr(services, "score_ticker", lambda **kwargs: None)
@@ -106,19 +124,19 @@ def test_run_scan_applies_regime_gate_and_confidence_sizing(monkeypatch) -> None
         captured.update(kwargs)
         return None
 
-    monkeypatch.setattr(svm.SCAN_SERVICE._data_service, "_fetcher", lambda tickers, cfg: raw_data)
+    gate = _FakeGate()
+    scaler = _FakeScaler()
+    scan_service = _install_scan_service(monkeypatch, gate=gate, scaler=scaler)
+
+    monkeypatch.setattr(scan_service._data_service, "_fetcher", lambda tickers, cfg: raw_data)
     monkeypatch.setattr(services, "add_indicators", lambda df, cfg: df)
     monkeypatch.setattr(services, "passes_static_filters", lambda df, cfg: True)
     monkeypatch.setattr(services, "score_ticker", _fake_score_ticker)
     monkeypatch.setattr(services, "optimize_portfolio", lambda results, cfg, corr: [])
 
-    gate = _FakeGate()
-    scaler = _FakeScaler()
-
     _, _, regime = svm.run_scan(
         config=config,
         regime_tracker=RegimeTracker(),
-        patch={"gate": gate, "scaler": scaler},
     )
 
     assert regime is not None

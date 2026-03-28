@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Protocol
 
 import pandas as pd
 
@@ -30,7 +30,7 @@ from .config import CONFIG, IST, MarketRegimeType, SystemConfig
 from .data_provider import fetch_daily_batch
 from .factors import DEFAULT_WEIGHTS, calibrate_ic_weights
 from .indicators import add_indicators
-from .portfolio import CapitalScaler, optimize_portfolio
+from .portfolio import optimize_portfolio
 from .regime import (
     MarketRegime,
     RegimeTracker,
@@ -48,7 +48,21 @@ from utils.messaging import send_telegram
 
 log = logging.getLogger("sovereign.services")
 
-PatchComponents = dict[str, Any]
+
+class ProbabilityGate(Protocol):
+    def threshold(self, regime: Any) -> float: ...
+
+
+class CapitalFractionScaler(Protocol):
+    def capital_fraction(self, current_nav: float, regime: Any) -> float: ...
+
+
+class FactorWeightProvider(Protocol):
+    def current_weights(self) -> dict[str, float]: ...
+
+
+class SummaryAlerter(Protocol):
+    def send_daily_summary(self, regime: str, top_picks: list[dict[str, Any]]) -> Any: ...
 
 
 @dataclass
@@ -66,11 +80,6 @@ class ScanState:
     weights_calibrated: bool = False
     factor_weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
     ic_history: dict[str, Any] = field(default_factory=dict)
-    capital_scaler: Optional[CapitalScaler] = None
-    patch_gate: Optional[Any] = None
-    patch_scaler: Optional[Any] = None
-    patch_calibrator: Optional[Any] = None
-    patch_alerter: Optional[Any] = None
     regime_locked: bool = False
     cache: ScanCache = field(default_factory=ScanCache)
 
@@ -116,15 +125,9 @@ class PersistenceService:
     def create_scan_state(
         self,
         config: SystemConfig,
-        patch: Optional[PatchComponents] = None,
     ) -> ScanState:
-        patch = patch or {}
         platt_a, platt_b, from_file = self.load_platt(config)
         state = ScanState(platt_a=platt_a, platt_b=platt_b, platt_from_file=from_file)
-        state.patch_gate = patch.get("gate")
-        state.patch_scaler = patch.get("scaler")
-        state.patch_calibrator = patch.get("calibrator")
-        state.patch_alerter = patch.get("alerter")
         state.cache.clear()
         return state
 
@@ -245,16 +248,17 @@ class AlertService:
         *,
         version: str,
         messenger: Callable[[str, str, str], bool] = send_telegram,
+        alerter: Optional[SummaryAlerter] = None,
     ) -> None:
         self._version = version
         self._messenger = messenger
+        self._alerter = alerter
 
     def send_portfolio_summary(
         self,
         portfolio: list[TickerResult],
         regime: MarketRegime,
         config: SystemConfig,
-        patch: Optional[PatchComponents] = None,
     ) -> None:
         if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
             log.debug("Telegram credentials missing in config.")
@@ -264,9 +268,8 @@ class AlertService:
         if not top:
             return
 
-        patch = patch or {}
-        if patch.get("alerter"):
-            patch["alerter"].send_daily_summary(regime.label, [result.__dict__ for result in top])
+        if self._alerter is not None:
+            self._alerter.send_daily_summary(regime.label, [result.__dict__ for result in top])
             return
 
         lines = [
@@ -288,28 +291,40 @@ class ScanService:
         version: str,
         data_service: Optional[MarketDataService] = None,
         persistence: Optional[PersistenceService] = None,
+        probability_gate: Optional[ProbabilityGate] = None,
+        capital_scaler: Optional[CapitalFractionScaler] = None,
+        factor_calibrator: Optional[FactorWeightProvider] = None,
+        alerter: Optional[SummaryAlerter] = None,
     ) -> None:
         self._version = version
         self._data_service = data_service or MarketDataService()
         self._persistence = persistence or PersistenceService()
+        self._probability_gate = probability_gate
+        self._capital_scaler = capital_scaler
+        self._factor_calibrator = factor_calibrator
+        self._alerter = alerter
+
+    def create_alert_service(
+        self,
+        messenger: Callable[[str, str, str], bool] = send_telegram,
+    ) -> AlertService:
+        return AlertService(version=self._version, messenger=messenger, alerter=self._alerter)
 
     def scan(
         self,
         config: SystemConfig = CONFIG,
         *,
         debug: bool = False,
-        patch: Optional[PatchComponents] = None,
         regime_tracker: Optional[RegimeTracker] = None,
         regime_override: Optional[str] = None,
         no_ema_filter: bool = False,
         force_score: bool = False,
     ) -> tuple[list[TickerResult], list[TickerResult], Optional[MarketRegime]]:
-        patch = patch or {}
-        state = self._persistence.create_scan_state(config, patch=patch)
+        state = self._persistence.create_scan_state(config)
         metrics = ScanMetrics()
 
-        if state.patch_calibrator:
-            state.factor_weights = state.patch_calibrator.current_weights()
+        if self._factor_calibrator is not None:
+            state.factor_weights = self._factor_calibrator.current_weights()
             log.info(
                 "Using dynamic factor weights: %s",
                 {key: round(value, 3) for key, value in state.factor_weights.items()},
@@ -348,7 +363,7 @@ class ScanService:
         regime = self._apply_regime_override(regime, regime_override)
 
         session = config.session_from_time()
-        scoring_config = self._apply_regime_probability_gate(config, regime, state, debug=debug)
+        scoring_config = self._apply_regime_probability_gate(config, regime, debug=debug)
 
         metrics.record_regime(regime)
         self._log_regime(regime, config)
@@ -513,13 +528,13 @@ class ScanService:
                     continue
 
                 capital_fraction = confidence_position_scale(regime.confidence)
-                if state.patch_scaler:
+                if self._capital_scaler is not None:
                     try:
                         capital_fraction *= float(
-                            state.patch_scaler.capital_fraction(1_000_000, regime.regime)
+                            self._capital_scaler.capital_fraction(1_000_000, regime.regime)
                         )
                     except Exception:
-                        log.debug("Patch capital scaler failed for %s.", ticker, exc_info=debug)
+                        log.debug("Injected capital scaler failed for %s.", ticker, exc_info=debug)
 
                 future = executor.submit(
                     score_ticker,
@@ -581,15 +596,14 @@ class ScanService:
         self,
         config: SystemConfig,
         regime: MarketRegime,
-        state: ScanState,
         *,
         debug: bool,
     ) -> SystemConfig:
-        if not state.patch_gate:
+        if self._probability_gate is None:
             return config
 
         try:
-            threshold = float(state.patch_gate.threshold(regime.regime))
+            threshold = float(self._probability_gate.threshold(regime.regime))
             log.info("Regime probability gate active: %s -> P(win) >= %.2f", regime.label, threshold)
             return replace(config, MIN_PROB_WIN=threshold)
         except Exception:

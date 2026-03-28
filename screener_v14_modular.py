@@ -14,6 +14,7 @@ This module intentionally stays thin so existing imports continue to work.
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 from core.backtest import WalkForwardResult
@@ -40,6 +41,17 @@ try:
 except Exception as _se_err:
 
     class _NoOpPatch:
+        def create_components(self, *args: object, **kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                gate=None,
+                scaler=None,
+                data=None,
+                calibrator=None,
+                backoff=None,
+                watch=None,
+                alerter=None,
+            )
+
         def apply(self, *args: object, **kwargs: object) -> dict[str, Any]:
             return {}
 
@@ -64,14 +76,39 @@ if not _SE_PATCH_AVAILABLE:
 
 PERSISTENCE = PersistenceService()
 SCAN_SERVICE = ScanService(version=VERSION, persistence=PERSISTENCE)
-ALERT_SERVICE = AlertService(version=VERSION)
+ALERT_SERVICE = SCAN_SERVICE.create_alert_service()
+
+
+def configure_services(
+    *,
+    data_service: Optional[Any] = None,
+    persistence: Optional[PersistenceService] = None,
+    probability_gate: Optional[Any] = None,
+    capital_scaler: Optional[Any] = None,
+    factor_calibrator: Optional[Any] = None,
+    alerter: Optional[Any] = None,
+    alert_service: Optional[AlertService] = None,
+) -> tuple[ScanService, AlertService]:
+    global PERSISTENCE, SCAN_SERVICE, ALERT_SERVICE
+
+    PERSISTENCE = persistence or PERSISTENCE
+    SCAN_SERVICE = ScanService(
+        version=VERSION,
+        data_service=data_service,
+        persistence=PERSISTENCE,
+        probability_gate=probability_gate,
+        capital_scaler=capital_scaler,
+        factor_calibrator=factor_calibrator,
+        alerter=alerter,
+    )
+    ALERT_SERVICE = alert_service or SCAN_SERVICE.create_alert_service()
+    return SCAN_SERVICE, ALERT_SERVICE
 
 
 def run_scan(
     config: SystemConfig = CONFIG,
     debug: bool = False,
     no_intraday: bool = False,
-    patch: Optional[dict[str, Any]] = None,
     regime_tracker: Optional[RegimeTracker] = None,
     regime_override: Optional[str] = None,
     no_ema_filter: bool = False,
@@ -87,7 +124,6 @@ def run_scan(
     return SCAN_SERVICE.scan(
         config=config,
         debug=debug,
-        patch=patch,
         regime_tracker=regime_tracker,
         regime_override=regime_override,
         no_ema_filter=no_ema_filter,
@@ -99,9 +135,8 @@ def _send_alert(
     portfolio: list[TickerResult],
     regime: MarketRegime,
     config: SystemConfig,
-    patch: Optional[dict[str, Any]] = None,
 ) -> None:
-    ALERT_SERVICE.send_portfolio_summary(portfolio, regime, config, patch=patch)
+    ALERT_SERVICE.send_portfolio_summary(portfolio, regime, config)
 
 
 def run_calibration() -> None:
@@ -177,10 +212,13 @@ def run_backtest(
 
 
 def main() -> None:
-    """Backward compatibility wrapper - calls run.main()."""
+    """Backward compatibility wrapper that delegates to the canonical CLI."""
+    import sys
+
+    sys.modules.setdefault("screener_v14_modular", sys.modules[__name__])
     from run import main as run_main
 
-    run_main()
+    run_main(prog="run.py")
 
 
 if __name__ == "__main__":

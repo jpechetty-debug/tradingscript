@@ -23,6 +23,7 @@ import os
 import time
 import threading
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional, TypeVar
@@ -856,8 +857,81 @@ class RegimeAwareTelegramAlerter:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# UNIFIED APPLY — wire all improvements into an existing engine instance
+# COMPONENT FACTORY + LEGACY APPLY COMPATIBILITY
 # ═════════════════════════════════════════════════════════════════════════════
+@dataclass(frozen=True)
+class SovereignComponents:
+    scaler: TieredCapitalScaler
+    gate: RegimeProbabilityGate
+    data: ResilientDataProvider
+    calibrator: RollingFactorCalibrator
+    backoff: ExponentialBackoff
+    watch: WatchModeRunner
+    alerter: RegimeAwareTelegramAlerter
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "scaler": self.scaler,
+            "gate": self.gate,
+            "data": self.data,
+            "calibrator": self.calibrator,
+            "backoff": self.backoff,
+            "watch": self.watch,
+            "alerter": self.alerter,
+        }
+
+
+def create_components(
+    portfolio_peak: float = 1_000_000,
+    current_nav: float = 1_000_000,
+    fyers_client: Any = None,
+    recal_window: int = RECALIBRATION_WINDOW,
+    recal_interval: int = RECALIBRATION_INTERVAL,
+    watch_interval: int = 15,
+    announce: bool = True,
+) -> SovereignComponents:
+    """
+    Build explicit runtime collaborators for the modular services layer.
+
+    ``apply()`` remains available as a compatibility wrapper for legacy code
+    that still expects engine attachment plus a dict return value.
+    """
+
+    scaler = TieredCapitalScaler(portfolio_peak=portfolio_peak)
+    gate = RegimeProbabilityGate()
+    data = ResilientDataProvider(fyers_client=fyers_client)
+    calibrator = RollingFactorCalibrator(window=recal_window, interval_sec=recal_interval)
+    backoff = ExponentialBackoff(max_retries=6)
+    watch = WatchModeRunner(interval_sec=watch_interval)
+    alerter = RegimeAwareTelegramAlerter(gate=gate, scaler=scaler)
+
+    calibrator.start()
+
+    if announce:
+        logger.info(
+            "Sovereign runtime components initialised.\n"
+            "  ✓ Tiered PANIC capital scaler\n"
+            "  ✓ Regime-dependent prob gate\n"
+            "  ✓ Resilient data provider (Fyers→yfinance)\n"
+            "  ✓ Rolling factor recalibrator (background thread)\n"
+            "  ✓ Exponential backoff watch runner\n"
+            "  ✓ Regime-aware Telegram alerter"
+        )
+        _send_telegram(
+            f"🚀 *Sovereign runtime components loaded*\n"
+            f"Peak NAV: ₹{portfolio_peak:,.0f} | Current NAV: ₹{current_nav:,.0f}"
+        )
+
+    return SovereignComponents(
+        scaler=scaler,
+        gate=gate,
+        data=data,
+        calibrator=calibrator,
+        backoff=backoff,
+        watch=watch,
+        alerter=alerter,
+    )
+
 
 def apply(
     engine: Any,
@@ -885,24 +959,23 @@ def apply(
             patch["alerter"].send_signal("SBIN", "LONG", p_win, regime)
     """
 
-    scaler    = TieredCapitalScaler(portfolio_peak=portfolio_peak)
-    gate      = RegimeProbabilityGate()
-    data      = ResilientDataProvider(fyers_client=fyers_client)
-    calibrator = RollingFactorCalibrator(window=recal_window, interval_sec=recal_interval)
-    backoff   = ExponentialBackoff(max_retries=6)
-    watch     = WatchModeRunner(interval_sec=watch_interval)
-    alerter   = RegimeAwareTelegramAlerter(gate=gate, scaler=scaler)
-
-    # Start background calibrator
-    calibrator.start()
+    components = create_components(
+        portfolio_peak=portfolio_peak,
+        current_nav=current_nav,
+        fyers_client=fyers_client,
+        recal_window=recal_window,
+        recal_interval=recal_interval,
+        watch_interval=watch_interval,
+        announce=False,
+    )
 
     # Attach to engine if it has compatible attributes
-    _safe_attach(engine, "capital_scaler",    scaler)
-    _safe_attach(engine, "prob_gate",         gate)
-    _safe_attach(engine, "data_provider",     data)
-    _safe_attach(engine, "calibrator",        calibrator)
-    _safe_attach(engine, "watch_runner",      watch)
-    _safe_attach(engine, "alerter",           alerter)
+    _safe_attach(engine, "capital_scaler",    components.scaler)
+    _safe_attach(engine, "prob_gate",         components.gate)
+    _safe_attach(engine, "data_provider",     components.data)
+    _safe_attach(engine, "calibrator",        components.calibrator)
+    _safe_attach(engine, "watch_runner",      components.watch)
+    _safe_attach(engine, "alerter",           components.alerter)
 
     logger.info(
         "Sovereign Engine patch applied — 6 improvements active.\n"
@@ -919,15 +992,7 @@ def apply(
         f"6 improvements active. Peak NAV: ₹{portfolio_peak:,.0f}"
     )
 
-    return {
-        "scaler":     scaler,
-        "gate":       gate,
-        "data":       data,
-        "calibrator": calibrator,
-        "backoff":    backoff,
-        "watch":      watch,
-        "alerter":    alerter,
-    }
+    return components.as_dict()
 
 
 def _safe_attach(obj: Any, attr: str, value: Any) -> None:

@@ -30,6 +30,7 @@ from screener_v14_modular import (
     SE_PATCH,
     VERSION,
     _send_alert,
+    configure_services,
     run_backtest,
     run_calibration,
     run_scan,
@@ -38,8 +39,8 @@ from screener_v14_modular import (
 log = logging.getLogger("sovereign")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=f"Sovereign Engine v{VERSION}")
+def main(argv: list[str] | None = None, prog: str | None = None) -> None:
+    parser = argparse.ArgumentParser(prog=prog, description=f"Sovereign Engine v{VERSION}")
     parser.add_argument("--watch",       type=int,  default=None, metavar="MINUTES")
     parser.add_argument("--version",     action="store_true")
     parser.add_argument("--debug",       action="store_true")
@@ -55,7 +56,7 @@ def main() -> None:
     parser.add_argument("--regime-override", type=str, default=None, help="Force a specific regime (TREND_UP, RANGE, etc.)")
     parser.add_argument("--no-ema-filter", action="store_true", help="Disable EMA200 structural filter for debugging")
     parser.add_argument("--force-score", action="store_true", help="Force scoring of all tickers (bypass BULL/BEAR directional gates)")
-    args = parser.parse_args()
+    args = parser.parse_args(args=argv)
 
     if args.version:
         print(f"Sovereign Engine v{VERSION}")
@@ -63,9 +64,13 @@ def main() -> None:
 
     config = CONFIG
 
-    # Initialise patch components once at startup; pass them into each
-    # run_scan() call rather than storing them in a module-level global.
-    patch = SE_PATCH.apply(None, portfolio_peak=1_000_000)
+    components = SE_PATCH.create_components(portfolio_peak=1_000_000)
+    configure_services(
+        probability_gate=components.gate,
+        capital_scaler=components.scaler,
+        factor_calibrator=components.calibrator,
+        alerter=components.alerter,
+    )
     regime_tracker = RegimeTracker()
 
     def _step() -> None:
@@ -73,18 +78,17 @@ def main() -> None:
             config=config,
             debug=args.debug,
             no_intraday=args.no_intraday,
-            patch=patch,
             regime_tracker=regime_tracker,
             regime_override=args.regime_override,
             no_ema_filter=args.no_ema_filter,
             force_score=args.force_score,
         )
         if not args.no_telegram and portfolio and regime:
-            _send_alert(portfolio, regime, config, patch=patch)
+            _send_alert(portfolio, regime, config)
 
         # Feed completed trades into the calibrator buffer for live updates.
         # In a real live environment, record actual closed trades here.
-        if patch.get("calibrator"):
+        if components.calibrator:
             pass  # placeholder — wire in broker PnL events here
 
     if args.backtest:
