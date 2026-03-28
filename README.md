@@ -1,167 +1,106 @@
-# Sovereign Engine
+# Sovereign Engine v14.4-Modular
 
-Sovereign Engine is a modular quantitative trading runtime for market scans,
-regime-aware scoring, walk-forward backtests, and alert delivery.
+**Institutional-Grade Quantitative Trading Intelligence for NSE India.**
 
-The project is organized so source code, mutable runtime state, generated
-artifacts, and logs live in separate places. That keeps the repo easier to
-operate, cleaner to review, and safer to automate.
+Sovereign Engine is a modular, high-performance quantitative runtime designed for systematic market analysis, regime-aware scoring, and automated risk management. Built for professional traders and quantitative analysts, it provides a robust pipeline from raw market data to optimized portfolio candidate selection.
 
-## What It Does
+---
 
-- Fetches market data through the provider layer in `core/data_provider.py`
-- Computes indicators, factor scores, and market regime state
-- Builds ranked candidates and optimized portfolios
-- Supports walk-forward backtests and Platt calibration
-- Sends alert summaries through the messaging layer
+## 🛡️ Core Architecture & Resilience
 
-## Repo Layout
+The engine is built on a "Source-State-Log" (SSL) boundary model to ensure operational safety and clean version control.
 
-```text
-core/         domain logic, service orchestration, scoring, regime, portfolio
-tests/        maintained automated test suite
-scripts/      diagnostics and operator helper scripts
-state/        mutable runtime state
-artifacts/    generated outputs such as backtests and exports
-logs/         structured logs and provider diagnostics
-run.py        canonical CLI entry point
-```
+- **Dual-Provider Fallback**: A resilient data chain that prioritizes **Fyers API (v3)** for low-latency intraday data and falls back to **yfinance** for global coverage and historical backfills.
+- **Circuit Breakers & Backoff**: Implements exponential backoff with full jitter for API resilience. Consecutive failures trigger a circuit-breaker pause to prevent account throttling.
+- **Structured Telemetry**: Every internal event is serialized to `logs/sovereign.jsonl` in structured JSON, facilitating audit trails and post-trade performance review.
 
-## Runtime Boundaries
+---
 
-The current runtime is split around explicit services:
+## 📈 The Seven-Factor Signal Model
 
-- `core/services.py` contains `PersistenceService`, `MarketDataService`,
-  `AlertService`, and `ScanService`.
-- `core/runtime_paths.py` centralizes `state/`, `artifacts/`, and `logs/`
-  discovery.
-- `screener_v14_modular.py` is a thin compatibility wrapper over the service
-  layer.
-- `run.py` is the supported CLI surface for scans, watch mode, calibration,
-  and backtests.
+The heart of the engine is a composite scoring model (`core/factors.py`) that evaluates each candidate across seven non-correlated dimensions:
 
-## Quick Start
+| Factor | Weight | Components | Logic Description |
+| :--- | :--- | :--- | :--- |
+| **Trend** | 28% | Supertrend, EMA(20, 50, 200) | Multi-timeframe trend alignment with MTF-60m confirmation. |
+| **Momentum** | 20% | RSI, MACD, StochRSI, ADX | RSI zone tracking (48-73 ideal) with MACD acceleration. |
+| **Volume** | 18% | RVOL, POC, Value Area | Relative volume vs 20d mean and price proximity to the **POC**. |
+| **Volatility** | 12% | ATR, BB Squeeze | Identifies coiling phases (ATR < 85% of mean) and squeeze events. |
+| **Relative Strength** | 12% | Sector Rank, Nifty50 RS | Log-return differential scoring vs the benchmark and sector peers. |
+| **Breakout** | 6% | 52w High, BB Width | Proximity to 52-week horizontal levels and narrow-band coiling. |
+| **Quality** | 4% | 63d Momentum, Persistence | 3-month momentum stability and close-over-open directional win-rate. |
 
-1. Create a virtual environment and install dependencies.
+---
 
+## 🛡️ Hardened Market Regime Detection
+
+The **RegimeTracker** (`core/regime.py`) classifies the broad market into one of five states:
+- 🟢 **TREND_UP**: Breadth ≥ 55%, high ADX. Momentum/Breakout strategies priority.
+- 🟡 **RANGE**: Mid-range breadth, low ADX. Mean-reversion priority.
+- 🟠 **TREND_DOWN**: Breadth < 45%, high ADX. Capital preservation or Short momentum.
+- 🔵 **EXPANSION**: High ATR, high ADX. Volatility breakout both sides.
+- 🔴 **PANIC**: Breadth < `REGIME_BREADTH_PANIC` (0.25). All new longs blocked.
+
+### Hardening Fixes (v14):
+1.  **Hysteresis**: Require 35% breadth to leave PANIC, but only 25% to enter.
+2.  **Deadband**: A 10% breadth "no-man's land" between TREND and RANGE to eliminate whipsaw.
+3.  **Regime Lock**: Suppresses regime changes during the opening 15-minute noise window.
+4.  **Confidence Scaling**: Confidence = `f(ADX, ATR_Ratio, Sector_RS)`.
+
+---
+
+## 📐 The Quantitative Math
+
+### Professional Position Sizing (Kelly Criterion)
+The engine uses a NAV-aware, fat-tail corrected Kelly sizing formula:
+- **Base Kelly**: `f* = (p * (rr + 1) - 1) / rr`
+- **Fat-Tail Correction**: `kurt_corr = 3.0 / (3.0 + excess_kurtosis)`
+- **Dynamic Sizing**: `Risk = par_risk * f* * kurt_corr * capital_fraction`
+
+### Platt Scaling & Calibration
+Composite scores in `[0, 1]` are mapped to win-probabilities via the **Platt Sigmoid**:
+- `P(win) = 1 / (1 + exp(A * score + B))`
+- Parameters **A** and **B** are calibrated via maximum-likelihood estimation (MLE) on out-of-sample trade history to prevent over-confidence.
+
+### IC-Weighted Factor Recalibration
+Factor weights are not static. The engine periodically re-calculates the **Information Coefficient (Spearman)** to optimize weight distributions:
+- `IC = SpearmanCorrelation(Factor_Scores, Signed_Forward_Returns)`
+- `Weight = max(0, ICIR) / Σ(pos_ICIR)`
+
+---
+
+## 📁 Environment Variables Guide
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `TELEGRAM_BOT_TOKEN` | — | Token for the alert delivery layer. |
+| `FYERS_ACCESS_TOKEN` | — | Daily token for high-priority market data. |
+| `RISK_PER_TRADE_INR` | `10000` | Target risk in Rs. per trade. |
+| `PORTFOLIO_SIZE` | `5` | Maximum candidates to select in optimized portfolio. |
+| `MAX_SECTOR_PICKS` | `2` | Maximum tickers from the same sector. |
+| `MIN_PROB_WIN` | `0.52` | Minimum Platt-scaled probability to qualify. |
+| `REGIME_ADX_TREND` | `25.0` | ADX threshold to define a trending regime. |
+
+---
+
+## ⌨️ Advanced Operations
+
+### Walk-Forward Backtesting
+Execute a walk-forward analysis with a training-test split:
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+python run.py --backtest --bt-train 120 --bt-test 20 --bt-step 10
 ```
 
-2. Copy `.env.example` to `.env` and fill in the credentials you use.
-
-3. Run a single scan.
-
-```bash
-python run.py
-```
-
-## Environment Variables
-
-The engine supports a small runtime-path contract in addition to provider and
-Telegram credentials.
-
-```env
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-TELEGRAM_CHAT_ID=your_chat_id_here
-
-FYERS_CLIENT_ID=your_client_id_here
-FYERS_SECRET_KEY=your_secret_key_here
-FYERS_ACCESS_TOKEN=your_access_token_here
-FYERS_REDIRECT_URI=your_redirect_uri_here
-
-STATE_DIR=state
-ARTIFACTS_DIR=artifacts
-LOG_DIR=logs
-
-WEIGHTS_PATH=state/factor_weights.json
-TRADE_LOG_PATH=state/trade_log.json
-PLATT_CALIB_PATH=state/platt_calibration.json
-TELEMETRY_LOG_PATH=logs/sovereign.jsonl
-DEGRADATION_LOG_PATH=logs/data_provider_degradation.log
-```
-
-If you leave the path variables unset, those defaults are used automatically.
-
-## Common Commands
-
-Single scan:
-
-```bash
-python run.py
-```
-
-Watch mode:
-
+### Institutional Watch Mode
+Run high-frequency scans with exponential backoff and Telegram state updates:
 ```bash
 python run.py --watch 15
 ```
 
-Regime override:
+### Diagnostic Scripts
+- `scripts/fyers_setup.py`: Daily token refreshment and account verification.
+- `scripts/test_yf_diagnostic.py`: Verify yfinance connectivity and data health.
+- `scripts/test_icir.py`: Audit current factor Information Coefficients.
 
-```bash
-python run.py --regime-override TREND_UP
-```
-
-Calibration from the runtime trade log:
-
-```bash
-python run.py --calibrate
-```
-
-Walk-forward backtest:
-
-```bash
-python run.py --backtest --bt-train 120 --bt-test 20 --bt-step 10 --bt-out backtest_results.csv
-```
-
-Notes:
-
-- Relative `--bt-out` paths are written under `artifacts/`.
-- Runtime state is loaded from `state/` and still falls back to legacy root
-  files when present.
-- Structured telemetry is written to `logs/sovereign.jsonl`.
-
-## Quality Gates
-
-Run the maintained validation surface with:
-
-```bash
-pytest tests/ -v --cov=core --cov-report=term-missing
-ruff check core/ tests/ run.py screener_v14_modular.py sovereign_improvements.py
-mypy core/ run.py screener_v14_modular.py sovereign_improvements.py \
-  --ignore-missing-imports \
-  --disallow-untyped-defs \
-  --warn-return-any \
-  --warn-unused-ignores
-```
-
-The current maintained suite is green with `420` passing tests.
-
-## Diagnostics
-
-Operator and provider diagnostics live in `scripts/`. These are intentionally
-kept outside `tests/` so CI only runs the maintained automated surface.
-
-Examples:
-
-- `scripts/fyers_setup.py`
-- `scripts/test_alert.py`
-- `scripts/test_icir.py`
-- `scripts/test_yf_diagnostic.py`
-
-## Outputs and Persistence
-
-Typical runtime files now land in these locations:
-
-- `state/platt_calibration.json`
-- `state/trade_log.json`
-- `state/factor_weights.json`
-- `artifacts/backtest_results.csv`
-- `logs/sovereign.jsonl`
-- `logs/data_provider_degradation.log`
-
-This separation is intentional: source stays versioned, state stays mutable,
-and generated outputs are easy to inspect or clean up without touching code.
+---
+*Built for Quantitative Precision — Sovereign Engine v14.4-Modular*

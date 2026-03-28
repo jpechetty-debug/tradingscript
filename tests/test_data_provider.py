@@ -73,6 +73,17 @@ class TestFetchDailyBatch:
         assert isinstance(result, dict)
         assert "RELIANCE.NS" in result
 
+    def test_yfinance_single_ticker_multiindex_parsed_correctly(self):
+        """
+        yfinance 1.x can return a ticker-first MultiIndex even for one symbol.
+        """
+        fake = _fake_multi_df(["RELIANCE.NS"])
+        with patch("core.data_provider._yf_download_chunk", return_value=fake):
+            result = fetch_daily_batch(["RELIANCE.NS"], _cfg(BENCHMARK="RELIANCE.NS"))
+        assert isinstance(result, dict)
+        assert "RELIANCE.NS" in result
+        assert list(result["RELIANCE.NS"].columns) == ["Open", "High", "Low", "Close", "Volume"]
+
     def test_empty_chunk_result_skipped(self):
         with patch("core.data_provider._yf_download_chunk",
                    return_value=pd.DataFrame()):
