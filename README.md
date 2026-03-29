@@ -149,4 +149,11 @@ To enable dynamic position sizing that responds to portfolio performance between
 - `python sovereign_quant_layer.py --capital-plan --regime TREND_UP`: Legacy compatibility wrapper for modular calibration and capital-plan inspection.
 
 ---
+
+### 🛡️ Final Hardening (v14.6-Modular)
+- **yfinance 1.2.0 Compliance**: Verified `MultiIndex` column consistency for institutional data-provider stability.
+- **Regime-Tracker Resilience**: Expanded test coverage to 10+ edge cases across recursive backtest folds and live scan transitions.
+- **Legacy Purge**: [REMOVED] `SE_PATCH` and `_LegacyPatchShim` legacy shims from the public internal API for a pristine, modular-only architecture.
+
 *Built for Quantitative Precision — Sovereign Engine v14.6-Modular*
+

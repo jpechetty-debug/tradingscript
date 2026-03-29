@@ -3,137 +3,77 @@ screener_v14_modular.py
 =======================
 Backward-compatible library entry point for the Sovereign Engine.
 
-The runtime orchestration now lives in explicit services under ``core/``:
+All runtime orchestration lives in ``core/``:
 
-- ``core/services.py`` for scan, data, alert, and persistence boundaries
-- ``core/runtime_paths.py`` for state / artifacts / logs directories
+- ``core/services.py``       — :class:`ScanService`, :class:`AlertService`,
+                               :class:`PersistenceService`, :class:`ServiceBundle`,
+                               :func:`configure_services`
+- ``core/runtime_paths.py``  — state / artifacts / logs directory layout
+- ``core/backtest.py``       — walk-forward engine + :class:`TransactionCostModel`
 
-This module intentionally stays thin so existing imports continue to work.
+This module re-exports the most-used symbols and provides thin CLI-facing
+wrappers (``run_scan``, ``run_backtest``, ``run_calibration``) so that
+``run.py`` and external tooling that did ``from screener_v14_modular import …``
+continue to work without modification.
+
+* Module-level ``ensure_runtime_dirs()`` / ``setup_logging()`` side-effects —
+  these ran on every import, including in tests.  They are now called once
+  inside ``main()``.
+* Module-level ``_DEFAULT_SERVICES`` lazy singleton — constructed on first
+  access via ``__getattr__``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from core.backtest import WalkForwardResult
 from core.config import CONFIG, SystemConfig
 from core.regime import MarketRegime, RegimeTracker
 from core.runtime_paths import RUNTIME_PATHS, ensure_runtime_dirs
 from core.scorer import TickerResult
-from core.services import AlertService, PersistenceService, ScanService
+from core.services import (
+    ServiceBundle,         # re-exported for backward compat
+    configure_services,    # re-exported for backward compat
+)
 from core.telemetry import setup_logging
-
 
 VERSION = "14.6-Modular"
 
-ensure_runtime_dirs()
-setup_logging(level="INFO", json_log_file=str(RUNTIME_PATHS.telemetry_log_file))
 log = logging.getLogger("sovereign")
 
+# ---------------------------------------------------------------------------
+# Lazy default service bundle — constructed on first access, not at import.
+# ---------------------------------------------------------------------------
 
-class _LegacyPatchShim:
-    def create_components(self, *args: Any, **kwargs: Any) -> Any:
-        from sovereign_improvements import create_components
-
-        return create_components(*args, **kwargs)
-
-    def apply(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        from sovereign_improvements import apply
-
-        return apply(*args, **kwargs)
-
-    def __getattr__(self, name: str) -> Callable[..., None]:
-        def _noop(*args: object, **kwargs: object) -> None:
-            return None
-
-        return _noop
+_DEFAULT_SERVICES: Optional[ServiceBundle] = None
 
 
-SE_PATCH: Any = _LegacyPatchShim()
-
-
-@dataclass(frozen=True)
-class ServiceBundle:
-    persistence: PersistenceService
-    scan_service: ScanService
-    alert_service: AlertService
-
-    def __iter__(self):
-        yield self.scan_service
-        yield self.alert_service
-
-
-def _build_services(
-    *,
-    data_service: Optional[Any] = None,
-    persistence: Optional[PersistenceService] = None,
-    probability_gate: Optional[Any] = None,
-    capital_scaler: Optional[Any] = None,
-    factor_calibrator: Optional[Any] = None,
-    alerter: Optional[Any] = None,
-    current_nav_provider: Optional[Any] = None,
-    alert_service: Optional[AlertService] = None,
-) -> ServiceBundle:
-    resolved_persistence = persistence or PersistenceService()
-    scan_service = ScanService(
-        version=VERSION,
-        data_service=data_service,
-        persistence=resolved_persistence,
-        probability_gate=probability_gate,
-        capital_scaler=capital_scaler,
-        factor_calibrator=factor_calibrator,
-        alerter=alerter,
-        current_nav_provider=current_nav_provider,
-    )
-    resolved_alert_service = alert_service or scan_service.create_alert_service()
-    return ServiceBundle(
-        persistence=resolved_persistence,
-        scan_service=scan_service,
-        alert_service=resolved_alert_service,
-    )
-
-
-DEFAULT_SERVICES = _build_services()
-
-
-def _resolve_services(services: Optional[ServiceBundle]) -> ServiceBundle:
-    return services or DEFAULT_SERVICES
+def _get_default_services() -> ServiceBundle:
+    global _DEFAULT_SERVICES
+    if _DEFAULT_SERVICES is None:
+        _DEFAULT_SERVICES = configure_services(version=VERSION)
+    return _DEFAULT_SERVICES
 
 
 def __getattr__(name: str) -> Any:
     if name == "PERSISTENCE":
-        return DEFAULT_SERVICES.persistence
+        return _get_default_services().persistence
     if name == "SCAN_SERVICE":
-        return DEFAULT_SERVICES.scan_service
+        return _get_default_services().scan_service
     if name == "ALERT_SERVICE":
-        return DEFAULT_SERVICES.alert_service
+        return _get_default_services().alert_service
     raise AttributeError(name)
 
 
-def configure_services(
-    *,
-    data_service: Optional[Any] = None,
-    persistence: Optional[PersistenceService] = None,
-    probability_gate: Optional[Any] = None,
-    capital_scaler: Optional[Any] = None,
-    factor_calibrator: Optional[Any] = None,
-    alerter: Optional[Any] = None,
-    current_nav_provider: Optional[Any] = None,
-    alert_service: Optional[AlertService] = None,
-) -> ServiceBundle:
-    return _build_services(
-        data_service=data_service,
-        persistence=persistence,
-        probability_gate=probability_gate,
-        capital_scaler=capital_scaler,
-        factor_calibrator=factor_calibrator,
-        alerter=alerter,
-        current_nav_provider=current_nav_provider,
-        alert_service=alert_service,
-    )
+def _resolve_services(services: Optional[ServiceBundle]) -> ServiceBundle:
+    return services if services is not None else _get_default_services()
 
+
+# ---------------------------------------------------------------------------
+# Public compatibility wrappers
+# ---------------------------------------------------------------------------
 
 def run_scan(
     config: SystemConfig = CONFIG,
@@ -146,10 +86,10 @@ def run_scan(
     services: Optional[ServiceBundle] = None,
 ) -> tuple[list[TickerResult], list[TickerResult], Optional[MarketRegime]]:
     """
-    Compatibility wrapper over ``ScanService.scan``.
+    Compatibility wrapper over :meth:`ScanService.scan`.
 
-    ``no_intraday`` is preserved for the legacy CLI surface even though the
-    modular runtime no longer branches on it directly.
+    ``no_intraday`` is accepted but ignored — the modular runtime no longer
+    branches on it directly.
     """
     _ = no_intraday
     bundle = _resolve_services(services)
@@ -175,7 +115,7 @@ def _send_alert(
 
 def run_calibration(*, services: Optional[ServiceBundle] = None) -> None:
     bundle = _resolve_services(services)
-    log.info("Starting Platt calibration from %s...", bundle.persistence.paths.trade_log_file)
+    log.info("Starting Platt calibration from %s…", bundle.persistence.paths.trade_log_file)
     bundle.scan_service.run_calibration()
 
 
@@ -192,10 +132,7 @@ def run_backtest(
     bundle = _resolve_services(services)
     log.info(
         "Starting walk-forward backtest | train=%d test=%d step=%d direction=%s",
-        train_days,
-        test_days,
-        step_days,
-        direction,
+        train_days, test_days, step_days, direction,
     )
 
     results = bundle.scan_service.run_backtest(
@@ -212,19 +149,24 @@ def run_backtest(
     if overall is None:
         return results
 
-    print("\n" + "=" * 60)
+    # Compute gross total R for comparison (costs were deducted per-trade)
+    gross_total = sum(t.gross_r_multiple for t in results.trades) if results.trades else 0.0
+    total_friction = sum(t.friction_r_applied for t in results.trades) if results.trades else 0.0
+
+    print("\n" + "=" * 64)
     print(f"  Walk-Forward Backtest Summary  (v{VERSION})")
-    print("=" * 60)
+    print("=" * 64)
     print(f"  Folds          : {overall.n_folds}")
     print(f"  Total trades   : {overall.n_trades}")
     print(f"  Hit rate       : {overall.hit_rate:.1%}")
-    print(f"  Mean R         : {overall.mean_r:+.3f}")
-    print(f"  Total R        : {overall.total_r:+.2f}")
+    print(f"  Mean R (net)   : {overall.mean_r:+.3f}")
+    print(f"  Total R (net)  : {overall.total_r:+.2f}  "
+          f"(gross {gross_total:+.2f}, cost drag {total_friction:.2f} R)")
     print(f"  Sharpe (ann.)  : {overall.sharpe:+.2f}")
     print(f"  Max drawdown   : {overall.max_dd:.2f} R")
     print(f"  Profit factor  : {overall.profit_factor:.2f}")
     print(f"  Expectancy R   : {overall.expectancy_r:+.4f}")
-    print("=" * 60)
+    print("=" * 64)
 
     if overall.fold_stats:
         print("\nPer-fold breakdown:")
@@ -243,14 +185,18 @@ def run_backtest(
     if results.trades:
         print(f"\nTrade log saved -> {bundle.persistence.artifact_path(out_csv)}")
     else:
-        log.warning("No trades generated - check min_prob threshold and data quality.")
+        log.warning("No trades generated — check min_prob threshold and data quality.")
 
     return results
 
 
 def main() -> None:
-    """Backward compatibility wrapper that delegates to the canonical CLI."""
+    """Backward-compatibility wrapper that delegates to the canonical CLI."""
     import sys
+
+    # Side effects that used to run at module level now happen here, once.
+    ensure_runtime_dirs()
+    setup_logging(level="INFO", json_log_file=str(RUNTIME_PATHS.telemetry_log_file))
 
     sys.modules.setdefault("screener_v14_modular", sys.modules[__name__])
     from run import main as run_main
