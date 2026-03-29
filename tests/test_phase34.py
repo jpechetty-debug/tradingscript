@@ -376,7 +376,7 @@ class TestBacktestHelpers:
         # Make a bar where Low < stop
         bars = self._fwd_bars(n=5, start=100.0)
         bars.iloc[1, bars.columns.get_loc("Low")] = 97.0   # hits stop
-        r, hit, bars_held, _ = _realised_r("LONG", entry=100.0, stop=98.0,
+        r, hit, bars_held, _, _, _ = _realised_r("LONG", entry=100.0, stop=98.0,
                                             t1=110.0, fwd_bars=bars, time_stop=20)
         assert r == pytest.approx(-1.0)
         assert not hit
@@ -386,7 +386,7 @@ class TestBacktestHelpers:
         from core.backtest import _realised_r
         bars = self._fwd_bars(n=5, start=100.0)
         bars.iloc[2, bars.columns.get_loc("High")] = 115.0   # hits T1
-        r, hit, bars_held, _ = _realised_r("LONG", entry=100.0, stop=97.0,
+        r, hit, bars_held, _, _, _ = _realised_r("LONG", entry=100.0, stop=97.0,
                                             t1=110.0, fwd_bars=bars, time_stop=20)
         assert hit
         assert r > 0
@@ -396,7 +396,7 @@ class TestBacktestHelpers:
         from core.backtest import _realised_r
         np.random.seed(1)
         bars = self._fwd_bars(n=10, start=100.0, trend=0.0)
-        r, hit, bars_held, _ = _realised_r("LONG", entry=100.0, stop=80.0,
+        r, hit, bars_held, _, _, _ = _realised_r("LONG", entry=100.0, stop=80.0,
                                             t1=150.0, fwd_bars=bars, time_stop=5)
         assert bars_held <= 6   # capped by time stop (exit on bar i >= time_stop)
         assert not hit
@@ -404,7 +404,7 @@ class TestBacktestHelpers:
     def test_realised_r_empty_bars(self):
         from core.backtest import _realised_r
         empty = pd.DataFrame(columns=["High", "Low", "Close"])
-        r, hit, bars, _ = _realised_r("LONG", 100, 95, 110, empty, 10)
+        r, hit, bars, _, _, _ = _realised_r("LONG", 100, 95, 110, empty, 10)
         assert r == 0.0
         assert bars == 0
 

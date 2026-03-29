@@ -20,7 +20,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .backtest import TransactionCostModel
 
 import pandas as pd
 
@@ -532,7 +535,12 @@ class ScanService:
         out_csv: str = "backtest_results.csv",
         direction: str = "LONG",
         debug: bool = False,
+        cost_model: "TransactionCostModel | None" = None,
     ) -> WalkForwardResult:
+        from .backtest import DEFAULT_COST_MODEL
+
+        resolved_cost = cost_model if cost_model is not None else DEFAULT_COST_MODEL
+
         if debug:
             logging.getLogger("sovereign").setLevel(logging.DEBUG)
 
@@ -568,6 +576,7 @@ class ScanService:
             test_days=test_days,
             step_days=step_days,
             direction=direction,
+            cost_model=resolved_cost,
         )
 
         output_path = self._persistence.artifact_path(out_csv)
@@ -740,3 +749,87 @@ class ScanService:
             regime.sector_concentration * 100,
             "LOCKED" if regime.regime_locked else "live",
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SERVICE BUNDLE  (moved here from screener_v14_modular.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ServiceBundle:
+    """
+    Immutable container that groups the three top-level service objects.
+
+    Returned by ``configure_services`` and accepted by every public wrapper
+    function in ``screener_v14_modular`` for dependency injection.
+    Iterating a bundle yields ``(scan_service, alert_service)`` so legacy
+    tuple-unpacking still works.
+    """
+    persistence:   PersistenceService
+    scan_service:  ScanService
+    alert_service: AlertService
+
+    def __iter__(self):
+        yield self.scan_service
+        yield self.alert_service
+
+
+def configure_services(
+    *,
+    data_service:          Optional[Any] = None,
+    persistence:           Optional[PersistenceService] = None,
+    probability_gate:      Optional[Any] = None,
+    capital_scaler:        Optional[Any] = None,
+    factor_calibrator:     Optional[Any] = None,
+    alerter:               Optional[Any] = None,
+    current_nav_provider:  Optional[Any] = None,
+    alert_service:         Optional[AlertService] = None,
+    version:               str = "14.6-Modular",
+) -> "ServiceBundle":
+    """
+    Assemble and return a fully wired :class:`ServiceBundle`.
+
+    All parameters are optional — omit any collaborator to use the
+    corresponding default (no-op gate, no alerter, etc.).  The returned
+    bundle is frozen and thread-safe to share across scan loops.
+
+    Parameters
+    ----------
+    data_service:
+        Optional custom :class:`MarketDataService`.
+    persistence:
+        Persistence layer; a new :class:`PersistenceService` is created if
+        not supplied.
+    probability_gate:
+        Object implementing :class:`ProbabilityGate` (regime-aware threshold).
+    capital_scaler:
+        Object implementing :class:`CapitalFractionScaler`.
+    factor_calibrator:
+        Object implementing :class:`FactorWeightProvider`.
+    alerter:
+        Object implementing :class:`SummaryAlerter`.
+    current_nav_provider:
+        Zero-arg callable returning the live portfolio NAV as ``float | None``.
+    alert_service:
+        Pre-built :class:`AlertService`; constructed via
+        ``ScanService.create_alert_service()`` if not supplied.
+    version:
+        Version string embedded in outbound alerts.
+    """
+    resolved_persistence = persistence or PersistenceService()
+    scan_svc = ScanService(
+        version=version,
+        data_service=data_service,
+        persistence=resolved_persistence,
+        probability_gate=probability_gate,
+        capital_scaler=capital_scaler,
+        factor_calibrator=factor_calibrator,
+        alerter=alerter,
+        current_nav_provider=current_nav_provider,
+    )
+    resolved_alert = alert_service or scan_svc.create_alert_service()
+    return ServiceBundle(
+        persistence=resolved_persistence,
+        scan_service=scan_svc,
+        alert_service=resolved_alert,
+    )

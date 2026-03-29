@@ -1,4 +1,4 @@
-# Sovereign Engine v14.4-Modular
+# Sovereign Engine v14.6-Modular
 
 **Institutional-Grade Quantitative Trading Intelligence for NSE India.**
 
@@ -67,6 +67,36 @@ Factor weights are not static. The engine periodically re-calculates the **Infor
 - `IC = SpearmanCorrelation(Factor_Scores, Signed_Forward_Returns)`
 - `Weight = max(0, ICIR) / Σ(pos_ICIR)`
 
+### Transaction Cost Modeling
+The **TransactionCostModel** (`core/backtest.py`) enables testing strategies under realistic market friction conditions. It supports configurable slippage, brokerage fees, and tax implications, generating a net realized risk-reward profile (friction-adjusted Return vs. Gross Return). This parameter is seamlessly injected into the `walk_forward` execution context, ensuring institutional-grade resilience against idealized backtesting illusions.
+
+### Modular Service Architecture
+Sovereign Engine employs a lazily-initialized `ServiceBundle` (`core/services.py`) to manage key dependencies (Data Fetching, Persistence, Analytics, and Extensible Handlers). The `_DEFAULT_SERVICES` singleton allows components to be gracefully swapped or monkey-patched during testing and runtime optimization, maintaining a strict boundary model.
+
+---
+
+## 🛡️ Repo Stability & Master Validation
+
+To ensure institutional-grade code quality and repository stability, every PR/commit is subjected to a tiered validation protocol via `checklist.py`.
+
+### The P0/P1 Check Hierarchy:
+1.  **P0: Security Scan** - Automated vulnerability and secret detection.
+2.  **P0: Lint & Type Compliance** - Strict **Ruff** (E402/F821) and **Mypy** verification.
+3.  **P1: Test Suite Compliance** - 100% pass requirement across 440+ unit and integration tests.
+4.  **P1: UX & SEO Optimization** - Accessibility and Meta-tag validation for reporting artifacts.
+
+---
+
+## 🖥️ Unified Command Center
+
+The **NSE Unified Scanner** (`dashboard.html`) provides a localized, professional-grade interface for monitoring market conditions and trade execution plans.
+
+- **33 EMA Signal Intelligence**: Real-time signal validation using a 9-minute spot chart timeframe with MTF-60m confirmation.
+- **8-Param Momentum Screener**: A binary filter-set evaluating 4 Technical and 4 Fundamental parameters with zero-tolerance pass logic.
+- **Trade Execution Planner**: Quantitative risk-reward calculator with ATR-based volatility scaling and volatility-matched bias detection.
+- **Institutional SEO**: Fully optimized for internal reporting with high-fidelity `og:meta` headers.
+
+
 ---
 
 ## 📁 Environment Variables Guide
@@ -110,11 +140,13 @@ To enable dynamic position sizing that responds to portfolio performance between
 - **current_nav**: Current portfolio value in INR. Scales the Kelly fraction proportionally.
 - **peak_nav**: Historical peak value. Used for **Tiered PANIC** drawdown calculation.
 
-### Diagnostic Scripts
-- `scripts/fyers_setup.py`: Daily token refreshment, `.env` update, and account verification.
-- `scripts/test_yf_diagnostic.py`: Verify yfinance connectivity and data health.
-- `scripts/test_icir.py`: Audit current factor Information Coefficients.
+### Diagnostic & Validation Scripts
+- `python .agent/scripts/checklist.py .`: The definitive master validation source (Security, Lint, Tests, SEO).
+- `python .agent/skills/seo-fundamentals/scripts/seo_checker.py .`: Verifies search engine and report metadata integrity.
+- `scripts/fyers_setup.py`: Daily token refreshment, account verification, and `.env` synchronization.
+- `scripts/test_yf_diagnostic.py`: Integrity check for yfinance connectivity and data ingestion health.
+- `scripts/test_icir.py`: Real-time audit of cumulative factor Information Coefficients.
 - `python sovereign_quant_layer.py --capital-plan --regime TREND_UP`: Legacy compatibility wrapper for modular calibration and capital-plan inspection.
 
 ---
-*Built for Quantitative Precision — Sovereign Engine v14.4-Modular*
+*Built for Quantitative Precision — Sovereign Engine v14.6-Modular*

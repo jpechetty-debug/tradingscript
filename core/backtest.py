@@ -57,6 +57,93 @@ from .regime import (
 )
 from .scorer import composite_to_prob, passes_liquidity, compute_trade_management
 from .universe import TICKER_TO_SECTOR, N_SECTORS
+# ─────────────────────────────────────────────────────────────────────────────
+# TRANSACTION COST MODEL  (NSE intraday defaults)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class TransactionCostModel:
+    """
+    Round-trip friction for NSE intraday trades, expressed as percentages of
+    the *entry price* per side (buy or sell).
+
+    Default values reflect Zerodha/Fyers retail costs on NSE CashMIS (intraday):
+
+    =========================================  ===============================
+    Component                                  Default
+    =========================================  ===============================
+    Slippage (half-spread + mkt impact)        0.05 % per side
+    Brokerage                                  0.03 % per side
+    STT (Securities Transaction Tax)           0.025 % on SELL side only
+    NSE exchange transaction charge            0.00345 % per side
+    SEBI regulatory charge                     0.0001 % per side
+    Stamp duty                                 0.015 % on BUY side only
+    GST (on brokerage + exchange + SEBI)       18 %  (multiplicative)
+    =========================================  ===============================
+
+    Approximate round-trip drag: ~0.21 % of entry price, which on a typical
+    1 ATR stop (~1.5 % of price) costs roughly **0.14 R** per trade.
+
+    Use ``ZERO_COST_MODEL`` for frictionless back-tests (legacy / unit-test
+    behaviour).  Pass a custom instance to ``walk_forward`` to model different
+    broker tiers or larger slippage assumptions.
+    """
+    # Per-side
+    slippage_pct:        float = 0.0005       # 0.05 %
+    brokerage_pct:       float = 0.0003       # 0.03 %
+    exchange_pct:        float = 0.0000345    # NSE exchange charge
+    sebi_pct:            float = 0.000001     # SEBI charge
+    # Asymmetric
+    stt_sell_pct:        float = 0.00025      # STT on sell side only (intraday)
+    stamp_buy_pct:       float = 0.00015      # Stamp duty on buy side only
+    # GST applies on brokerage + exchange + SEBI
+    gst_rate:            float = 0.18
+
+    # ── derived helpers ───────────────────────────────────────────────────────
+
+    def _gst_mult(self) -> float:
+        return 1.0 + self.gst_rate
+
+    def entry_cost_pct(self) -> float:
+        """Total buy-side friction as a fraction of entry price."""
+        taxable = (self.brokerage_pct + self.exchange_pct + self.sebi_pct) * self._gst_mult()
+        return self.slippage_pct + taxable + self.stamp_buy_pct
+
+    def exit_cost_pct(self) -> float:
+        """Total sell-side friction as a fraction of exit price (approx entry price)."""
+        taxable = (self.brokerage_pct + self.exchange_pct + self.sebi_pct) * self._gst_mult()
+        return self.slippage_pct + self.stt_sell_pct + taxable
+
+    def friction_r(self, entry: float, sl_dist: float) -> float:
+        """
+        Round-trip cost drag expressed in R-multiples.
+
+        Parameters
+        ----------
+        entry:
+            Entry price (INR).
+        sl_dist:
+            Absolute distance from entry to stop-loss (must be > 0).
+
+        Returns
+        -------
+        A positive float — subtract this from the gross R-multiple to get the
+        net (after-cost) R-multiple.  Returns 0.0 if sl_dist ≤ 0.
+        """
+        if sl_dist <= 0:
+            return 0.0
+        total_pct = self.entry_cost_pct() + self.exit_cost_pct()
+        return round(entry * total_pct / sl_dist, 5)
+
+
+# Pre-built instances — reference by name instead of constructing inline.
+DEFAULT_COST_MODEL = TransactionCostModel()   # NSE intraday retail defaults
+ZERO_COST_MODEL    = TransactionCostModel(    # frictionless (legacy / tests)
+    slippage_pct=0.0, brokerage_pct=0.0, exchange_pct=0.0,
+    sebi_pct=0.0, stt_sell_pct=0.0, stamp_buy_pct=0.0, gst_rate=0.0,
+)
+
+
 
 log = logging.getLogger("sovereign.backtest")
 
@@ -78,9 +165,13 @@ class TradeRecord:
     t1:         float
     composite:  float
     prob_win:   float
-    r_multiple: float    # realised R-multiple (+ = profit, - = loss)
+    r_multiple: float    # net R-multiple after transaction costs
     hit_t1:     bool
     bars_held:  int
+    # Cost fields — default 0.0 so positional construction in existing code
+    # and tests remains valid.
+    gross_r_multiple:   float = field(default=0.0)  # R before cost deduction
+    friction_r_applied: float = field(default=0.0)  # cost drag in R units
 
 
 @dataclass
@@ -140,56 +231,69 @@ def _realised_r(
     t1:        float,
     fwd_bars:  pd.DataFrame,
     time_stop: int,
-) -> tuple[float, bool, int, Optional[pd.Timestamp]]:
+    cost_model: TransactionCostModel = ZERO_COST_MODEL,
+) -> tuple[float, bool, int, Optional[pd.Timestamp], float, float]:
     """
     Simulate a single trade against forward OHLCV bars.
 
     Exit logic (in priority order):
-    1. Stop hit (High/Low touches stop level) → -1.0 R
-    2. T1 hit (High/Low touches target)       → +RR R
+    1. Stop hit (High/Low touches stop level) → -1.0 R gross
+    2. T1 hit (High/Low touches target)       → +RR R gross
     3. Time-stop (max bars held)              → exit at close of last bar
     4. End of test window                     → exit at last available close
 
+    Transaction costs are applied via *cost_model*.  Pass ``ZERO_COST_MODEL``
+    for frictionless behaviour (unit tests, legacy callers).
+
     Returns
     -------
-    (r_multiple, hit_t1, bars_held, exit_date)
+    (net_r, hit_t1, bars_held, exit_date, gross_r, friction_r_applied)
     """
     sl_dist = abs(entry - stop)
     if sl_dist <= 0:
-        return 0.0, False, 0, None
+        return 0.0, False, 0, None, 0.0, 0.0
 
-    rr = abs(t1 - entry) / sl_dist
+    rr      = abs(t1 - entry) / sl_dist
+    friction = cost_model.friction_r(entry, sl_dist)
 
     for i, (ts, bar) in enumerate(fwd_bars.iterrows()):
         if i >= time_stop:
-            # Time stop: exit at close
-            close = float(bar["Close"])
-            r = (close - entry) / sl_dist if direction == "LONG" else (entry - close) / sl_dist
-            return round(r, 4), False, i + 1, ts
+            close   = float(bar["Close"])
+            gross_r = (close - entry) / sl_dist if direction == "LONG" else (entry - close) / sl_dist
+            gross_r = round(gross_r, 4)
+            net_r   = round(gross_r - friction, 4)
+            return net_r, False, i + 1, ts, gross_r, round(friction, 5)
 
-        high  = float(bar["High"])
-        low   = float(bar["Low"])
+        high = float(bar["High"])
+        low  = float(bar["Low"])
 
         if direction == "LONG":
             if low <= stop:
-                return -1.0, False, i + 1, ts
+                gross_r = -1.0
+                return round(gross_r - friction, 4), False, i + 1, ts, gross_r, round(friction, 5)
             if high >= t1:
-                return round(rr, 4), True, i + 1, ts
+                gross_r = round(rr, 4)
+                return round(gross_r - friction, 4), True, i + 1, ts, gross_r, round(friction, 5)
         else:
             if high >= stop:
-                return -1.0, False, i + 1, ts
+                gross_r = -1.0
+                return round(gross_r - friction, 4), False, i + 1, ts, gross_r, round(friction, 5)
             if low <= t1:
-                return round(rr, 4), True, i + 1, ts
+                gross_r = round(rr, 4)
+                return round(gross_r - friction, 4), True, i + 1, ts, gross_r, round(friction, 5)
 
     # Ran out of bars: exit at last close
     if len(fwd_bars) == 0:
-        return 0.0, False, 0, None
+        return 0.0, False, 0, None, 0.0, 0.0
 
     last_bar  = fwd_bars.iloc[-1]
     close     = float(last_bar["Close"])
     exit_date = fwd_bars.index[-1]
-    r = (close - entry) / sl_dist if direction == "LONG" else (entry - close) / sl_dist
-    return round(r, 4), False, len(fwd_bars), exit_date
+    gross_r   = round(
+        (close - entry) / sl_dist if direction == "LONG" else (entry - close) / sl_dist, 4
+    )
+    net_r = round(gross_r - friction, 4)
+    return net_r, False, len(fwd_bars), exit_date, gross_r, round(friction, 5)
 
 
 def _fold_stats(fold: int, trades: list[TradeRecord], dates: tuple) -> FoldStats:
@@ -278,6 +382,7 @@ def walk_forward(
     min_prob:       float | None = None,
     direction:      str = "LONG",
     max_trades_per_fold: int = 10,
+    cost_model:     TransactionCostModel = DEFAULT_COST_MODEL,
 ) -> WalkForwardResult:
     """
     Run a walk-forward backtest over *raw_data*.
@@ -304,10 +409,16 @@ def walk_forward(
     max_trades_per_fold:
         Cap on trades per fold (ranked by composite score) to avoid
         over-trading in volatile regimes.
+    cost_model:
+        Transaction cost model to apply to each simulated trade.
+        Defaults to ``DEFAULT_COST_MODEL`` (NSE intraday retail costs).
+        Pass ``ZERO_COST_MODEL`` for frictionless results.
 
     Returns
     -------
     ``WalkForwardResult`` with per-trade records and summary statistics.
+    Net R-multiples in ``TradeRecord.r_multiple`` already reflect costs;
+    the gross figure is preserved in ``TradeRecord.gross_r_multiple``.
     """
     min_prob  = min_prob if min_prob is not None else config.BACKTEST_MIN_PROB
     all_trades: list[TradeRecord] = []
@@ -337,8 +448,12 @@ def walk_forward(
     fold_starts = range(0, total_bars - required + 1, step_days)
     n_folds     = len(list(fold_starts))
     log.info(
-        "Walk-forward: %d folds | train=%d test=%d step=%d | tickers=%d",
+        "Walk-forward: %d folds | train=%d test=%d step=%d | tickers=%d | "
+        "cost=%.3f%% round-trip (entry=%.4f%% + exit=%.4f%%)",
         n_folds, train_days, test_days, step_days, len(tickers),
+        (cost_model.entry_cost_pct() + cost_model.exit_cost_pct()) * 100,
+        cost_model.entry_cost_pct() * 100,
+        cost_model.exit_cost_pct() * 100,
     )
     regime_tracker = RegimeTracker()
 
@@ -460,13 +575,14 @@ def walk_forward(
             if fwd_bars.empty:
                 continue
 
-            r, hit, bars, exit_date = _realised_r(
+            r, hit, bars, exit_date, gross_r, friction = _realised_r(
                 direction=d,
                 entry=close,
                 stop=targets.stop,
                 t1=targets.t1,
                 fwd_bars=fwd_bars,
                 time_stop=time_stop,
+                cost_model=cost_model,
             )
 
             fold_trades.append(TradeRecord(
@@ -483,6 +599,8 @@ def walk_forward(
                 r_multiple=r,
                 hit_t1=hit,
                 bars_held=bars,
+                gross_r_multiple=gross_r,
+                friction_r_applied=friction,
             ))
 
         fold_dates = (train_dates[-1], test_dates[-1])

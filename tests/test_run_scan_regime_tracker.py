@@ -30,7 +30,7 @@ def _install_scan_service(monkeypatch, *, gate=None, scaler=None):
     )
     monkeypatch.setattr(
         svm,
-        "DEFAULT_SERVICES",
+        "_DEFAULT_SERVICES",
         svm.ServiceBundle(
             persistence=persistence,
             scan_service=scan_service,
