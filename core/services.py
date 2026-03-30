@@ -495,7 +495,7 @@ class ScanService:
 
         return all_results, portfolio, regime
 
-    def run_calibration(self) -> None:
+    def run_calibration(self, calib_offset: int = 60) -> None:
         trades = self._persistence.load_trade_log()
         if not trades:
             log.error("Trade log not found or empty at %s", self._persistence.paths.trade_log_file)
@@ -522,7 +522,7 @@ class ScanService:
             log.warning("Insufficient data for calibration (%d samples).", len(composites))
             return
 
-        a, b = calibrate_platt(composites, outcomes)
+        a, b = calibrate_platt(composites, outcomes, calib_offset=calib_offset)
         self._persistence.save_platt(a, b)
 
     def run_backtest(

@@ -1,6 +1,10 @@
 .env
 .venv/
 __pycache__/
+tmp/
+.backup/
+*.txt
+*.zip
 *.log
 *.jsonl
 .coverage
@@ -12,7 +16,7 @@ __pycache__/
 .idea/
 .DS_Store
 .agent/
-tmp/
+scripts/test_yf_layout.py
 
 # Runtime directories
 /artifacts/*

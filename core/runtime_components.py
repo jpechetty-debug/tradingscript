@@ -26,7 +26,6 @@ import numpy as np
 from .runtime_paths import RUNTIME_PATHS, ensure_parent, ensure_runtime_dirs
 
 logger = logging.getLogger("sovereign.runtime")
-ensure_runtime_dirs()
 
 REGIME_GATE: dict[str, float] = {
     "TREND_UP": 0.50,
@@ -303,10 +302,29 @@ class RegimeAwareTelegramAlerter:
 
 @dataclass(frozen=True)
 class RuntimeComponents:
+    """Immutable container of live runtime collaborators.
+
+    Supports the context-manager protocol so tests and short-lived
+    scripts can reliably stop the background calibrator thread::
+
+        with create_runtime_components() as components:
+            ...
+        # calibrator thread stopped automatically on exit
+    """
     gate: RegimeProbabilityGate
     scaler: TieredCapitalScaler
     calibrator: RollingFactorCalibrator
     alerter: RegimeAwareTelegramAlerter
+
+    def stop(self) -> None:
+        """Stop the background calibrator thread."""
+        self.calibrator.stop()
+
+    def __enter__(self) -> "RuntimeComponents":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.stop()
 
 
 def create_runtime_components(
@@ -316,6 +334,9 @@ def create_runtime_components(
     recal_interval: int = RECALIBRATION_INTERVAL,
     announce: bool = False,
 ) -> RuntimeComponents:
+    # Ensure state/artifacts/logs dirs exist exactly once, at the point
+    # where runtime components are intentionally constructed — not at import.
+    ensure_runtime_dirs()
     scaler = TieredCapitalScaler(portfolio_peak=portfolio_peak)
     gate = RegimeProbabilityGate()
     calibrator = RollingFactorCalibrator(window=recal_window, interval_sec=recal_interval)

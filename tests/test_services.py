@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -342,3 +343,193 @@ def test_scan_service_backtest_writes_relative_output_under_artifacts(tmp_path, 
 
     assert result is fake_results
     assert fake_results.saved_path == str(tmp_path / "artifacts" / "walk_forward.csv")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PersistenceService — save_platt / load_platt round-trip
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_persistence_service_save_and_reload_platt(tmp_path):
+    """save_platt writes valid JSON; a fresh service loads it back exactly."""
+    service = PersistenceService(_paths(tmp_path))
+
+    service.save_platt(a=-3.14, b=1.57)
+
+    # Reload via a second instance to confirm it's actually persisted to disk
+    service2 = PersistenceService(_paths(tmp_path))
+    from core.config import CONFIG
+    a, b, from_file = service2.load_platt(CONFIG)
+
+    assert from_file is True
+    assert a == pytest.approx(-3.14)
+    assert b == pytest.approx(1.57)
+
+
+def test_persistence_service_load_platt_falls_back_to_config_defaults(tmp_path):
+    """When no calibration file exists, config defaults are returned."""
+    from core.config import CONFIG
+
+    service = PersistenceService(_paths(tmp_path))
+    a, b, from_file = service.load_platt(CONFIG)
+
+    assert from_file is False
+    assert a == CONFIG.PLATT_A
+    assert b == CONFIG.PLATT_B
+
+
+def test_persistence_service_load_platt_ignores_corrupt_file(tmp_path):
+    """A corrupt JSON file falls back to config defaults without raising."""
+    from core.config import CONFIG
+
+    paths = _paths(tmp_path)
+    paths.platt_calibration_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.platt_calibration_file.write_text("not valid json", encoding="utf-8")
+
+    service = PersistenceService(paths)
+    a, b, from_file = service.load_platt(CONFIG)
+
+    assert from_file is False
+    assert a == CONFIG.PLATT_A
+
+
+def test_persistence_service_save_portfolio_state_round_trip(tmp_path):
+    """save_portfolio_state writes valid JSON; load returns the same values."""
+    service = PersistenceService(_paths(tmp_path))
+
+    service.save_portfolio_state(current_nav=923_000.0, peak_nav=1_050_000.0)
+
+    snapshot = service.load_portfolio_state()
+    assert snapshot is not None
+    assert snapshot.current_nav == pytest.approx(923_000.0)
+    assert snapshot.peak_nav == pytest.approx(1_050_000.0)
+
+
+def test_persistence_service_load_portfolio_state_returns_none_when_missing(tmp_path):
+    service = PersistenceService(_paths(tmp_path))
+    assert service.load_portfolio_state() is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MarketDataService — error paths
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_market_data_service_raises_on_empty_fetch():
+    """prepare_scan_data must raise ValueError when the fetcher returns nothing."""
+    service = MarketDataService(fetcher=lambda tickers, cfg: {})
+    from core.config import CONFIG
+    import pytest
+    with pytest.raises(ValueError, match="No data fetched"):
+        service.prepare_scan_data(["SBIN.NS"], CONFIG)
+
+
+def test_market_data_service_raises_when_benchmark_missing():
+    """prepare_scan_data must raise ValueError when the benchmark ticker is absent."""
+    from core.config import CONFIG
+    import pandas as pd
+
+    index = pd.date_range("2024-01-01", periods=5, freq="B")
+    close = pd.Series([100.0] * 5, index=index)
+    df = pd.DataFrame({"Open": close, "High": close, "Low": close, "Close": close, "Volume": [1_000_000] * 5})
+
+    # Return data for a non-benchmark ticker only
+    def fetcher(tickers, cfg):
+        return {"NOT_THE_BENCHMARK.NS": df}
+
+    service = MarketDataService(fetcher=fetcher)
+    with pytest.raises(ValueError, match="Benchmark"):
+        service.prepare_scan_data(["NOT_THE_BENCHMARK.NS"], CONFIG)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ScanService.run_calibration — full path and edge cases
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_trade_log(tmp_path, records: list[dict]) -> "PersistenceService":
+    """Write a trade_log.json and return a PersistenceService pointing at it."""
+    paths = _paths(tmp_path)
+    paths.state_dir.mkdir(parents=True, exist_ok=True)
+    paths.trade_log_file.write_text(json.dumps(records), encoding="utf-8")
+    return PersistenceService(paths)
+
+
+def test_run_calibration_fits_platt_from_trade_log(tmp_path):
+    """Given a valid trade log with enough samples, Platt A/B should be saved."""
+    records = [
+        {"composite": float(i) * 0.1, "pnl": 1.0 if i % 2 == 0 else -1.0, "factors": {}}
+        for i in range(1, 41)
+    ]
+    persistence = _make_trade_log(tmp_path, records)
+
+    service = ScanService(version="test", persistence=persistence)
+    service.run_calibration(calib_offset=5)
+
+    # Platt file should now exist in the state dir
+    assert persistence.paths.platt_calibration_file.exists()
+    payload = json.loads(persistence.paths.platt_calibration_file.read_text())
+    assert "A" in payload and "B" in payload
+
+
+def test_run_calibration_skips_when_trade_log_empty(tmp_path, caplog):
+    """An empty trade log should log a warning and not write a calibration file."""
+    persistence = _make_trade_log(tmp_path, [])
+
+    service = ScanService(version="test", persistence=persistence)
+    with caplog.at_level("WARNING", logger="sovereign.services"):
+        service.run_calibration()
+
+    assert not persistence.paths.platt_calibration_file.exists()
+
+
+def test_run_calibration_skips_when_too_few_samples(tmp_path, caplog):
+    """Fewer than 5 samples must not attempt fitting (avoid degenerate Platt)."""
+    records = [{"composite": 0.5, "pnl": 1.0}, {"composite": 0.4, "pnl": -1.0}]
+    persistence = _make_trade_log(tmp_path, records)
+
+    service = ScanService(version="test", persistence=persistence)
+    with caplog.at_level("WARNING", logger="sovereign.services"):
+        service.run_calibration()
+
+    assert not persistence.paths.platt_calibration_file.exists()
+    assert "Insufficient" in caplog.text
+
+
+def test_run_calibration_uses_factor_composite_when_missing(tmp_path):
+    """When 'composite' key is absent, the dot-product of factors is used."""
+    from core.factors import DEFAULT_WEIGHTS
+
+    records = [
+        {
+            "factors": {k: float(i) * 0.05 for k in DEFAULT_WEIGHTS},
+            "pnl": 1.0 if i % 2 == 0 else -1.0,
+        }
+        for i in range(1, 31)
+    ]
+    persistence = _make_trade_log(tmp_path, records)
+
+    service = ScanService(version="test", persistence=persistence)
+    service.run_calibration(calib_offset=5)  # must not raise
+
+    assert persistence.paths.platt_calibration_file.exists()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RuntimeComponents — context manager and stop()
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_runtime_components_context_manager_stops_calibrator():
+    """Using RuntimeComponents as a context manager must stop the calibrator thread."""
+    from core.runtime_components import create_runtime_components
+
+    with create_runtime_components() as components:
+        assert components.calibrator._running is True
+
+    assert components.calibrator._running is False
+
+
+def test_runtime_components_stop_is_idempotent():
+    """Calling stop() twice must not raise."""
+    from core.runtime_components import create_runtime_components
+
+    components = create_runtime_components()
+    components.stop()
+    components.stop()  # must not raise

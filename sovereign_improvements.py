@@ -11,8 +11,6 @@ from __future__ import annotations
 import warnings
 from typing import Any
 
-import yfinance as yf
-
 from core.data_provider import fetch_daily_batch
 from core.runtime_components import (
     RECALIBRATION_INTERVAL,
@@ -53,7 +51,13 @@ class ResilientDataProvider:
 
     def __init__(self, fyers_client: Any = None) -> None:
         self._fyers = fyers_client
-        self._yf = yf
+
+    @property
+    def _yf(self):
+        """Lazy yfinance accessor — import deferred so the compat shim
+        can be imported in environments where yfinance is not installed."""
+        import yfinance as _yf  # noqa: PLC0415
+        return _yf
 
     def fetch(self, symbols: list[str], config: Any) -> Any:
         return fetch_daily_batch(symbols, config)

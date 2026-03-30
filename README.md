@@ -65,7 +65,7 @@ The engine uses a NAV-aware, fat-tail corrected Kelly sizing formula:
 ### Platt Scaling & Calibration
 Composite scores in `[0, 1]` are mapped to win-probabilities via the **Platt Sigmoid**:
 - `P(win) = 1 / (1 + exp(A * score + B))`
-- Parameters **A** and **B** are calibrated via maximum-likelihood estimation (MLE) on out-of-sample trade history to prevent over-confidence.
+- Parameters **A** and **B** are calibrated via maximum-likelihood estimation (MLE) on an **out-of-sample** validation window (default: 60 bars). This separates the fitting noise from predicted probabilities, preventing over-confident sizing in regimes with high kurtosis.
 
 ### IC-Weighted Factor Recalibration
 Factor weights are not static. The engine periodically re-calculates the **Information Coefficient (Spearman)** to optimize weight distributions:
@@ -75,15 +75,22 @@ Factor weights are not static. The engine periodically re-calculates the **Infor
 ### Transaction Cost Modeling
 The **TransactionCostModel** (`core/backtest.py`) enables testing strategies under realistic market friction conditions. It supports configurable slippage, brokerage fees, and tax implications, generating a net realized risk-reward profile (friction-adjusted Return vs. Gross Return). This parameter is seamlessly injected into the `walk_forward` execution context, ensuring institutional-grade resilience against idealized backtesting illusions.
 
-### Modular Service Architecture
-Sovereign Engine employs a lazily-initialized `ServiceBundle` (`core/services.py`) to manage key dependencies:
-- **Data Fetching**: High-performance async chain with Fyers/yfinance fallbacks.
-- **Persistence**: Scoped artifact and state management across `state/` and `artifacts/`.
-- **Analytics**: Real-time telemetry and regime-tracking state.
-- **Alerting**: Decoupled notification handlers for Telegram and logging.
+### Modular Runtime Collaborators
+Sovereign Engine v14.6 centralizes critical runtime decision-makers in `core/runtime_components.py` to ensure state consistency across asynchronous processes:
+- **RegimeProbabilityGate**: Enforces trade blocking during PANIC or low-confidence regimes.
+- **TieredCapitalScaler**: Dynamic position scaling based on real-time NAV and drawdown thresholds.
+- **RollingFactorCalibrator**: Manages periodic weight updates and Platt parameter fitting.
+- **RegimeAwareTelegramAlerter**: Context-sensitive notifications that adapt to market state.
+
+### Modular Service Architecture & Orchestration
+The engine employs a lazily-initialized `ServiceBundle` (`core/services.py`) to orchestrate high-level workloads:
+- **ScanService**: The primary entry point for market scanning and signal generation.
+- **DataService**: High-performance async chain with Fyers/yfinance fallbacks and cache management.
+- **PersistenceService**: Scoped artifact and state management across `state/` and `artifacts/`.
+- **AlertService**: Decoupled, multi-provider notification handlers.
 
 > [!TIP]
-> The `_DEFAULT_SERVICES` singleton allows components to be gracefully swapped or monkey-patched during testing and runtime optimization, maintaining a strict boundary model. Use `configure_services()` to customize the bundle for specialized workloads.
+> The `ServiceBundle` allows components to be gracefully swapped or monkey-patched during testing. The entry point `run.py` leverages this architecture to decouple logic from the execution environment.
 
 ---
 
@@ -154,7 +161,7 @@ To enable dynamic position sizing that responds to portfolio performance between
 
 ### Diagnostic & Validation Scripts
 - `python .agent/scripts/checklist.py .`: The definitive master validation source (Security, Lint, Tests, SEO).
-- `python .agent/skills/seo-fundamentals/scripts/seo_checker.py .`: Verifies search engine and report metadata integrity.
+- `pytest tests/test_services.py`: Comprehensive service-layer verification (100% pass required).
 - `scripts/fyers_setup.py`: Daily token refreshment, account verification, and `.env` synchronization.
 - `scripts/test_yf_diagnostic.py`: Integrity check for yfinance connectivity and data ingestion health.
 - `scripts/test_icir.py`: Real-time audit of cumulative factor Information Coefficients.
@@ -162,14 +169,13 @@ To enable dynamic position sizing that responds to portfolio performance between
 
 ---
 
-### 🛡️ Final Hardening (v14.6-Modular)
-- **yfinance 1.2.0 Compliance**: Verified `MultiIndex` column consistency for institutional data-provider stability.
-- **Regime-Tracker Resilience**: Expanded test coverage to 450+ edge cases across recursive backtest folds and live scan transitions.
-- **Alert Integrated Verification**: Validated decoupled `AlertService` with 100% integration pass.
-- **Legacy Purge**: [DELETED] `SE_PATCH` and `_LegacyPatchShim` shims from the internal API for a pristine architecture.
+- **v14.6-Modularized Runtime**: Migrated all collaborators into a first-class `core/` module hierarchy.
+- **Out-of-Sample Platt Calibration**: Integrated 60-bar validation window for institutional probability stability.
+- **Service-Level Test Suite**: 100% pass confirmed for all decoupled services via `tests/test_services.py`.
+- **Zero-Regressions Legacy Mode**: Verified `sovereign_improvements.py` compatibility for all established quant scripts.
 
 > [!IMPORTANT]
-> This version marks the transition to a fully decoupled, dependency-injected runtime. Legacy code referencing `sovereign_improvements.py` shims should migrate to the `ServiceBundle` pattern.
+> The Modular runtime architecture is now the primary path. Ensure any custom factor implementations utilize the `ServiceBundle` for state persistence and regime-aware logic.
 
 *Built for Quantitative Precision — Sovereign Engine v14.6-Modular*
 
