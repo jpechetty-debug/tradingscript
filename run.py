@@ -51,7 +51,7 @@ def _build_current_nav_provider(persistence: PersistenceService):
 def main(argv: list[str] | None = None, prog: str | None = None) -> None:
     from core.telemetry import setup_logging
     from core.runtime_paths import RUNTIME_PATHS
-    
+
     # Ensure logging is wired up even if run.py is invoked directly
     setup_logging(level="INFO", json_log_file=str(RUNTIME_PATHS.telemetry_log_file))
 

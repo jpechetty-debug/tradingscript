@@ -8,6 +8,7 @@ import pytest
 
 import screener_v14_modular as svm
 import core.services as services
+from core.config import SecretStr
 from core.regime import (
     MarketRegimeType,
     RegimeTracker,
@@ -160,7 +161,7 @@ def test_run_scan_applies_regime_gate_and_confidence_sizing(monkeypatch) -> None
 def test_run_scan_regime_override(monkeypatch) -> None:
     config = replace(svm.CONFIG, MAX_WORKERS=1)
     scan_service = _install_scan_service(monkeypatch)
-    
+
     # Mock data
     raw_data = {
         "RELIANCE.NS": _make_regime_df(close_mult=1.05),
@@ -174,6 +175,7 @@ def test_run_scan_regime_override(monkeypatch) -> None:
 
     # Override to PANIC
     _, _, regime = svm.run_scan(config=config, regime_override="PANIC")
+    assert regime is not None
     assert regime.regime == MarketRegimeType.PANIC
     assert "PANIC" in regime.label
 
@@ -182,13 +184,13 @@ def test_run_scan_respects_no_ema_filter(monkeypatch) -> None:
     config = replace(svm.CONFIG, MAX_WORKERS=1, USE_EMA200_FILTER=True)
     scan_service = _install_scan_service(monkeypatch)
     captured = {}
-    
+
     def _fake_score_ticker(**kwargs):
         captured["config"] = kwargs["config"]
         return None
 
     monkeypatch.setattr(scan_service._data_service, "_fetcher", lambda t, c: {
-        "T1": _make_regime_df(close_mult=1.0), 
+        "T1": _make_regime_df(close_mult=1.0),
         config.BENCHMARK: _make_regime_df(close_mult=1.0)
     })
     monkeypatch.setattr(services, "add_indicators", lambda d, c: d)
@@ -204,13 +206,13 @@ def test_run_scan_respects_force_score(monkeypatch) -> None:
     config = replace(svm.CONFIG, MAX_WORKERS=1)
     scan_service = _install_scan_service(monkeypatch)
     captured = {}
-    
+
     def _fake_score_ticker(**kwargs):
         captured["force_score"] = kwargs.get("force_score")
         return None
 
     monkeypatch.setattr(scan_service._data_service, "_fetcher", lambda t, c: {
-        "T1": _make_regime_df(close_mult=1.0), 
+        "T1": _make_regime_df(close_mult=1.0),
         config.BENCHMARK: _make_regime_df(close_mult=1.0)
     })
     monkeypatch.setattr(services, "add_indicators", lambda d, c: d)
@@ -226,14 +228,14 @@ def test_run_scan_session_lock(monkeypatch) -> None:
     config = replace(svm.CONFIG, MAX_WORKERS=1)
     # Mock the class method in the module where it is used (services.py)
     monkeypatch.setattr(services.SystemConfig, "is_regime_locked", lambda self, now=None: True)
-    
+
     scan_service = _install_scan_service(monkeypatch)
     tracker = RegimeTracker()
     tracker.push(MarketRegimeType.TREND_UP, 0.7)
-    
+
     # Data that would normally trigger RANGE or DOWN
     raw_data = {
-        "T1": _make_regime_df(close_mult=0.9), 
+        "T1": _make_regime_df(close_mult=0.9),
         config.BENCHMARK: _make_regime_df(close_mult=1.0)
     }
     monkeypatch.setattr(scan_service._data_service, "_fetcher", lambda t, c: raw_data)
@@ -244,6 +246,7 @@ def test_run_scan_session_lock(monkeypatch) -> None:
 
     _, _, regime = svm.run_scan(config=config, regime_tracker=tracker)
     # Should still be TREND_UP because it's locked
+    assert regime is not None
     assert regime.regime == MarketRegimeType.TREND_UP
     assert regime.regime_locked is True
 
@@ -251,9 +254,9 @@ def test_run_scan_session_lock(monkeypatch) -> None:
 def test_run_scan_sector_rs_recording(monkeypatch) -> None:
     config = replace(svm.CONFIG, MAX_WORKERS=1)
     scan_service = _install_scan_service(monkeypatch)
-    
+
     raw_data = {
-        "IT_T": _make_regime_df(close_mult=1.1), 
+        "IT_T": _make_regime_df(close_mult=1.1),
         config.BENCHMARK: _make_regime_df(close_mult=1.0)
     }
     monkeypatch.setattr(scan_service._data_service, "_fetcher", lambda t, c: raw_data)
@@ -264,11 +267,12 @@ def test_run_scan_sector_rs_recording(monkeypatch) -> None:
     monkeypatch.setattr(services, "optimize_portfolio", lambda r, c, m: [])
 
     _, _, regime = svm.run_scan(config=config)
+    assert regime is not None
     assert regime.sector_concentration >= 0.0
 
 
 def test_run_scan_alert_integration(monkeypatch) -> None:
-    config = replace(svm.CONFIG, MAX_WORKERS=1, TELEGRAM_BOT_TOKEN="123", TELEGRAM_CHAT_ID="456")
+    config = replace(svm.CONFIG, MAX_WORKERS=1, TELEGRAM_BOT_TOKEN=SecretStr("123"), TELEGRAM_CHAT_ID="456")
     class _FakeAlerter:
         def __init__(self): self.called = False
         def send_portfolio_summary(self, portfolio, regime, config):
@@ -277,22 +281,22 @@ def test_run_scan_alert_integration(monkeypatch) -> None:
 
     alerter = _FakeAlerter()
     scan_service = _install_scan_service(monkeypatch, alert_service=alerter)
-    
+
     raw_data = {
-        "T1": _make_regime_df(close_mult=1.05), 
+        "T1": _make_regime_df(close_mult=1.05),
         config.BENCHMARK: _make_regime_df(close_mult=1.01)
     }
     monkeypatch.setattr(scan_service._data_service, "_fetcher", lambda t, c: raw_data)
     monkeypatch.setattr(services, "add_indicators", lambda d, c: d)
     monkeypatch.setattr(services, "passes_static_filters", lambda d, c: True)
-    
+
     # Create a valid TickerResult-like object or mock it carefully
     from core.factors import FactorScores
     dummy_factors = FactorScores(
-        trend=0.8, momentum=0.7, volume=0.6, volatility=0.5, 
+        trend=0.8, momentum=0.7, volume=0.6, volatility=0.5,
         rs=0.8, breakout=0.4, quality=0.3, composite=0.7, ic_weights={}
     )
-    
+
     mock_result = services.TickerResult(
         ticker="T1", sector="IT", direction="LONG",
         close=100.0, change_pct=1.5,
@@ -323,7 +327,7 @@ def test_run_scan_alert_integration(monkeypatch) -> None:
         confirmed=True,
     )
     svm._send_alert([mock_result], regime_obj, config)
-    
+
     assert alerter.called is True
     assert "UP" in alerter.regime_label
 

@@ -24,7 +24,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .config import MarketRegimeType, SystemConfig
+from .config import MarketRegimeType, RegimeSettings, SystemConfig
 
 
 # ── RegimeTracker ─────────────────────────────────────────────────────────────
@@ -112,12 +112,20 @@ class MarketRegime:
 
 # ── Confidence ────────────────────────────────────────────────────────────────
 
+def _to_regime_settings(config: RegimeSettings | SystemConfig | None) -> RegimeSettings:
+    if isinstance(config, RegimeSettings):
+        return config
+    if config is not None and hasattr(config, "as_regime"):
+        return config.as_regime()
+    return RegimeSettings()
+
+
 def _regime_confidence(
     regime: MarketRegimeType,
     adx_med: float,
     breadth: float,
     atr_rat: float,
-    config: SystemConfig,
+    config: RegimeSettings | SystemConfig,
     sector_conc: float = 0.5,
 ) -> float:
     """Strength-weighted confidence score in [0, 1].
@@ -126,14 +134,15 @@ def _regime_confidence(
         Fraction of sectors aligned with current regime direction.
         At 0.5 the bonus is zero; at 1.0 it adds +0.10 to TREND confidence.
     """
+    rg = _to_regime_settings(config)
     if regime == MarketRegimeType.PANIC:
         return float(np.clip(
-            0.70 + (config.REGIME_BREADTH_PANIC - breadth) * 2,
+            0.70 + (rg.regime_breadth_panic - breadth) * 2,
             0.70, 1.0,
         ))
 
     if regime in (MarketRegimeType.TREND_UP, MarketRegimeType.TREND_DOWN):
-        adx_strength = float(np.clip((adx_med - config.REGIME_ADX_TREND) / 15.0, 0.0, 1.0))
+        adx_strength = float(np.clip((adx_med - rg.regime_adx_trend) / 15.0, 0.0, 1.0))
         breadth_str  = float(np.clip(abs(breadth - 0.5) * 2.0, 0.0, 1.0))
         # Fix 7: broad sector participation lifts confidence by up to +0.10
         conc_bonus   = float(np.clip((sector_conc - 0.5) * 2.0, 0.0, 1.0)) * 0.10
@@ -142,8 +151,8 @@ def _regime_confidence(
 
     if regime == MarketRegimeType.EXPANSION:
         # Fix 3: scale with ADX and ATR rather than flat 0.55
-        adx_str = float(np.clip((adx_med - config.REGIME_ADX_TREND) / 15.0, 0.0, 1.0))
-        atr_str = float(np.clip((atr_rat - config.REGIME_ATR_EXPANSION) / 0.7, 0.0, 1.0))
+        adx_str = float(np.clip((adx_med - rg.regime_adx_trend) / 15.0, 0.0, 1.0))
+        atr_str = float(np.clip((atr_rat - rg.regime_atr_expansion) / 0.7, 0.0, 1.0))
         return round(float(np.clip(0.55 + adx_str * 0.25 + atr_str * 0.20, 0.0, 1.0)), 3)
 
     return 0.55  # RANGE — neutral baseline
@@ -198,7 +207,7 @@ def classify_regime(
     processed: dict[str, pd.DataFrame],
     breadth: float,
     tracker: RegimeTracker,
-    config: SystemConfig,
+    config: RegimeSettings | SystemConfig,
     *,
     locked: bool = False,
     sector_rs: dict[str, float] | None = None,
@@ -215,24 +224,20 @@ def classify_regime(
     tracker:
         Persistent ``RegimeTracker`` that maintains bar history across calls.
     config:
-        ``SystemConfig`` with all threshold parameters.
+        ``RegimeSettings`` or ``SystemConfig`` with threshold parameters.
     locked:
         Fix 6 — when ``True`` (opening noise window), metrics are computed
-        for logging but ``tracker.push()`` is **skipped**.  The last
-        confirmed regime is returned unchanged, preventing whipsaw
-        reclassification during the first ``REGIME_LOCK_MINUTES`` minutes
-        after market open.  Defaults to ``False`` so existing call-sites
-        and tests that do not pass the argument are unaffected.
+        for logging but ``tracker.push()`` is **skipped**.
     sector_rs:
         Fix 7 — optional per-sector RS dict from ``compute_sector_rs()``.
-        Drives ``sector_concentration`` on the returned ``MarketRegime`` and
-        lifts TREND confidence for broadly participating moves.
-        ``None`` → defaults to 0.5 (no bonus, backward-compatible).
     """
+    rg = _to_regime_settings(config)
+    benchmark = getattr(config, "benchmark", getattr(config, "BENCHMARK", "^NSEI"))
+
     adx_vals: list[float] = []
     atr_ratios: list[float] = []
     for ticker, df in processed.items():
-        if ticker == config.BENCHMARK or df.empty:
+        if ticker == benchmark or df.empty:
             continue
         if "ADX" in df.columns:
             adx_vals.append(float(df["ADX"].iloc[-1]))
@@ -251,15 +256,15 @@ def classify_regime(
     # Fix 1: asymmetric PANIC exit — require higher breadth to *leave* PANIC
     in_panic        = tracker.last_regime() == MarketRegimeType.PANIC
     panic_threshold = (
-        config.REGIME_BREADTH_PANIC_EXIT if in_panic else config.REGIME_BREADTH_PANIC
+        rg.regime_breadth_panic_exit if in_panic else rg.regime_breadth_panic
     )
 
     # ── Classification tree ────────────────────────────────────────────────────
     if breadth < panic_threshold:
         raw_regime = MarketRegimeType.PANIC
-    elif atr_rat >= config.REGIME_ATR_EXPANSION and adx_med >= config.REGIME_ADX_TREND:
+    elif atr_rat >= rg.regime_atr_expansion and adx_med >= rg.regime_adx_trend:
         raw_regime = MarketRegimeType.EXPANSION
-    elif adx_med >= config.REGIME_ADX_TREND:
+    elif adx_med >= rg.regime_adx_trend:
         # Fix 2: [0.45, 0.55] deadband in primary high-ADX branch (was cliff at 0.50)
         if breadth >= 0.55:
             raw_regime = MarketRegimeType.TREND_UP
@@ -267,7 +272,7 @@ def classify_regime(
             raw_regime = MarketRegimeType.TREND_DOWN
         else:
             raw_regime = MarketRegimeType.RANGE
-    elif adx_med < config.REGIME_ADX_RANGE:
+    elif adx_med < rg.regime_adx_range:
         raw_regime = MarketRegimeType.RANGE
     else:
         # Mid-ADX zone — [0.45, 0.55] deadband unchanged from hardening
@@ -280,19 +285,16 @@ def classify_regime(
 
     # Fix 6: during the opening lock window, freeze tracker state
     if locked:
-        # Do NOT update the tracker so the lock cannot alter confirmed history.
-        # Fall back to computed regime only if tracker has no prior history
-        # (e.g., the very first bar of the session).
         regime = tracker.last_regime() or raw_regime
     else:
         tracker.push(raw_regime, breadth)
         regime = raw_regime
 
-    confirmed = tracker.is_confirmed(regime, config.REGIME_CONFIRM_BARS)
+    confirmed = tracker.is_confirmed(regime, rg.regime_confirm_bars)
 
     # Fix 7: sector concentration → confidence bonus
     sector_conc = compute_sector_concentration(sector_rs or {}, regime)
-    conf = _regime_confidence(regime, adx_med, breadth, atr_rat, config, sector_conc)
+    conf = _regime_confidence(regime, adx_med, breadth, atr_rat, rg, sector_conc)
 
     return MarketRegime(
         regime=regime,
@@ -307,40 +309,20 @@ def classify_regime(
     )
 
 
-# ── RS helpers (unchanged) ────────────────────────────────────────────────────
+# ── RS helpers ────────────────────────────────────────────────────────────────
 
 def compute_rs(
     stock: pd.Series,
     bench: pd.Series,
     lookback: int | None = None,
-    config: SystemConfig | None = None,
+    config: RegimeSettings | SystemConfig | None = None,
 ) -> float:
     """
     Log-return relative-strength of *stock* vs *bench* over *lookback* bars.
-
-    Parameters
-    ----------
-    stock:
-        Close price series for the individual ticker.
-    bench:
-        Close price series for the benchmark (e.g. Nifty50).
-    lookback:
-        Number of bars to look back.  **Prefer passing this explicitly.**
-        If omitted, ``config.RS_LOOKBACK`` is used when *config* is
-        supplied; otherwise the module-level CONFIG singleton is the
-        last resort.  Unit tests should always pass either *lookback*
-        or *config* directly so they can control the parameter without
-        patching the singleton.
-    config:
-        Optional ``SystemConfig`` instance.  Ignored when *lookback* is
-        provided.
     """
     if lookback is None:
-        if config is not None:
-            lookback = config.RS_LOOKBACK
-        else:
-            from .config import CONFIG  # last-resort singleton — avoid in tests
-            lookback = CONFIG.RS_LOOKBACK
+        rg = _to_regime_settings(config)
+        lookback = rg.rs_lookback
 
     m = stock.rename("s").to_frame().join(bench.rename("b"), how="inner").dropna()
     if len(m) < lookback + 1:
@@ -350,10 +332,11 @@ def compute_rs(
     return round(float((s - b) * 100), 3)
 
 
-def compute_breadth(processed: dict[str, pd.DataFrame], config: SystemConfig) -> float:
+def compute_breadth(processed: dict[str, pd.DataFrame], config: RegimeSettings | SystemConfig) -> float:
+    benchmark = getattr(config, "benchmark", getattr(config, "BENCHMARK", "^NSEI"))
     total = above = 0
     for ticker, df in processed.items():
-        if ticker == config.BENCHMARK or df.empty:
+        if ticker == benchmark or df.empty:
             continue
         if "EMA_50" in df.columns:
             total += 1
@@ -365,18 +348,20 @@ def compute_breadth(processed: dict[str, pd.DataFrame], config: SystemConfig) ->
 def compute_sector_rs(
     processed: dict[str, pd.DataFrame],
     bench: pd.Series,
-    config: SystemConfig,
+    config: RegimeSettings | SystemConfig,
 ) -> dict[str, float]:
     from collections import defaultdict
     from .universe import TICKER_TO_SECTOR
     scores: dict[str, list[float]] = defaultdict(list)
+    benchmark = getattr(config, "benchmark", getattr(config, "BENCHMARK", "^NSEI"))
+    lookback = getattr(config, "rs_lookback", getattr(config, "RS_LOOKBACK", 20))
     for ticker, df in processed.items():
-        if ticker == config.BENCHMARK or df.empty:
+        if ticker == benchmark or df.empty:
             continue
         sector = TICKER_TO_SECTOR.get(ticker)
         if sector:
             scores[sector].append(
-                compute_rs(df["Close"], bench, lookback=config.RS_LOOKBACK)
+                compute_rs(df["Close"], bench, lookback=lookback)
             )
     return {
         s: round(float(np.median(v)), 3) if v else 0.0

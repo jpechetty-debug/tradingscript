@@ -1,0 +1,317 @@
+{
+  "D:\\Tradeidesa\\grclaudescript\\core\\__init__.py": {
+    "mtime": 1774500501.6251974,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\async_data.py": {
+    "mtime": 1774679309.2995563,
+    "ast_hash": "3f75635faf37c5ebea60f61f9eafdec4",
+    "semantic_hash": "3f75635faf37c5ebea60f61f9eafdec4"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\backtest.py": {
+    "mtime": 1774753277.4742854,
+    "ast_hash": "0346500fa36166f014ed03e679ce9d8e",
+    "semantic_hash": "0346500fa36166f014ed03e679ce9d8e"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\cache.py": {
+    "mtime": 1774678408.310876,
+    "ast_hash": "9dd2b5a8688f6cd9367e642d68786de6",
+    "semantic_hash": "9dd2b5a8688f6cd9367e642d68786de6"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\config.py": {
+    "mtime": 1774678891.4970958,
+    "ast_hash": "828ac3ebdf7d8e1660a2b31a48abca88",
+    "semantic_hash": "828ac3ebdf7d8e1660a2b31a48abca88"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\data_provider.py": {
+    "mtime": 1774702476.6771026,
+    "ast_hash": "f3bb986f885dcd25cc76818008c9531c",
+    "semantic_hash": "f3bb986f885dcd25cc76818008c9531c"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\factors.py": {
+    "mtime": 1774678991.101575,
+    "ast_hash": "382d657d31367ff0c1b56a18fbd5c674",
+    "semantic_hash": "382d657d31367ff0c1b56a18fbd5c674"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\indicators.py": {
+    "mtime": 1774678982.8050475,
+    "ast_hash": "e227643733bac93ed9d6397020b8e15a",
+    "semantic_hash": "e227643733bac93ed9d6397020b8e15a"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\portfolio.py": {
+    "mtime": 1774701185.6314156,
+    "ast_hash": "7a838799d9c7d9cc61fbaf52007f2da4",
+    "semantic_hash": "7a838799d9c7d9cc61fbaf52007f2da4"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\regime.py": {
+    "mtime": 1785729828.4921522,
+    "ast_hash": "36966492334b3de3ecf74b3db246c986",
+    "semantic_hash": "36966492334b3de3ecf74b3db246c986"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\retry.py": {
+    "mtime": 1774386784.0,
+    "ast_hash": "353ac263efcb6e486f431118b812a81c",
+    "semantic_hash": "353ac263efcb6e486f431118b812a81c"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\runtime_components.py": {
+    "mtime": 1774751080.0,
+    "ast_hash": "7fc94b8fa5b734c991f5e24f318d01e0",
+    "semantic_hash": "7fc94b8fa5b734c991f5e24f318d01e0"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\runtime_paths.py": {
+    "mtime": 1774700993.6796112,
+    "ast_hash": "9e56116cb4f9ece4cfbb496c2382731d",
+    "semantic_hash": "9e56116cb4f9ece4cfbb496c2382731d"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\scorer.py": {
+    "mtime": 1776855335.835524,
+    "ast_hash": "ae45ee611b76b081b41c08c8a9615855",
+    "semantic_hash": "ae45ee611b76b081b41c08c8a9615855"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\services.py": {
+    "mtime": 1774773177.8517902,
+    "ast_hash": "d3e204b3ced1c052ce1b53f4a6b9e943",
+    "semantic_hash": "d3e204b3ced1c052ce1b53f4a6b9e943"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\telemetry.py": {
+    "mtime": 1774678015.166659,
+    "ast_hash": "f4711884d9f6b75ef0e7a33ad6963080",
+    "semantic_hash": "f4711884d9f6b75ef0e7a33ad6963080"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\core\\universe.py": {
+    "mtime": 1774521476.0956204,
+    "ast_hash": "4e9121be6984a74059b95a0a3e401514",
+    "semantic_hash": "4e9121be6984a74059b95a0a3e401514"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\pyproject.toml": {
+    "mtime": 1774751080.0,
+    "ast_hash": "e477a827cbd793d4f64fc1742d05e77a",
+    "semantic_hash": "e477a827cbd793d4f64fc1742d05e77a"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\run.py": {
+    "mtime": 1776855354.1604364,
+    "ast_hash": "ee0c57548eb471812865d55794aff25e",
+    "semantic_hash": "ee0c57548eb471812865d55794aff25e"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scratch\\test_full_alert.py": {
+    "mtime": 1776940643.0554302,
+    "ast_hash": "ddfab8dc1ddb674c5cff9e11fd0e0d15",
+    "semantic_hash": "ddfab8dc1ddb674c5cff9e11fd0e0d15"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scratch\\test_yf.py": {
+    "mtime": 1776854921.654646,
+    "ast_hash": "bdd0acf3d08283723d1a5f53df64dc4e",
+    "semantic_hash": "bdd0acf3d08283723d1a5f53df64dc4e"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scratch\\test_yf_chunks.py": {
+    "mtime": 1776855056.9558673,
+    "ast_hash": "3538499b70d8b4d1a621e2aaada24a83",
+    "semantic_hash": "3538499b70d8b4d1a621e2aaada24a83"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scratch\\test_yf_full.py": {
+    "mtime": 1776855032.9195926,
+    "ast_hash": "77771cf024ae8d32a1cedda10bb2e1c6",
+    "semantic_hash": "77771cf024ae8d32a1cedda10bb2e1c6"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\screener_v14_modular.py": {
+    "mtime": 1774751080.0,
+    "ast_hash": "644b87b17d79010aaa44f86aafeea4da",
+    "semantic_hash": "644b87b17d79010aaa44f86aafeea4da"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\analyze_logs.py": {
+    "mtime": 1776939328.9351463,
+    "ast_hash": "a097b4fe1e8e0417a7826f2f69cc3b4a",
+    "semantic_hash": "a097b4fe1e8e0417a7826f2f69cc3b4a"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\check_cols.py": {
+    "mtime": 1774715273.298163,
+    "ast_hash": "ced7b9a791ea67760a49befb68aa172a",
+    "semantic_hash": "ced7b9a791ea67760a49befb68aa172a"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\check_dates.py": {
+    "mtime": 1774715273.2976491,
+    "ast_hash": "355f4c13033c1625a3781f808dff4849",
+    "semantic_hash": "355f4c13033c1625a3781f808dff4849"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\debug_screener.py": {
+    "mtime": 1774715273.298163,
+    "ast_hash": "44234763091da44e536ecd7e1ed2930c",
+    "semantic_hash": "44234763091da44e536ecd7e1ed2930c"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\fyers_setup.py": {
+    "mtime": 1774702546.583295,
+    "ast_hash": "09b39c7b8eb50a1fbfcbcc185085e2e1",
+    "semantic_hash": "09b39c7b8eb50a1fbfcbcc185085e2e1"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\test_alert.py": {
+    "mtime": 1774715366.6052454,
+    "ast_hash": "99334e097962781b496e3bddb737f0c2",
+    "semantic_hash": "99334e097962781b496e3bddb737f0c2"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\test_comm.py": {
+    "mtime": 1774586552.680296,
+    "ast_hash": "adb4277795fab6346cb86d86eec9e5d4",
+    "semantic_hash": "adb4277795fab6346cb86d86eec9e5d4"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\test_icir.py": {
+    "mtime": 1774715368.627623,
+    "ast_hash": "0176181e1709b399e9c3292c9b61d47f",
+    "semantic_hash": "0176181e1709b399e9c3292c9b61d47f"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\test_telegram.py": {
+    "mtime": 1774715273.298163,
+    "ast_hash": "4de9e3e6d999937686ff7736e2275b5e",
+    "semantic_hash": "4de9e3e6d999937686ff7736e2275b5e"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\test_yf_diagnostic.py": {
+    "mtime": 1774715273.298163,
+    "ast_hash": "79412ed34de60a4b450864cbb7335613",
+    "semantic_hash": "79412ed34de60a4b450864cbb7335613"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\test_yf_session.py": {
+    "mtime": 1774715273.298163,
+    "ast_hash": "e870f5926631568f63dba91dffc251bc",
+    "semantic_hash": "e870f5926631568f63dba91dffc251bc"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\test_yf_single.py": {
+    "mtime": 1774715273.298163,
+    "ast_hash": "c54f66afb27b5b43a0aeb5f203f4ceb6",
+    "semantic_hash": "c54f66afb27b5b43a0aeb5f203f4ceb6"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\verify_patch.py": {
+    "mtime": 1774702432.1700969,
+    "ast_hash": "ef87d7fcae375b7067c02e4b4f8275bd",
+    "semantic_hash": "ef87d7fcae375b7067c02e4b4f8275bd"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\sovereign_improvements.py": {
+    "mtime": 1774751080.0,
+    "ast_hash": "45471d833af519ecb6ab5c351b41896e",
+    "semantic_hash": "45471d833af519ecb6ab5c351b41896e"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\sovereign_quant_layer.py": {
+    "mtime": 1774702415.3425605,
+    "ast_hash": "194d75c623c3df79486337761a74d429",
+    "semantic_hash": "194d75c623c3df79486337761a74d429"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\__init__.py": {
+    "mtime": 1774500501.631253,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_async_data.py": {
+    "mtime": 1774678408.3098762,
+    "ast_hash": "62509e3d076178af1a20e650cbe96453",
+    "semantic_hash": "62509e3d076178af1a20e650cbe96453"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_backtest_regime_controls.py": {
+    "mtime": 1774763361.724909,
+    "ast_hash": "4382906fdc4627c760256194d3bcbe17",
+    "semantic_hash": "4382906fdc4627c760256194d3bcbe17"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_cache.py": {
+    "mtime": 1774500406.9185774,
+    "ast_hash": "a62316fc2cadf705717a9ec537d3e59f",
+    "semantic_hash": "a62316fc2cadf705717a9ec537d3e59f"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_data_provider.py": {
+    "mtime": 1774702560.0840151,
+    "ast_hash": "7abc755b562177528e13434dbd5828bb",
+    "semantic_hash": "7abc755b562177528e13434dbd5828bb"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_factors.py": {
+    "mtime": 1774716394.904925,
+    "ast_hash": "180afe3ab0ca9e74dd4b4ea338839cbb",
+    "semantic_hash": "180afe3ab0ca9e74dd4b4ea338839cbb"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_factors_calibration.py": {
+    "mtime": 1774678408.310876,
+    "ast_hash": "e58cece1b0359dd6e1d59b399993ea75",
+    "semantic_hash": "e58cece1b0359dd6e1d59b399993ea75"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_fyers_setup.py": {
+    "mtime": 1774702567.6342535,
+    "ast_hash": "ab89d708345014b2cdd62fce869f438f",
+    "semantic_hash": "ab89d708345014b2cdd62fce869f438f"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_indicators.py": {
+    "mtime": 1774716392.8831742,
+    "ast_hash": "97bca415909c7e2c0ed703566888b47c",
+    "semantic_hash": "97bca415909c7e2c0ed703566888b47c"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_phase34.py": {
+    "mtime": 1774754792.1281426,
+    "ast_hash": "aa3100eef88618f73f8659bb12996e23",
+    "semantic_hash": "aa3100eef88618f73f8659bb12996e23"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_regime.py": {
+    "mtime": 1774716390.8699613,
+    "ast_hash": "c5f3da67f0f4e454b6518d9ca792f4d1",
+    "semantic_hash": "c5f3da67f0f4e454b6518d9ca792f4d1"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_retry.py": {
+    "mtime": 1774679522.4704497,
+    "ast_hash": "89357bc9627d7f95a40325d7feaf4326",
+    "semantic_hash": "89357bc9627d7f95a40325d7feaf4326"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_run_scan_regime_tracker.py": {
+    "mtime": 1774767224.3255136,
+    "ast_hash": "a222b7ec33e96fad5e001d318ca06b16",
+    "semantic_hash": "a222b7ec33e96fad5e001d318ca06b16"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_scorer_portfolio.py": {
+    "mtime": 1774716388.8554845,
+    "ast_hash": "9677012612bbd47bc00ebd7257221afa",
+    "semantic_hash": "9677012612bbd47bc00ebd7257221afa"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_services.py": {
+    "mtime": 1774793587.744133,
+    "ast_hash": "74ec73b4843704f6d3dd67ec4c505189",
+    "semantic_hash": "74ec73b4843704f6d3dd67ec4c505189"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_sovereign_core.py": {
+    "mtime": 1774678408.312878,
+    "ast_hash": "7b9aa99d83517ed7ecca25a1840025e4",
+    "semantic_hash": "7b9aa99d83517ed7ecca25a1840025e4"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_transaction_costs.py": {
+    "mtime": 1774752059.1575713,
+    "ast_hash": "dc4f915568fc3a3eb7b382edab7f01f7",
+    "semantic_hash": "dc4f915568fc3a3eb7b382edab7f01f7"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\tests\\test_universe.py": {
+    "mtime": 1774521523.135976,
+    "ast_hash": "875cf009004370de1f72b24aa78b419b",
+    "semantic_hash": "875cf009004370de1f72b24aa78b419b"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\utils\\messaging.py": {
+    "mtime": 1774678925.0492017,
+    "ast_hash": "35e1cee4f537b785c5a356e5d67a6f73",
+    "semantic_hash": "35e1cee4f537b785c5a356e5d67a6f73"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\utils\\retry.py": {
+    "mtime": 1774715370.637427,
+    "ast_hash": "40b9abb8da16265638f6d759f84df014",
+    "semantic_hash": "40b9abb8da16265638f6d759f84df014"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\.github\\workflows\\ci.yml": {
+    "mtime": 1774679889.6877298,
+    "ast_hash": "16bbbd92dd1dacd6cd61917ebacdbf9f",
+    "semantic_hash": "16bbbd92dd1dacd6cd61917ebacdbf9f"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\README.md": {
+    "mtime": 1774793828.1793182,
+    "ast_hash": "d4f7a24388c5e6a6c93810281c0b2584",
+    "semantic_hash": "d4f7a24388c5e6a6c93810281c0b2584"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\dashboard.html": {
+    "mtime": 1774755793.1816862,
+    "ast_hash": "f6413e8ab12b8aa0aba828c36513c490",
+    "semantic_hash": "f6413e8ab12b8aa0aba828c36513c490"
+  },
+  "D:\\Tradeidesa\\grclaudescript\\scripts\\README.md": {
+    "mtime": 1774680067.4635208,
+    "ast_hash": "e8fdaf14ba3c292975324d8efcf5a2fd",
+    "semantic_hash": "e8fdaf14ba3c292975324d8efcf5a2fd"
+  }
+}
