@@ -33,12 +33,24 @@ from core.regime import RegimeTracker
 from core.scorer import TickerResult
 from core.universe import SECTORS, TICKER_TO_SECTOR
 
+from contextlib import asynccontextmanager
+
 log = logging.getLogger("sovereign.server")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Trigger initial market scan in background worker on server startup."""
+    t = threading.Thread(target=_run_scan_task, daemon=True)
+    t.start()
+    yield
+
 
 app = FastAPI(
     title="Sovereign Engine API Server",
     description="Real-time quantitative scanner and market regime API server",
     version=svm.VERSION,
+    lifespan=lifespan,
 )
 
 # CORS middleware for local web dashboard access
