@@ -583,6 +583,186 @@
   .rr-lbl { font-family: var(--mono); font-size: 9px; color: var(--text3); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 4px; }
   .rr-val { font-family: var(--mono); font-size: 15px; font-weight: 700; }
 
+  /* Live Market Engine Styles */
+  .live-ctrl-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 24px;
+  }
+  .ctrl-group { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .btn-action {
+    background: var(--green);
+    color: #000;
+    font-family: var(--sans);
+    font-size: 13px;
+    font-weight: 800;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    letter-spacing: .02em;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all .2s;
+    box-shadow: 0 4px 14px rgba(0,230,118,0.25);
+  }
+  .btn-action:hover { background: #00ff84; transform: translateY(-1px); }
+  .btn-action:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  .ctrl-select {
+    background: var(--surface2);
+    border: 1px solid var(--border2);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    outline: none;
+    cursor: pointer;
+  }
+  .pulse-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    display: inline-block;
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0% { opacity: 0.4; } 50% { opacity: 1; } 100% { opacity: 0.4; } }
+  .spin { animation: spin 1s linear infinite; display: inline-block; }
+  @keyframes spin { 100% { transform: rotate(360deg); } }
+
+  .regime-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 24px;
+  }
+  .regime-header-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+  .regime-title-wrap { display: flex; align-items: center; gap: 12px; }
+  .regime-badge {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 700;
+    padding: 6px 14px;
+    border-radius: 6px;
+    letter-spacing: .06em;
+  }
+  .badge-trend-up { background: var(--green-dim); color: var(--green); border: 1px solid rgba(0,230,118,0.3); }
+  .badge-trend-dn { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255,61,87,0.3); }
+  .badge-panic    { background: var(--red-dim); color: var(--red); border: 1px solid var(--red); animation: pulse 1s infinite; }
+  .badge-range    { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(255,179,0,0.3); }
+  .badge-exp      { background: var(--blue-dim); color: var(--blue); border: 1px solid rgba(64,196,255,0.3); }
+
+  .regime-metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .rm-item {
+    background: var(--surface2);
+    border-radius: 8px;
+    padding: 12px;
+    border: 1px solid var(--border);
+  }
+  .rm-label { font-family: var(--mono); font-size: 9px; color: var(--text2); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+  .rm-val { font-family: var(--mono); font-size: 16px; font-weight: 700; color: var(--text); }
+  .strategy-hint-box {
+    background: var(--surface2);
+    border-left: 3px solid var(--green);
+    padding: 10px 14px;
+    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text);
+  }
+
+  .table-tools {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .filter-pills { display: flex; gap: 8px; flex-wrap: wrap; }
+  .fp-btn {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border2);
+    background: var(--surface);
+    color: var(--text2);
+    cursor: pointer;
+    transition: all .2s;
+  }
+  .fp-btn.active { background: var(--surface3); color: var(--text); border-color: var(--green); }
+  .search-input {
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 12px;
+    padding: 8px 14px;
+    border-radius: 6px;
+    outline: none;
+    width: 220px;
+  }
+
+  .scan-table-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow-x: auto;
+  }
+  table.scan-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    text-align: left;
+  }
+  table.scan-table th {
+    background: var(--surface2);
+    padding: 12px 14px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    user-select: none;
+  }
+  table.scan-table th:hover { color: var(--text); }
+  table.scan-table td {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+  table.scan-table tr:last-child td { border-bottom: none; }
+  table.scan-table tr:hover td { background: var(--surface2); }
+  .badge-dir {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+  .b-long { background: var(--green-dim); color: var(--green); border: 1px solid rgba(0,230,118,0.3); }
+  .b-short { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255,61,87,0.3); }
+  .empty-state { text-align: center; padding: 48px 24px; color: var(--text2); font-family: var(--mono); font-size: 12px; }
+
   /* Mobile */
   @media (max-width: 600px) {
     .setups-grid { grid-template-columns: 1fr; }
@@ -598,24 +778,136 @@
 
   <header>
     <div class="logo-block">
-      <div class="eyebrow">▸ NSE India · v2.0</div>
-      <h1>Unified <span>Scanner</span></h1>
+      <div class="eyebrow">▸ NSE India · v14.6</div>
+      <h1>Sovereign <span>Engine</span></h1>
     </div>
     <div class="status-bar">
-      <div class="status-pill pill-live">● LIVE</div>
-      <div class="status-pill pill-nse">NSE · BSE</div>
+      <div class="status-pill pill-live" id="server-status-pill"><span class="pulse-dot"></span> API ONLINE</div>
+      <div class="status-pill pill-nse">NSE · REAL-TIME</div>
     </div>
   </header>
 
   <div class="nav-tabs">
-    <button class="nav-tab active t-green" onclick="switchTab('ema',this)">33 EMA Signal</button>
+    <button class="nav-tab active t-green" onclick="switchTab('live',this)">⚡ Live Engine</button>
+    <button class="nav-tab t-blue"  onclick="switchTab('ema',this)">33 EMA Signal</button>
     <button class="nav-tab t-blue"  onclick="switchTab('momentum',this)">8-Param Screener</button>
     <button class="nav-tab t-amber" onclick="switchTab('plan',this)">Trade Plan</button>
     <button class="nav-tab"         onclick="switchTab('pkcodes',this)">PKScreener Codes</button>
   </div>
 
+  <!-- ═══════ LIVE MARKET ENGINE PANEL ═══════ -->
+  <div id="panel-live" class="panel active">
+
+    <!-- Live Controls Bar -->
+    <div class="live-ctrl-bar">
+      <div class="ctrl-group">
+        <button class="btn-action" id="btn-trigger-scan" onclick="triggerLiveScan()">
+          <span id="scan-btn-icon">⚡</span> <span id="scan-btn-text">RUN SCAN NOW</span>
+        </button>
+        <select class="ctrl-select" id="sel-refresh" onchange="changeRefreshInterval(this.value)">
+          <option value="30">Auto: 30s</option>
+          <option value="15">Auto: 15s</option>
+          <option value="60">Auto: 60s</option>
+          <option value="0">Auto: Off</option>
+        </select>
+        <select class="ctrl-select" id="sel-override" onchange="changeRegimeOverride(this.value)">
+          <option value="AUTO">Regime: Auto Detect</option>
+          <option value="PANIC">Force PANIC</option>
+          <option value="TREND_UP">Force TREND_UP</option>
+          <option value="TREND_DOWN">Force TREND_DOWN</option>
+          <option value="RANGE">Force RANGE</option>
+          <option value="EXPANSION">Force EXPANSION</option>
+        </select>
+      </div>
+      <div style="font-family:var(--mono); font-size:11px; color:var(--text2); display:flex; align-items:center; gap:8px;">
+        <span class="pulse-dot"></span>
+        <span id="txt-last-update">Last scan: Waiting for data...</span>
+      </div>
+    </div>
+
+    <!-- Live Regime Banner -->
+    <div class="regime-card">
+      <div class="regime-header-row">
+        <div class="regime-title-wrap">
+          <div class="sec-label" style="margin-bottom:0;">Market Regime State</div>
+          <div class="regime-badge badge-trend-up" id="regime-status-badge">CLASSIFYING...</div>
+        </div>
+        <div style="font-family:var(--mono); font-size:11px; color:var(--text2);" id="regime-session-label">
+          Session: OPENING RANGE NOISE
+        </div>
+      </div>
+
+      <div class="regime-metrics-grid">
+        <div class="rm-item">
+          <div class="rm-label">Breadth</div>
+          <div class="rm-val" id="rm-breadth">--%</div>
+        </div>
+        <div class="rm-item">
+          <div class="rm-label">ADX Median</div>
+          <div class="rm-val" id="rm-adx">--</div>
+        </div>
+        <div class="rm-item">
+          <div class="rm-label">ATR Expansion</div>
+          <div class="rm-val" id="rm-atr">--</div>
+        </div>
+        <div class="rm-item">
+          <div class="rm-label">Sector Conc.</div>
+          <div class="rm-val" id="rm-sector">--%</div>
+        </div>
+        <div class="rm-item">
+          <div class="rm-label">Confidence</div>
+          <div class="rm-val" id="rm-confidence">--%</div>
+        </div>
+      </div>
+
+      <div class="strategy-hint-box" id="regime-strategy-hint">
+        Strategy: Awaiting market scan calculation...
+      </div>
+    </div>
+
+    <!-- Table Toolbar -->
+    <div class="table-tools">
+      <div class="filter-pills">
+        <button class="fp-btn active" onclick="setSetupFilter('ALL', this)" id="btn-filter-all">ALL SETUPS (0)</button>
+        <button class="fp-btn" onclick="setSetupFilter('LONG', this)" id="btn-filter-long">LONG ONLY (0)</button>
+        <button class="fp-btn" onclick="setSetupFilter('SHORT', this)" id="btn-filter-short">SHORT ONLY (0)</button>
+        <button class="fp-btn" onclick="setSetupFilter('HIGH_WIN', this)" id="btn-filter-highwin">WIN RATE &gt; 60%</button>
+      </div>
+      <input type="text" class="search-input" id="search-ticker-input" placeholder="Search ticker or sector..." oninput="filterScanTable()">
+    </div>
+
+    <!-- Live Scan Results Table -->
+    <div class="scan-table-wrap">
+      <table class="scan-table" id="scan-results-table">
+        <thead>
+          <tr>
+            <th onclick="sortScanTable('ticker')">Ticker ↕</th>
+            <th onclick="sortScanTable('sector')">Sector ↕</th>
+            <th onclick="sortScanTable('direction')">Dir ↕</th>
+            <th onclick="sortScanTable('close')">Price ↕</th>
+            <th onclick="sortScanTable('prob_win')">Prob Win ↕</th>
+            <th onclick="sortScanTable('expectancy_r')">Expectancy R ↕</th>
+            <th onclick="sortScanTable('risk_inr')">Risk (₹) ↕</th>
+            <th>Entry</th>
+            <th>Stop Loss</th>
+            <th>Target 1</th>
+            <th>Reasons</th>
+          </tr>
+        </thead>
+        <tbody id="scan-table-body">
+          <tr>
+            <td colspan="11" class="empty-state">
+              ⚡ Engine ready. Click <strong>"RUN SCAN NOW"</strong> above to execute a live scan across 178 NSE stocks.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+  </div>
+
   <!-- ═══════ 33 EMA PANEL ═══════ -->
-  <div id="panel-ema" class="panel active">
+  <div id="panel-ema" class="panel">
 
     <div class="sec-label">Spot chart — 9-min timeframe · All 3 must align</div>
 
@@ -1210,24 +1502,218 @@ function generatePlan() {
   document.getElementById('plan-output').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-// ─── TAB SWITCHING ────────────────────────────────────────────
-function switchTab(id, btn) {
-  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-  document.getElementById('panel-' + id).classList.add('active');
-  btn.classList.add('active');
+// ─── LIVE MARKET ENGINE SCRIPT ──────────────────────────────────
+let rawScanData = [];
+let currentFilter = 'ALL';
+let sortCol = 'prob_win';
+let sortAsc = false;
+let refreshTimer = null;
+
+async function fetchEngineStatus() {
+  try {
+    const res = await fetch('/api/status');
+    if (!res.ok) throw new Error('API offline');
+    const data = await res.json();
+
+    // API Status Pill
+    const pill = document.getElementById('server-status-pill');
+    pill.className = 'status-pill pill-live';
+    pill.innerHTML = '<span class="pulse-dot"></span> API ONLINE';
+
+    // Last Update Text
+    if (data.last_scan_time) {
+      const dt = new Date(data.last_scan_time);
+      document.getElementById('txt-last-update').textContent = `Last scan: ${dt.toLocaleTimeString()}`;
+    }
+
+    // Regime Info Card
+    if (data.last_known_regime) {
+      const r = data.last_known_regime;
+      const badge = document.getElementById('regime-status-badge');
+      badge.textContent = `${r.regime} ${r.confirmed ? '(CONFIRMED)' : '[UNCONFIRMED]'}`;
+      
+      const badgeClasses = {
+        'TREND_UP': 'badge-trend-up',
+        'TREND_DOWN': 'badge-trend-dn',
+        'PANIC': 'badge-panic',
+        'RANGE': 'badge-range',
+        'EXPANSION': 'badge-exp'
+      };
+      badge.className = `regime-badge ${badgeClasses[r.regime] || 'badge-trend-up'}`;
+
+      document.getElementById('rm-breadth').textContent = `${(r.breadth * 100).toFixed(1)}%`;
+      document.getElementById('rm-adx').textContent = r.adx_median.toFixed(1);
+      document.getElementById('rm-atr').textContent = `${r.atr_ratio.toFixed(2)}x`;
+      document.getElementById('rm-sector').textContent = `${(r.sector_concentration * 100).toFixed(0)}%`;
+      document.getElementById('rm-confidence').textContent = `${(r.confidence * 100).toFixed(0)}%`;
+
+      document.getElementById('regime-session-label').textContent = `Session: ${data.session} ${r.regime_locked ? '[LOCKED]' : ''}`;
+      document.getElementById('regime-strategy-hint').innerHTML = `<strong>Strategy Hint:</strong> ${r.strategy_hint}`;
+    }
+
+    // Scanning Status
+    if (data.is_scanning) {
+      const btn = document.getElementById('btn-trigger-scan');
+      btn.disabled = true;
+      document.getElementById('scan-btn-icon').className = 'spin';
+      document.getElementById('scan-btn-text').textContent = 'SCANNING...';
+    } else {
+      const btn = document.getElementById('btn-trigger-scan');
+      btn.disabled = false;
+      document.getElementById('scan-btn-icon').className = '';
+      document.getElementById('scan-btn-text').textContent = 'RUN SCAN NOW';
+    }
+  } catch (err) {
+    const pill = document.getElementById('server-status-pill');
+    pill.className = 'status-pill';
+    pill.style.background = 'var(--red-dim)';
+    pill.style.color = 'var(--red)';
+    pill.innerHTML = '● API DISCONNECTED';
+  }
 }
 
-// ─── COPY ────────────────────────────────────────────────────
-function cp(id, btn) {
-  navigator.clipboard.writeText(document.getElementById(id).innerText).then(() => {
-    btn.textContent = 'COPIED!';
-    setTimeout(() => btn.textContent = 'COPY', 2000);
+async function fetchScanResults() {
+  try {
+    const res = await fetch('/api/scan');
+    if (!res.ok) return;
+    const data = await res.json();
+    rawScanData = data.candidates || [];
+    updateFilterCounts();
+    renderScanTable();
+  } catch (e) {
+    console.error("Error fetching scan results", e);
+  }
+}
+
+async function triggerLiveScan() {
+  const btn = document.getElementById('btn-trigger-scan');
+  btn.disabled = true;
+  document.getElementById('scan-btn-icon').className = 'spin';
+  document.getElementById('scan-btn-text').textContent = 'STARTING...';
+  
+  try {
+    await fetch('/api/scan/trigger', { method: 'POST' });
+    setTimeout(() => {
+      fetchEngineStatus();
+      fetchScanResults();
+    }, 1500);
+  } catch (err) {
+    alert('Failed to trigger scan: ' + err.message);
+  }
+}
+
+async function changeRegimeOverride(val) {
+  try {
+    await fetch('/api/regime/override', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ regime: val })
+    });
+    fetchEngineStatus();
+  } catch (err) {
+    alert('Failed to set override: ' + err.message);
+  }
+}
+
+function changeRefreshInterval(seconds) {
+  if (refreshTimer) clearInterval(refreshTimer);
+  const s = parseInt(seconds);
+  if (s > 0) {
+    refreshTimer = setInterval(() => {
+      fetchEngineStatus();
+      fetchScanResults();
+    }, s * 1000);
+  }
+}
+
+function updateFilterCounts() {
+  const total = rawScanData.length;
+  const longs = rawScanData.filter(d => d.direction === 'LONG').length;
+  const shorts = rawScanData.filter(d => d.direction === 'SHORT').length;
+  const highwin = rawScanData.filter(d => d.prob_win >= 0.60).length;
+
+  document.getElementById('btn-filter-all').textContent = `ALL SETUPS (${total})`;
+  document.getElementById('btn-filter-long').textContent = `LONG ONLY (${longs})`;
+  document.getElementById('btn-filter-short').textContent = `SHORT ONLY (${shorts})`;
+  document.getElementById('btn-filter-highwin').textContent = `WIN RATE > 60% (${highwin})`;
+}
+
+function setSetupFilter(filter, btn) {
+  document.querySelectorAll('.fp-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentFilter = filter;
+  renderScanTable();
+}
+
+function filterScanTable() {
+  renderScanTable();
+}
+
+function sortScanTable(col) {
+  if (sortCol === col) {
+    sortAsc = !sortAsc;
+  } else {
+    sortCol = col;
+    sortAsc = false;
+  }
+  renderScanTable();
+}
+
+function renderScanTable() {
+  const tbody = document.getElementById('scan-table-body');
+  const search = (document.getElementById('search-ticker-input').value || '').toUpperCase();
+
+  let list = rawScanData.filter(item => {
+    // Search query match
+    const matchSearch = item.ticker.toUpperCase().includes(search) || (item.sector || '').toUpperCase().includes(search);
+    if (!matchSearch) return false;
+
+    // Filter pill match
+    if (currentFilter === 'LONG') return item.direction === 'LONG';
+    if (currentFilter === 'SHORT') return item.direction === 'SHORT';
+    if (currentFilter === 'HIGH_WIN') return item.prob_win >= 0.60;
+    return true;
   });
+
+  // Sort
+  list.sort((a, b) => {
+    let va = a[sortCol];
+    let vb = b[sortCol];
+    if (typeof va === 'string') va = va.toUpperCase();
+    if (typeof vb === 'string') vb = vb.toUpperCase();
+    if (va < vb) return sortAsc ? -1 : 1;
+    if (va > vb) return sortAsc ? 1 : -1;
+    return 0;
+  });
+
+  if (list.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="11" class="empty-state">No matching setups found.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = list.map(item => `
+    <tr>
+      <td><strong>${item.ticker}</strong></td>
+      <td><span style="font-family:var(--mono); font-size:11px; color:var(--text2);">${item.sector || 'GENERAL'}</span></td>
+      <td><span class="badge-dir ${item.direction === 'LONG' ? 'b-long' : 'b-short'}">${item.direction}</span></td>
+      <td>₹${(item.close || 0).toFixed(2)}</td>
+      <td><strong style="color:var(--green)">${((item.prob_win || 0) * 100).toFixed(1)}%</strong></td>
+      <td>+${(item.expectancy_r || 0).toFixed(2)} R</td>
+      <td>₹${(item.risk_inr || 0).toFixed(0)}</td>
+      <td>₹${(item.entry || 0).toFixed(2)}</td>
+      <td><span style="color:var(--red)">₹${(item.stop || 0).toFixed(2)}</span></td>
+      <td><span style="color:var(--green)">₹${(item.t1 || 0).toFixed(2)}</span></td>
+      <td><span style="font-size:11px; color:var(--text2);">${(item.reasons || []).slice(0, 2).join(' · ')}</span></td>
+    </tr>
+  `).join('');
 }
 
 // ─── INIT / URL PARSING ──────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
+  fetchEngineStatus();
+  fetchScanResults();
+  changeRefreshInterval(30);
+
   const urlParams = new URLSearchParams(window.location.search);
   const stockParam = urlParams.get('stock');
   const closeParam = urlParams.get('close');
