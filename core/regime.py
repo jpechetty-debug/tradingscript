@@ -56,6 +56,7 @@ class RegimeTracker:
     def is_confirmed(self, regime: MarketRegimeType, confirm_bars: int) -> bool:
         if regime == MarketRegimeType.PANIC:
             return True  # PANIC is always confirmed — capital protection
+
         tail = list(self._history)[-confirm_bars:]
         return len(tail) == confirm_bars and all(r == regime for r in tail)
 

@@ -49,6 +49,12 @@ def _build_current_nav_provider(persistence: PersistenceService):
 
 
 def main(argv: list[str] | None = None, prog: str | None = None) -> None:
+    from core.telemetry import setup_logging
+    from core.runtime_paths import RUNTIME_PATHS
+    
+    # Ensure logging is wired up even if run.py is invoked directly
+    setup_logging(level="INFO", json_log_file=str(RUNTIME_PATHS.telemetry_log_file))
+
     parser = argparse.ArgumentParser(prog=prog, description=f"Sovereign Engine v{VERSION}")
     parser.add_argument("--watch",       type=int,  default=None, metavar="MINUTES")
     parser.add_argument("--version",     action="store_true")

@@ -1,6 +1,6 @@
 [project]
 name = "sovereign-engine"
-version = "14.4.0"
+version = "14.6.0"
 requires-python = ">=3.10"
 
 [tool.pytest.ini_options]

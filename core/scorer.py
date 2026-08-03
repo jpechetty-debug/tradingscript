@@ -362,14 +362,15 @@ def score_ticker(
         direction = "LONG" if is_bull else "SHORT"
 
     # ── 3. Regime gate ───────────────────────────────────────────────────────
-    if direction == "LONG"  and not regime.allows_long():
-        if debug:
-            log.debug("%s: regime blocks LONG (%s)", ticker, regime.regime)
-        return None
-    if direction == "SHORT" and not regime.allows_short():
-        if debug:
-            log.debug("%s: regime blocks SHORT (%s)", ticker, regime.regime)
-        return None
+    if not force_score:
+        if direction == "LONG"  and not regime.allows_long():
+            if debug:
+                log.debug("%s: regime blocks LONG (%s)", ticker, regime.regime)
+            return None
+        if direction == "SHORT" and not regime.allows_short():
+            if debug:
+                log.debug("%s: regime blocks SHORT (%s)", ticker, regime.regime)
+            return None
 
     # ── 4. EMA-200 structural filter ─────────────────────────────────────────
     if config.USE_EMA200_FILTER:
