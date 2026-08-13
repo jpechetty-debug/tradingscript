@@ -116,12 +116,15 @@ python server.py
 ```
 This launches a FastAPI server on `http://127.0.0.1:8000` with background scanning capabilities and serves the dynamic web dashboard.
 
+> [!IMPORTANT]
+> The API Server now requires authentication. You must provide an `X-API-Key` header with the value defined in `API_KEY` (default: `gr_sovereign_local_secret`) for all state-mutating endpoints (`POST`).
+
 ### Available REST API Endpoints
 - **`GET /`** - Serve dynamic `dashboard.html`.
 - **`GET /api/status`** - Engine status, market session, current regime & lock state.
 - **`GET /api/scan`** - Cached/latest scan results (portfolio picks & candidates).
-- **`POST /api/scan/trigger`** - Asynchronously trigger a fresh market scan.
-- **`POST /api/regime/override`** - Set or clear manual market regime override (`PANIC`, `TREND_UP`, etc.).
+- **`POST /api/scan/trigger`** (Requires Auth) - Asynchronously trigger a fresh market scan.
+- **`POST /api/regime/override`** (Requires Auth) - Set or clear manual market regime override (`PANIC`, `TREND_UP`, etc.).
 - **`GET /api/sectors`** - Sector relative strength & concentration breakdown.
 - **`GET /api/config`** - System configuration settings.
 
@@ -178,17 +181,17 @@ To enable dynamic position sizing that responds to portfolio performance between
 ### Diagnostic & Validation Scripts
 - `python .agent/scripts/checklist.py .`: The definitive master validation source (Security, Lint, Tests, SEO).
 - `pytest tests/test_services.py`: Comprehensive service-layer verification (100% pass required).
-- `scripts/fyers_setup.py`: Daily token refreshment, account verification, and `.env` synchronization.
-- `scripts/test_yf_diagnostic.py`: Integrity check for yfinance connectivity and data ingestion health.
-- `scripts/test_icir.py`: Real-time audit of cumulative factor Information Coefficients.
-- `python sovereign_quant_layer.py --capital-plan --regime TREND_UP`: Legacy compatibility wrapper for modular calibration and capital-plan inspection.
+- `tools/scripts/fyers_setup.py`: Daily token refreshment, account verification, and `.env` synchronization.
+- `tools/scripts/test_yf_diagnostic.py`: Integrity check for yfinance connectivity and data ingestion health.
+- `tools/scripts/test_icir.py`: Real-time audit of cumulative factor Information Coefficients.
 
 ---
 
 - **v14.6-Modularized Runtime**: Migrated all collaborators into a first-class `core/` module hierarchy.
 - **Out-of-Sample Platt Calibration**: Integrated 60-bar validation window for institutional probability stability.
 - **Service-Level Test Suite**: 100% pass confirmed for all decoupled services via `tests/test_services.py`.
-- **Zero-Regressions Legacy Mode**: Verified `sovereign_improvements.py` compatibility for all established quant scripts.
+- **Security Hardening**: Implemented X-API-Key auth, disabled CORS credentials, protected state with thread-locks, and sanitized XSS in `dashboard.html`.
+- **Repository Hygiene**: Separated dev dependencies into `requirements-dev.txt` and migrated legacy utility scripts into the `tools/` directory.
 
 > [!IMPORTANT]
 > The Modular runtime architecture is now the primary path. Ensure any custom factor implementations utilize the `ServiceBundle` for state persistence and regime-aware logic.

@@ -1270,6 +1270,17 @@ volume > sma(volume,5)</div>
 </div>
 
 <script>
+// ─── UTILS ───────────────────────────────────────────────────
+function escapeHTML(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // ─── EMA STATE ───────────────────────────────────────────────
 const emaState = { ema: null, rsi: null, vwap: null, gap: null, opt: null };
 
@@ -1491,7 +1502,7 @@ function generatePlan() {
 
   document.getElementById('plan-rules').innerHTML = `
     <div class="rule-row"><div class="rule-dot rd-a"></div><div><strong>No-trade zone: ₹${noZoneLow} – ₹${noZoneHigh}.</strong> Do NOT enter near the pivot. Wait for a clear directional breakout above ₹${buyEntry} or breakdown below ₹${sellEntry}.</div></div>
-    <div class="rule-row"><div class="rule-dot rd-g"></div><div><strong>Check Nifty direction first.</strong> ${stock} moves with the market. Nifty strong → favour long. Nifty weak → favour short.</div></div>
+    <div class="rule-row"><div class="rule-dot rd-g"></div><div><strong>Check Nifty direction first.</strong> ${escapeHTML(stock)} moves with the market. Nifty strong → favour long. Nifty weak → favour short.</div></div>
     <div class="rule-row"><div class="rule-dot rd-g"></div><div><strong>Book 50% at T1, trail stop to breakeven.</strong> Let the remaining 50% run to T2. Protects profit while keeping upside open.</div></div>
     <div class="rule-row"><div class="rule-dot rd-r"></div><div><strong>Respect stop loss — no exceptions.</strong> Long SL: ₹${buySL}. Short SL: ₹${sellSL}. No holding through a stop.</div></div>
     <div class="rule-row"><div class="rule-dot rd-g"></div><div><strong>Best R:R in this plan:</strong> ${bestRR}. Size position accordingly.</div></div>
@@ -1548,7 +1559,7 @@ async function fetchEngineStatus() {
       document.getElementById('rm-confidence').textContent = `${(r.confidence * 100).toFixed(0)}%`;
 
       document.getElementById('regime-session-label').textContent = `Session: ${data.session} ${r.regime_locked ? '[LOCKED]' : ''}`;
-      document.getElementById('regime-strategy-hint').innerHTML = `<strong>Strategy Hint:</strong> ${r.strategy_hint}`;
+      document.getElementById('regime-strategy-hint').innerHTML = `<strong>Strategy Hint:</strong> ${escapeHTML(r.strategy_hint)}`;
     }
 
     // Scanning Status
@@ -1693,9 +1704,9 @@ function renderScanTable() {
 
   tbody.innerHTML = list.map(item => `
     <tr>
-      <td><strong>${item.ticker}</strong></td>
-      <td><span style="font-family:var(--mono); font-size:11px; color:var(--text2);">${item.sector || 'GENERAL'}</span></td>
-      <td><span class="badge-dir ${item.direction === 'LONG' ? 'b-long' : 'b-short'}">${item.direction}</span></td>
+      <td><strong>${escapeHTML(item.ticker)}</strong></td>
+      <td><span style="font-family:var(--mono); font-size:11px; color:var(--text2);">${escapeHTML(item.sector || 'GENERAL')}</span></td>
+      <td><span class="badge-dir ${item.direction === 'LONG' ? 'b-long' : 'b-short'}">${escapeHTML(item.direction)}</span></td>
       <td>₹${(item.close || 0).toFixed(2)}</td>
       <td><strong style="color:var(--green)">${((item.prob_win || 0) * 100).toFixed(1)}%</strong></td>
       <td>+${(item.expectancy_r || 0).toFixed(2)} R</td>
@@ -1703,7 +1714,7 @@ function renderScanTable() {
       <td>₹${(item.entry || 0).toFixed(2)}</td>
       <td><span style="color:var(--red)">₹${(item.stop || 0).toFixed(2)}</span></td>
       <td><span style="color:var(--green)">₹${(item.t1 || 0).toFixed(2)}</span></td>
-      <td><span style="font-size:11px; color:var(--text2);">${(item.reasons || []).slice(0, 2).join(' · ')}</span></td>
+      <td><span style="font-size:11px; color:var(--text2);">${(item.reasons || []).map(escapeHTML).slice(0, 2).join(' · ')}</span></td>
     </tr>
   `).join('');
 }

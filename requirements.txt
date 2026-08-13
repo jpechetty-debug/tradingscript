@@ -26,14 +26,7 @@ python-dotenv==1.0.1
 # ── Excel export (save_exports) ───────────────────────────────────────────────
 openpyxl==3.1.4
  
-# ── Testing ───────────────────────────────────────────────────────────────────
-pytest==8.2.2
-pytest-cov==5.0.0           # coverage reports: pytest --cov=. --cov-report=term-missing
-pytest-asyncio==0.23.7
- 
-# ── Optional: faster JSON (used by sovereign_improvements) ───────────────────
-# ujson==5.10.0             # uncomment if JSON serialisation becomes a bottleneck
- 
-# ── Dev / linting (not needed in production) ─────────────────────────────────
-ruff==0.4.7
-mypy==1.10.0
+# ── API Server ────────────────────────────────────────────────────────────────
+fastapi>=0.100.0
+uvicorn>=0.23.0
+

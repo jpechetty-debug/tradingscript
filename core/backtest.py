@@ -419,6 +419,14 @@ def walk_forward(
     ``WalkForwardResult`` with per-trade records and summary statistics.
     Net R-multiples in ``TradeRecord.r_multiple`` already reflect costs;
     the gross figure is preserved in ``TradeRecord.gross_r_multiple``.
+
+    Notes
+    -----
+    **Optimistic Entry Assumption**: The simulation enters trades at the exact
+    closing price of the signal day (the last bar of the train window). In real
+    live trading, a strict EOD MOC (Market on Close) execution is required to
+    achieve this exact fill. Otherwise, actual execution at the next day's
+    open may result in slight slippage not fully captured by the cost model.
     """
     min_prob  = min_prob if min_prob is not None else config.BACKTEST_MIN_PROB
     all_trades: list[TradeRecord] = []

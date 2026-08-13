@@ -200,6 +200,7 @@ def _ticker_excess_kurtosis(daily_df: pd.DataFrame, config: SystemConfig) -> flo
         ek = float(_kurtosis(rets_arr, fisher=True))
         return float(np.clip(ek, 0.0, 20.0))
     except Exception:
+        log.debug("Kurtosis calc failed, using fallback.", exc_info=True)
         return config.KELLY_KURTOSIS_FALLBACK
 
 

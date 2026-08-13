@@ -19,12 +19,25 @@ from datetime import datetime, timezone
 import logging
 from pathlib import Path
 import threading
+import os
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Security
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
+
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+def verify_api_key(api_key: str = Security(api_key_header)):
+    expected_api_key = os.environ.get("API_KEY", "dev-secret-key")
+    if not api_key or api_key != expected_api_key:
+        raise HTTPException(
+            status_code=403,
+            detail="Could not validate credentials"
+        )
 import uvicorn
 
 import screener_v14_modular as svm
@@ -57,7 +70,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -149,33 +162,35 @@ def get_status() -> Dict[str, Any]:
     rg_settings = CONFIG.as_regime()
     session = rg_settings.session_from_time()
     locked = rg_settings.is_regime_locked()
-    return {
-        "status": "online",
-        "version": svm.VERSION,
-        "session": session,
-        "regime_locked": locked,
-        "regime_override": STATE.regime_override,
-        "is_scanning": STATE.is_scanning,
-        "last_scan_time": STATE.last_scan_time,
-        "scan_error": STATE.scan_error,
-        "last_known_regime": STATE.last_regime_info,
-    }
+    with STATE._lock:
+        return {
+            "status": "online",
+            "version": svm.VERSION,
+            "session": session,
+            "regime_locked": locked,
+            "regime_override": STATE.regime_override,
+            "is_scanning": STATE.is_scanning,
+            "last_scan_time": STATE.last_scan_time,
+            "scan_error": STATE.scan_error,
+            "last_known_regime": STATE.last_regime_info,
+        }
 
 
 @app.get("/api/scan")
 def get_scan_results() -> Dict[str, Any]:
-    return {
-        "last_scan_time": STATE.last_scan_time,
-        "is_scanning": STATE.is_scanning,
-        "scan_error": STATE.scan_error,
-        "regime": STATE.last_regime_info,
-        "portfolio": STATE.last_portfolio,
-        "candidates_count": len(STATE.last_candidates),
-        "candidates": STATE.last_candidates,
-    }
+    with STATE._lock:
+        return {
+            "last_scan_time": STATE.last_scan_time,
+            "is_scanning": STATE.is_scanning,
+            "scan_error": STATE.scan_error,
+            "regime": STATE.last_regime_info,
+            "portfolio": STATE.last_portfolio,
+            "candidates_count": len(STATE.last_candidates),
+            "candidates": STATE.last_candidates,
+        }
 
 
-@app.post("/api/scan/trigger")
+@app.post("/api/scan/trigger", dependencies=[Depends(verify_api_key)])
 def trigger_scan(background_tasks: BackgroundTasks) -> Dict[str, Any]:
     if STATE.is_scanning:
         return {"status": "already_running", "message": "Scan execution already in progress"}
@@ -184,7 +199,7 @@ def trigger_scan(background_tasks: BackgroundTasks) -> Dict[str, Any]:
     return {"status": "triggered", "message": "Market scan started in background worker"}
 
 
-@app.post("/api/regime/override")
+@app.post("/api/regime/override", dependencies=[Depends(verify_api_key)])
 def set_regime_override(req: OverrideRequest) -> Dict[str, Any]:
     valid_regimes = {"PANIC", "TREND_UP", "TREND_DOWN", "RANGE", "EXPANSION"}
     if req.regime is None or req.regime.upper() in ("CLEAR", "NONE", "AUTO"):
