@@ -106,10 +106,26 @@ To ensure institutional-grade code quality and repository stability, every PR/co
 
 ---
 
-## 🖥️ Unified Command Center
+## 🖥️ Unified Command Center & API Server
 
-The **NSE Unified Scanner** (`dashboard.html`) provides a localized, professional-grade interface for monitoring market conditions and trade execution plans.
+The **Sovereign Engine API Server** (`server.py`) and **NSE Unified Scanner** (`dashboard.html`) provide a localized, professional-grade interface for monitoring market conditions and trade execution plans.
 
+### Starting the API Server
+```bash
+python server.py
+```
+This launches a FastAPI server on `http://127.0.0.1:8000` with background scanning capabilities and serves the dynamic web dashboard.
+
+### Available REST API Endpoints
+- **`GET /`** - Serve dynamic `dashboard.html`.
+- **`GET /api/status`** - Engine status, market session, current regime & lock state.
+- **`GET /api/scan`** - Cached/latest scan results (portfolio picks & candidates).
+- **`POST /api/scan/trigger`** - Asynchronously trigger a fresh market scan.
+- **`POST /api/regime/override`** - Set or clear manual market regime override (`PANIC`, `TREND_UP`, etc.).
+- **`GET /api/sectors`** - Sector relative strength & concentration breakdown.
+- **`GET /api/config`** - System configuration settings.
+
+### Dashboard Features
 - **33 EMA Signal Intelligence**: Real-time signal validation using a 9-minute spot chart timeframe with MTF-60m confirmation.
 - **8-Param Momentum Screener**: A binary filter-set evaluating 4 Technical and 4 Fundamental parameters with zero-tolerance pass logic.
 - **Trade Execution Planner**: Quantitative risk-reward calculator with ATR-based volatility scaling and volatility-matched bias detection.
