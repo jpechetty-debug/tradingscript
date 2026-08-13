@@ -28,16 +28,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
-API_KEY_NAME = "X-API-Key"
-api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
-
-def verify_api_key(api_key: str = Security(api_key_header)):
-    expected_api_key = os.environ.get("API_KEY", "dev-secret-key")
-    if not api_key or api_key != expected_api_key:
-        raise HTTPException(
-            status_code=403,
-            detail="Could not validate credentials"
-        )
 import uvicorn
 
 import screener_v14_modular as svm
@@ -47,6 +37,24 @@ from core.scorer import TickerResult
 from core.universe import SECTORS, TICKER_TO_SECTOR
 
 from contextlib import asynccontextmanager
+
+import secrets
+
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+API_KEY = os.environ.get("API_KEY")
+if not API_KEY:
+    API_KEY = secrets.token_urlsafe(32)
+    logging.getLogger("sovereign.server").warning(f"No API_KEY provided in environment. Generated ephemeral key: {API_KEY}")
+
+def verify_api_key(api_key: str = Security(api_key_header)):
+    if not api_key or api_key != API_KEY:
+        raise HTTPException(
+            status_code=403,
+            detail="Could not validate credentials"
+        )
+
 
 log = logging.getLogger("sovereign.server")
 

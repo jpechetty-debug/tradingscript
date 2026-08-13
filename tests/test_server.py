@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from server import app, STATE
+from server import app, STATE, API_KEY
 
 
 @pytest.fixture
@@ -44,20 +44,20 @@ def test_get_scan_results_empty_initially(client: TestClient) -> None:
 
 def test_set_regime_override(client: TestClient) -> None:
     # Set PANIC
-    res = client.post("/api/regime/override", json={"regime": "PANIC"})
+    res = client.post("/api/regime/override", json={"regime": "PANIC"}, headers={"X-API-Key": API_KEY})
     assert res.status_code == 200
     assert res.json()["regime_override"] == "PANIC"
     assert STATE.regime_override == "PANIC"
 
     # Clear override
-    res_clear = client.post("/api/regime/override", json={"regime": "CLEAR"})
+    res_clear = client.post("/api/regime/override", json={"regime": "CLEAR"}, headers={"X-API-Key": API_KEY})
     assert res_clear.status_code == 200
     assert res_clear.json()["regime_override"] is None
     assert STATE.regime_override is None
 
 
 def test_set_invalid_regime_override(client: TestClient) -> None:
-    res = client.post("/api/regime/override", json={"regime": "INVALID_REGIME"})
+    res = client.post("/api/regime/override", json={"regime": "INVALID_REGIME"}, headers={"X-API-Key": API_KEY})
     assert res.status_code == 400
 
 

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from scripts.fyers_setup import persist_access_token
+from tools.scripts.fyers_setup import persist_access_token
 
 
 def test_persist_access_token_replaces_existing_value(tmp_path):

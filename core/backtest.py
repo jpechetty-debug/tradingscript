@@ -422,11 +422,9 @@ def walk_forward(
 
     Notes
     -----
-    **Optimistic Entry Assumption**: The simulation enters trades at the exact
-    closing price of the signal day (the last bar of the train window). In real
-    live trading, a strict EOD MOC (Market on Close) execution is required to
-    achieve this exact fill. Otherwise, actual execution at the next day's
-    open may result in slight slippage not fully captured by the cost model.
+    **Next-Day Open Assumption**: The simulation enters trades at the exact
+    opening price of the day following the signal. This removes the optimistic
+    assumption of filling at the exact MOC (Market on Close) price of the signal day.
     """
     min_prob  = min_prob if min_prob is not None else config.BACKTEST_MIN_PROB
     all_trades: list[TradeRecord] = []
@@ -572,7 +570,6 @@ def walk_forward(
         for composite, prob, ticker, d, row, train_df in candidates:
             close = float(row["Close"])
             atr   = float(row.get("ATR", close * 0.015))
-            targets = compute_targets(d, close, atr, config)
 
             _, time_stop = compute_trade_management_wrapper(d, close, atr, row)
 
@@ -583,9 +580,12 @@ def walk_forward(
             if fwd_bars.empty:
                 continue
 
+            entry_price = float(fwd_bars.iloc[0]["Open"])
+            targets = compute_targets(d, entry_price, atr, config)
+
             r, hit, bars, exit_date, gross_r, friction = _realised_r(
                 direction=d,
-                entry=close,
+                entry=entry_price,
                 stop=targets.stop,
                 t1=targets.t1,
                 fwd_bars=fwd_bars,
@@ -599,7 +599,7 @@ def walk_forward(
                 direction=d,
                 entry_date=train_df.index[-1],
                 exit_date=exit_date,
-                entry=round(close, 2),
+                entry=round(entry_price, 2),
                 stop=targets.stop,
                 t1=targets.t1,
                 composite=round(composite, 4),
