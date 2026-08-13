@@ -142,7 +142,7 @@ This launches a FastAPI server on `http://127.0.0.1:8000` with background scanni
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `TELEGRAM_BOT_TOKEN` | — | Token for the alert delivery layer. |
-| `FYERS_ACCESS_TOKEN` | — | Daily token for high-priority market data, refreshed by `scripts/fyers_setup.py`. |
+| `FYERS_ACCESS_TOKEN` | — | Daily token for high-priority market data, refreshed by `tools/scripts/fyers_setup.py`. |
 | `RISK_PER_TRADE_INR` | `10000` | Target risk in Rs. per trade. |
 | `PORTFOLIO_SIZE` | `5` | Maximum candidates to select in optimized portfolio. |
 | `MAX_SECTOR_PICKS` | `2` | Maximum tickers from the same sector. |
