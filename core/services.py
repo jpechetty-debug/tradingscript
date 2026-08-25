@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional, Protocol, TYPE_CHECKING
+from typing import Any, Callable, Optional, Protocol, TYPE_CHECKING, Iterator
 
 if TYPE_CHECKING:
     from .backtest import TransactionCostModel
@@ -660,7 +660,7 @@ class ScanService:
         if callable(loader):
             snapshot = loader()
             if snapshot is not None:
-                return snapshot.current_nav
+                return float(snapshot.current_nav)
 
         return self._default_current_nav
 
@@ -769,7 +769,7 @@ class ServiceBundle:
     scan_service:  ScanService
     alert_service: AlertService
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Any]:
         yield self.scan_service
         yield self.alert_service
 

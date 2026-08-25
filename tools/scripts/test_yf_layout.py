@@ -8,7 +8,7 @@ def test_yf_layout():
     print("Columns Type:", type(data.columns))
     print("Columns MultiIndex Levels:", data.columns.nlevels if isinstance(data.columns, pd.MultiIndex) else "Flat")
     print("Columns Index:", data.columns)
-    
+
     if isinstance(data.columns, pd.MultiIndex):
         level_0 = data.columns.get_level_values(0).unique()
         print("Level 0:", level_0)

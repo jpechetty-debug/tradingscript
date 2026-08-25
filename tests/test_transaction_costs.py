@@ -112,7 +112,7 @@ class TestRealisedRWithCosts:
 
     def test_stop_hit_net_r_worse_than_minus_one(self):
         """After costs a stop-hit trade loses more than 1R."""
-        bars = _bars([97.5], lows_offset=0.6)   # low touches stop
+        bars = _bars([98.5], lows_offset=1.0)   # low touches stop
         net_r, hit, _, _, gross_r, friction = _realised_r(
             "LONG", 100.0, 98.0, 106.0, bars, 10, DEFAULT_COST_MODEL
         )

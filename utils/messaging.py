@@ -11,7 +11,7 @@ Telegram alert delivery with:
 import logging
 import time
 
-import requests  # type: ignore[import-untyped]
+import requests
 
 log = logging.getLogger("sovereign.utils")
 

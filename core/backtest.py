@@ -264,20 +264,33 @@ def _realised_r(
             net_r   = round(gross_r - friction, 4)
             return net_r, False, i + 1, ts, gross_r, round(friction, 5)
 
+        open_p = float(bar["Open"])
         high = float(bar["High"])
         low  = float(bar["Low"])
 
         if direction == "LONG":
+            if open_p <= stop:
+                gross_r = (open_p - entry) / sl_dist
+                return round(gross_r - friction, 4), False, i + 1, ts, round(gross_r, 4), round(friction, 5)
             if low <= stop:
                 gross_r = -1.0
                 return round(gross_r - friction, 4), False, i + 1, ts, gross_r, round(friction, 5)
+            if open_p >= t1:
+                gross_r = (open_p - entry) / sl_dist
+                return round(gross_r - friction, 4), True, i + 1, ts, round(gross_r, 4), round(friction, 5)
             if high >= t1:
                 gross_r = round(rr, 4)
                 return round(gross_r - friction, 4), True, i + 1, ts, gross_r, round(friction, 5)
         else:
+            if open_p >= stop:
+                gross_r = (entry - open_p) / sl_dist
+                return round(gross_r - friction, 4), False, i + 1, ts, round(gross_r, 4), round(friction, 5)
             if high >= stop:
                 gross_r = -1.0
                 return round(gross_r - friction, 4), False, i + 1, ts, gross_r, round(friction, 5)
+            if open_p <= t1:
+                gross_r = (entry - open_p) / sl_dist
+                return round(gross_r - friction, 4), True, i + 1, ts, round(gross_r, 4), round(friction, 5)
             if low <= t1:
                 gross_r = round(rr, 4)
                 return round(gross_r - friction, 4), True, i + 1, ts, gross_r, round(friction, 5)
@@ -597,7 +610,7 @@ def walk_forward(
                 fold=fold_idx,
                 ticker=ticker,
                 direction=d,
-                entry_date=train_df.index[-1],
+                entry_date=fwd_bars.index[0],
                 exit_date=exit_date,
                 entry=round(entry_price, 2),
                 stop=targets.stop,

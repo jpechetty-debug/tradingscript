@@ -369,7 +369,8 @@ class TestBacktestHelpers:
         c = start * np.cumprod(1 + trend + np.random.normal(0, 0.005, n))
         h = c * 1.005
         low = c * 0.995
-        return pd.DataFrame({"High": h, "Low": low, "Close": c}, index=dates)
+        o = c * 1.0
+        return pd.DataFrame({"Open": o, "High": h, "Low": low, "Close": c}, index=dates)
 
     def test_realised_r_long_stop_hit(self):
         from core.backtest import _realised_r
@@ -403,7 +404,7 @@ class TestBacktestHelpers:
 
     def test_realised_r_empty_bars(self):
         from core.backtest import _realised_r
-        empty = pd.DataFrame(columns=["High", "Low", "Close"])
+        empty = pd.DataFrame(columns=["Open", "High", "Low", "Close"])
         r, hit, bars, _, _, _ = _realised_r("LONG", 100, 95, 110, empty, 10)
         assert r == 0.0
         assert bars == 0

@@ -23,6 +23,7 @@ import argparse
 import logging
 import sys
 import time
+from typing import Callable
 
 from core.regime import RegimeTracker
 from core.runtime_components import create_runtime_components
@@ -40,7 +41,7 @@ from screener_v14_modular import (
 log = logging.getLogger("sovereign")
 
 
-def _build_current_nav_provider(persistence: PersistenceService):
+def _build_current_nav_provider(persistence: PersistenceService) -> Callable[[], float | None]:
     def _current_nav() -> float | None:
         snapshot = persistence.load_portfolio_state()
         return snapshot.current_nav if snapshot is not None else None

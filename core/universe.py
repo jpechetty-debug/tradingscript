@@ -1,82 +1,122 @@
 """
 core/universe.py
 ================
-Single source of truth for the NSE 178-ticker universe and sector mapping.
+Single source of truth for the curated NSE ticker universe and sector mapping.
 Previously embedded in screener.py; extracted so core/ modules can import
 it without pulling in the monolith.
 """
 
 from __future__ import annotations
 
+# ==========================================
+# TIER DEFINITIONS (Sovereign Scanning Tiers)
+# ==========================================
+
+TIER_1_GENERALS = [
+    "RELIANCE.NS","HDFCBANK.NS","ICICIBANK.NS","SBIN.NS","AXISBANK.NS",
+    "KOTAKBANK.NS","BAJFINANCE.NS","INFY.NS","TCS.NS","HCLTECH.NS",
+    "BHARTIARTL.NS","LT.NS","M&M.NS","MARUTI.NS","HAL.NS",
+    "BEL.NS","TATASTEEL.NS","JSWSTEEL.NS","ADANIPORTS.NS","SIEMENS.NS"
+]
+
+TIER_2_ROTATION = [
+    "INDUSINDBK.NS","BANKBARODA.NS","CANBK.NS","BAJAJFINSV.NS",
+    "SHRIRAMFIN.NS","CHOLAFIN.NS","PFC.NS","RECLTD.NS",
+    "TECHM.NS","COFORGE.NS","PERSISTENT.NS","KPITTECH.NS",
+    "TVSMOTOR.NS","BAJAJ-AUTO.NS","EICHERMOT.NS","HEROMOTOCO.NS",
+    "ABB.NS","CGPOWER.NS","POLYCAB.NS","HAVELLS.NS","CUMMINSIND.NS",
+    "NTPC.NS","POWERGRID.NS","TATAPOWER.NS",
+    "DLF.NS","LODHA.NS","GODREJPROP.NS",
+    "RVNL.NS","IRFC.NS","RAILTEL.NS","IRCON.NS","NBCC.NS"
+]
+
+TIER_3A_DEFENSIVE = [
+    "SUNPHARMA.NS","CIPLA.NS","DRREDDY.NS","DIVISLAB.NS","LUPIN.NS",
+    "ITC.NS","HINDUNILVR.NS","NESTLEIND.NS","VBL.NS","BRITANNIA.NS",
+    "ULTRACEMCO.NS","AMBUJACEM.NS","SRF.NS","PIIND.NS","NAVINFLUOR.NS"
+]
+
+TIER_3B_EVENT = [
+    "ADANIENT.NS","ADANIGREEN.NS","ADANIPOWER.NS",
+    "BSE.NS","MCX.NS",
+    "PAYTM.NS","DIXON.NS","INDIGO.NS",
+    "SOLARINDS.NS","WAAREEENER.NS",
+    "MAZDOCK.NS","GRSE.NS","BDL.NS","COCHINSHIP.NS","DATAPATTNS.NS"
+]
+
+TIER_4_MACRO = [
+    "ONGC.NS","BPCL.NS","IOC.NS","GAIL.NS","COALINDIA.NS",
+    "HINDALCO.NS","JINDALSTEL.NS","NMDC.NS","VEDL.NS",
+    "PNB.NS","MUTHOOTFIN.NS","M&MFIN.NS",
+    "WIPRO.NS","MPHASIS.NS","LTIM.NS",
+    "MOTHERSON.NS","BHARATFORG.NS","ASHOKLEY.NS"
+]
+
+CORE_15_PULSE = [
+    "RELIANCE.NS","HDFCBANK.NS","ICICIBANK.NS","SBIN.NS","AXISBANK.NS",
+    "BAJFINANCE.NS","INFY.NS","TCS.NS","BHARTIARTL.NS","LT.NS",
+    "M&M.NS","HAL.NS","BEL.NS","TATASTEEL.NS","ADANIPORTS.NS"
+]
+
+# ==========================================
+# SECTOR MAPPINGS
+# (Used by Scoring/Gate-Check layer for weights)
+# ==========================================
+
 SECTORS: dict[str, list[str]] = {
-    "BANKING": [
-        "SBIN.NS", "HDFCBANK.NS", "ICICIBANK.NS", "AXISBANK.NS", "KOTAKBANK.NS",
-        "INDUSINDBK.NS", "BANKBARODA.NS", "PNB.NS", "CANBK.NS", "UNIONBANK.NS",
-        "BANDHANBNK.NS", "FEDERALBNK.NS", "IDFCFIRSTB.NS", "AUBANK.NS", "RBLBANK.NS",
+    "FINANCIALS": [
+        "HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "AXISBANK.NS", "KOTAKBANK.NS", "BAJFINANCE.NS",
+        "INDUSINDBK.NS", "BANKBARODA.NS", "CANBK.NS", "BAJAJFINSV.NS", "SHRIRAMFIN.NS", "CHOLAFIN.NS", "PFC.NS", "RECLTD.NS",
+        "BSE.NS", "MCX.NS", "PAYTM.NS",
+        "PNB.NS", "MUTHOOTFIN.NS", "M&MFIN.NS"
     ],
     "IT": [
-        "INFY.NS", "TCS.NS", "HCLTECH.NS", "TECHM.NS", "WIPRO.NS",
-        "LTIM.NS", "COFORGE.NS", "PERSISTENT.NS", "MPHASIS.NS", "OFSS.NS",
-        "KPITTECH.NS", "TATAELXSI.NS", "LTTS.NS", "CYIENT.NS",
-    ],
-    "AUTO": [
-        "M&M.NS", "MARUTI.NS", "BAJAJ-AUTO.NS", "EICHERMOT.NS",
-        "HEROMOTOCO.NS", "TVSMOTOR.NS", "ASHOKLEY.NS", "MOTHERSON.NS", "BOSCHLTD.NS",
-        "BHARATFORG.NS", "APOLLOTYRE.NS", "MRF.NS", "BALKRISIND.NS", "EXIDEIND.NS",
-    ],
-    "METALS": [
-        "TATASTEEL.NS", "JSWSTEEL.NS", "HINDALCO.NS", "JINDALSTEL.NS",
-        "NMDC.NS", "SAIL.NS", "NATIONALUM.NS", "APLAPOLLO.NS", "RATNAMANI.NS",
-        "WELCORP.NS", "HINDCOPPER.NS",
-    ],
-    "PHARMA": [
-        "SUNPHARMA.NS", "CIPLA.NS", "DRREDDY.NS", "DIVISLAB.NS", "APOLLOHOSP.NS",
-        "LUPIN.NS", "TORNTPHARM.NS", "BIOCON.NS", "ALKEM.NS", "IPCALAB.NS",
-        "AUROPHARMA.NS", "GLENMARK.NS", "ABBOTINDIA.NS", "PFIZER.NS", "GLAXO.NS",
-    ],
-    "FMCG": [
-        "ITC.NS", "HINDUNILVR.NS", "BRITANNIA.NS", "TATACONSUM.NS", "NESTLEIND.NS",
-        "MARICO.NS", "DABUR.NS", "GODREJCP.NS", "COLPAL.NS", "EMAMILTD.NS",
-        "RADICO.NS", "UBL.NS",
+        "INFY.NS", "TCS.NS", "HCLTECH.NS",
+        "TECHM.NS", "COFORGE.NS", "PERSISTENT.NS", "KPITTECH.NS",
+        "WIPRO.NS", "MPHASIS.NS", "LTIM.NS"
     ],
     "ENERGY": [
-        "RELIANCE.NS", "NTPC.NS", "POWERGRID.NS", "ADANIENT.NS", "ONGC.NS",
-        "COALINDIA.NS", "BPCL.NS", "IOC.NS", "GAIL.NS", "HINDPETRO.NS",
-        "TATAPOWER.NS", "ADANIGREEN.NS", "TORNTPOWER.NS", "CESC.NS", "NLCINDIA.NS",
+        "RELIANCE.NS",
+        "NTPC.NS", "POWERGRID.NS", "TATAPOWER.NS",
+        "ADANIENT.NS", "ADANIGREEN.NS", "ADANIPOWER.NS", "WAAREEENER.NS",
+        "ONGC.NS", "BPCL.NS", "IOC.NS", "GAIL.NS", "COALINDIA.NS"
+    ],
+    "AUTO": [
+        "M&M.NS", "MARUTI.NS",
+        "TVSMOTOR.NS", "BAJAJ-AUTO.NS", "EICHERMOT.NS", "HEROMOTOCO.NS",
+        "MOTHERSON.NS", "BHARATFORG.NS", "ASHOKLEY.NS"
+    ],
+    "METALS": [
+        "TATASTEEL.NS", "JSWSTEEL.NS",
+        "HINDALCO.NS", "JINDALSTEL.NS", "NMDC.NS", "VEDL.NS"
+    ],
+    "DEFENCE": [
+        "HAL.NS", "BEL.NS",
+        "SOLARINDS.NS",
+        "MAZDOCK.NS", "GRSE.NS", "BDL.NS", "COCHINSHIP.NS", "DATAPATTNS.NS"
+    ],
+    "INDUSTRIALS": [
+        "LT.NS", "ADANIPORTS.NS", "SIEMENS.NS",
+        "ABB.NS", "CGPOWER.NS", "POLYCAB.NS", "HAVELLS.NS", "CUMMINSIND.NS",
+        "RVNL.NS", "IRFC.NS", "RAILTEL.NS", "IRCON.NS", "NBCC.NS",
+        "ULTRACEMCO.NS", "AMBUJACEM.NS",
+        "DIXON.NS", "INDIGO.NS"
     ],
     "REALTY": [
-        "DLF.NS", "GODREJPROP.NS", "PRESTIGE.NS", "OBEROIRLTY.NS", "LODHA.NS",
-        "PHOENIXLTD.NS", "BRIGADE.NS", "SOBHA.NS", "KOLTEPATIL.NS",
+        "DLF.NS", "LODHA.NS", "GODREJPROP.NS"
     ],
-    "FINANCE": [
-        "BAJFINANCE.NS", "BAJAJFINSV.NS", "CHOLAFIN.NS", "MUTHOOTFIN.NS", "SBILIFE.NS",
-        "HDFCLIFE.NS", "ICICIPRULI.NS", "ICICIGI.NS", "SBICARD.NS",
-        "M&MFIN.NS", "MANAPPURAM.NS", "LICHSGFIN.NS", "SHRIRAMFIN.NS", "POONAWALLA.NS",
+    "PHARMA": [
+        "SUNPHARMA.NS", "CIPLA.NS", "DRREDDY.NS", "DIVISLAB.NS", "LUPIN.NS"
     ],
-    "CAPITAL_GOODS": [
-        "LT.NS", "SIEMENS.NS", "ABB.NS", "HAVELLS.NS", "BHEL.NS",
-        "CUMMINSIND.NS", "THERMAX.NS", "VOLTAS.NS", "AIAENG.NS", "BEL.NS",
-        "HAL.NS", "GRINDWELL.NS", "TIINDIA.NS",
-    ],
-    "CONSUMER": [
-        "TITAN.NS", "ASIANPAINT.NS", "PIDILITIND.NS", "WHIRLPOOL.NS",
-        "CROMPTON.NS", "VGUARD.NS", "KAJARIACER.NS", "BATAINDIA.NS", "PAGEIND.NS",
-    ],
-    "TELECOM": [
-        "BHARTIARTL.NS", "INDUSTOWER.NS",
-    ],
-    "CEMENT": [
-        "ULTRACEMCO.NS", "AMBUJACEM.NS", "ACC.NS", "SHREECEM.NS",
-        "RAMCOCEM.NS", "JKCEMENT.NS", "HEIDELBERG.NS",
+    "FMCG": [
+        "ITC.NS", "HINDUNILVR.NS", "NESTLEIND.NS", "VBL.NS", "BRITANNIA.NS"
     ],
     "CHEMICALS": [
-        "SRF.NS", "ATUL.NS", "NAVINFLUOR.NS", "TATACHEM.NS",
-        "GNFC.NS", "AARTIIND.NS", "CLEAN.NS",
+        "SRF.NS", "PIIND.NS", "NAVINFLUOR.NS"
     ],
-    "INFRASTRUCTURE": [
-        "ADANIPORTS.NS", "IRB.NS", "KNRCON.NS", "NCC.NS",
-        "NBCC.NS", "RVNL.NS", "IRCON.NS", "HFCL.NS",
-    ],
+    "TELECOM": [
+        "BHARTIARTL.NS"
+    ]
 }
 
 ALL_TICKERS: list[str] = list(
