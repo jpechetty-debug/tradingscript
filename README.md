@@ -96,12 +96,12 @@ The engine employs a lazily-initialized `ServiceBundle` (`core/services.py`) to 
 
 ## 🛡️ Repo Stability & Master Validation
 
-To ensure institutional-grade code quality and repository stability, every PR/commit is subjected to a tiered validation protocol via `checklist.py`.
+To ensure institutional-grade code quality and repository stability, every PR/commit is subjected to a tiered validation protocol via GitHub Actions CI.
 
 ### The P0/P1 Check Hierarchy:
 1.  **P0: Security Scan** - Automated vulnerability and secret detection.
 2.  **P0: Lint & Type Compliance** - Strict **Ruff** (E402/F821) and **Mypy** verification.
-3.  **P1: Test Suite Compliance** - **459 PASSED** unit and integration tests (100% pass requirement).
+3.  **P1: Test Suite Compliance** - Comprehensive unit and integration tests (100% pass requirement).
 4.  **P1: UX & SEO Optimization** - Accessibility and Meta-tag validation for reporting artifacts.
 
 ---
@@ -179,7 +179,7 @@ To enable dynamic position sizing that responds to portfolio performance between
 - **peak_nav**: Historical peak value. Used for **Tiered PANIC** drawdown calculation.
 
 ### Diagnostic & Validation Scripts
-- `python .agent/scripts/checklist.py .`: The definitive master validation source (Security, Lint, Tests, SEO).
+- CI Pipeline: Automated validation runs via GitHub Actions (Security, Lint, Tests, SEO).
 - `pytest tests/test_services.py`: Comprehensive service-layer verification (100% pass required).
 - `tools/scripts/fyers_setup.py`: Daily token refreshment, account verification, and `.env` synchronization.
 - `tools/scripts/test_yf_diagnostic.py`: Integrity check for yfinance connectivity and data ingestion health.
