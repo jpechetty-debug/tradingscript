@@ -742,6 +742,7 @@
     letter-spacing: .06em;
     border-bottom: 1px solid var(--border);
     cursor: pointer;
+    -webkit-user-select: none;
     user-select: none;
   }
   table.scan-table th:hover { color: var(--text); }
@@ -771,6 +772,19 @@
     .nav-tab { font-size: 10px; padding: 8px 6px; }
     .cond-grid { grid-template-columns: 1fr; }
   }
+
+  /* Utilities */
+  .flex-mono-11 { font-family:var(--mono); font-size:11px; color:var(--text2); display:flex; align-items:center; gap:8px; }
+  .mb-0 { margin-bottom: 0; }
+  .mono-11 { font-family:var(--mono); font-size:11px; color:var(--text2); }
+  .score-fill-init { background:var(--text3); width:0%; }
+  .mono-10-right { font-family:var(--mono); font-size:10px; color:var(--text3); text-align:right; margin-top:3px; }
+  .mt-0-mb-12 { margin-top: 0; margin-bottom: 12px; }
+  .w-58 { width: 58%; }
+  .w-42 { width: 42%; }
+  .c-red { color: var(--red); }
+  .c-green { color: var(--green); }
+  .mt-0 { margin-top: 0; }
 </style>
 </head>
 <body>
@@ -804,13 +818,13 @@
         <button class="btn-action" id="btn-trigger-scan" onclick="triggerLiveScan()">
           <span id="scan-btn-icon">⚡</span> <span id="scan-btn-text">RUN SCAN NOW</span>
         </button>
-        <select class="ctrl-select" id="sel-refresh" onchange="changeRefreshInterval(this.value)">
+        <select class="ctrl-select" id="sel-refresh" title="Refresh Interval" aria-label="Refresh Interval" onchange="changeRefreshInterval(this.value)">
           <option value="30">Auto: 30s</option>
           <option value="15">Auto: 15s</option>
           <option value="60">Auto: 60s</option>
           <option value="0">Auto: Off</option>
         </select>
-        <select class="ctrl-select" id="sel-override" onchange="changeRegimeOverride(this.value)">
+        <select class="ctrl-select" id="sel-override" title="Regime Override" aria-label="Regime Override" onchange="changeRegimeOverride(this.value)">
           <option value="AUTO">Regime: Auto Detect</option>
           <option value="PANIC">Force PANIC</option>
           <option value="TREND_UP">Force TREND_UP</option>
@@ -819,7 +833,7 @@
           <option value="EXPANSION">Force EXPANSION</option>
         </select>
       </div>
-      <div style="font-family:var(--mono); font-size:11px; color:var(--text2); display:flex; align-items:center; gap:8px;">
+      <div class="flex-mono-11">
         <span class="pulse-dot"></span>
         <span id="txt-last-update">Last scan: Waiting for data...</span>
       </div>
@@ -829,10 +843,10 @@
     <div class="regime-card">
       <div class="regime-header-row">
         <div class="regime-title-wrap">
-          <div class="sec-label" style="margin-bottom:0;">Market Regime State</div>
+          <div class="sec-label mb-0">Market Regime State</div>
           <div class="regime-badge badge-trend-up" id="regime-status-badge">CLASSIFYING...</div>
         </div>
-        <div style="font-family:var(--mono); font-size:11px; color:var(--text2);" id="regime-session-label">
+        <div class="mono-11" id="regime-session-label">
           Session: OPENING RANGE NOISE
         </div>
       </div>
@@ -1061,7 +1075,7 @@
         </div>
         <div class="verdict-detail">Toggle each parameter above. All 8 must pass for an actionable signal.</div>
         <div class="score-bar-wrap">
-          <div class="score-bar-track"><div class="score-bar-fill" id="mp-bar" style="width:0%;background:var(--text3)"></div></div>
+          <div class="score-bar-track"><div class="score-bar-fill score-fill-init" id="mp-bar"></div></div>
           <div class="score-bar-labels"><span>0</span><span id="mp-bar-score">0 / 8</span><span>8</span></div>
         </div>
       </div>
@@ -1122,18 +1136,18 @@
         </div>
         <div>
           <div class="plan-price-big" id="po-price">₹—</div>
-          <div style="font-family:var(--mono);font-size:10px;color:var(--text3);text-align:right;margin-top:3px">PREV CLOSE</div>
+          <div class="mono-10-right">PREV CLOSE</div>
         </div>
       </div>
 
       <div class="level-map">
-        <div class="sec-label" style="margin-top:0;margin-bottom:12px">Price level map</div>
+        <div class="sec-label mt-0-mb-12">Price level map</div>
         <div class="level-visual" id="level-visual"></div>
         <div class="prob-wrap">
           <div class="prob-label-row"><span id="prob-up-lbl">Up move 58%</span><span id="prob-dn-lbl">Down move 42%</span></div>
           <div class="prob-track">
-            <div class="prob-up" id="prob-up-bar" style="width:58%">58%</div>
-            <div class="prob-dn" id="prob-dn-bar" style="width:42%">42%</div>
+            <div class="prob-up w-58" id="prob-up-bar">58%</div>
+            <div class="prob-dn w-42" id="prob-dn-bar">42%</div>
           </div>
         </div>
       </div>
@@ -1142,25 +1156,25 @@
         <div class="setup-panel buy-panel">
           <div class="setup-title">▲ Long setup — Buy CE / Buy equity</div>
           <div class="setup-row"><span class="sr-lbl">ENTRY TRIGGER</span><span class="sr-val" id="buy-entry">—</span></div>
-          <div class="setup-row"><span class="sr-lbl">STOP LOSS</span><span class="sr-val" id="buy-sl" style="color:var(--red)">—</span></div>
+          <div class="setup-row"><span class="sr-lbl">STOP LOSS</span><span class="sr-val c-red" id="buy-sl">—</span></div>
           <div class="setup-row"><span class="sr-lbl">TARGET 1</span><span class="sr-val" id="buy-t1">—</span></div>
           <div class="setup-row"><span class="sr-lbl">TARGET 2</span><span class="sr-val" id="buy-t2">—</span></div>
-          <div class="setup-row"><span class="sr-lbl">RISK (SL %)</span><span class="sr-val" id="buy-risk" style="color:var(--red)">—</span></div>
+          <div class="setup-row"><span class="sr-lbl">RISK (SL %)</span><span class="sr-val c-red" id="buy-risk">—</span></div>
           <div class="setup-row"><span class="sr-lbl">R:R T1 / T2</span><span class="sr-val" id="buy-rr">—</span></div>
         </div>
         <div class="setup-panel sell-panel">
           <div class="setup-title">▼ Short setup — Buy PE</div>
           <div class="setup-row"><span class="sr-lbl">ENTRY TRIGGER</span><span class="sr-val" id="sell-entry">—</span></div>
-          <div class="setup-row"><span class="sr-lbl">STOP LOSS</span><span class="sr-val" id="sell-sl" style="color:var(--green)">—</span></div>
+          <div class="setup-row"><span class="sr-lbl">STOP LOSS</span><span class="sr-val c-green" id="sell-sl">—</span></div>
           <div class="setup-row"><span class="sr-lbl">TARGET 1</span><span class="sr-val" id="sell-t1">—</span></div>
           <div class="setup-row"><span class="sr-lbl">TARGET 2</span><span class="sr-val" id="sell-t2">—</span></div>
-          <div class="setup-row"><span class="sr-lbl">RISK (SL %)</span><span class="sr-val" id="sell-risk" style="color:var(--green)">—</span></div>
+          <div class="setup-row"><span class="sr-lbl">RISK (SL %)</span><span class="sr-val c-green" id="sell-risk">—</span></div>
           <div class="setup-row"><span class="sr-lbl">R:R T1 / T2</span><span class="sr-val" id="sell-rr">—</span></div>
         </div>
       </div>
 
       <div class="rules-panel">
-        <div class="sec-label" style="margin-top:0">Rules for today</div>
+        <div class="sec-label mt-0">Rules for today</div>
         <div id="plan-rules"></div>
       </div>
     </div>
