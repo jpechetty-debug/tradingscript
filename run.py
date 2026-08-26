@@ -137,12 +137,13 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
         while True:
             try:
                 _step()
+                time.sleep(args.watch * 60)
             except KeyboardInterrupt:
                 log.info("Watch mode stopped")
                 sys.exit(0)
             except Exception as e:
                 log.error("Scan error: %s", e, exc_info=args.debug)
-            time.sleep(args.watch * 60)
+                time.sleep(args.watch * 60)
     else:
         _step()
 

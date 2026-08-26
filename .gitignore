@@ -4,6 +4,8 @@ __pycache__/
 tmp/
 .backup/
 *.txt
+!requirements.txt
+!requirements-dev.txt
 *.zip
 *.log
 *.jsonl
