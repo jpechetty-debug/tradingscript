@@ -27,6 +27,7 @@ from typing import Callable
 
 from core.regime import RegimeTracker
 from core.runtime_components import create_runtime_components
+from core.scorer import TickerResult
 from core.services import PersistenceService
 from screener_v14_modular import (
     CONFIG,
@@ -98,8 +99,11 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
         current_nav_provider=_build_current_nav_provider(persistence),
     )
     regime_tracker = RegimeTracker()
+    last_portfolio: list[TickerResult] = []
+    last_trade_count: int = 0
 
     def _step() -> None:
+        nonlocal last_portfolio, last_trade_count
         results, portfolio, regime = run_scan(
             config=config,
             debug=args.debug,
@@ -114,9 +118,16 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
             _send_alert(portfolio, regime, config, services=services)
 
         # Feed completed trades into the calibrator buffer for live updates.
-        # In a real live environment, record actual closed trades here.
+        # Sourcing outcomes from the persistence layer's most recently closed trades.
         if components.calibrator:
-            pass  # placeholder — wire in broker PnL events here
+            trade_log = services.persistence.load_trade_log()
+            if len(trade_log) > last_trade_count:
+                for trade in trade_log[last_trade_count:]:
+                    factors = trade.get("factors")
+                    pnl = trade.get("pnl")
+                    if isinstance(factors, dict) and pnl is not None:
+                        components.calibrator.record_trade(factors, float(pnl))
+                last_trade_count = len(trade_log)
 
     if args.backtest:
         run_backtest(
@@ -134,16 +145,17 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
         run_calibration(services=services)
     elif args.watch:
         log.info("Watch mode — scanning every %d minutes", args.watch)
-        while True:
-            try:
-                _step()
+        try:
+            while True:
+                try:
+                    _step()
+                except Exception as e:
+                    log.error("Scan error: %s", e, exc_info=args.debug)
+
                 time.sleep(args.watch * 60)
-            except KeyboardInterrupt:
-                log.info("Watch mode stopped")
-                sys.exit(0)
-            except Exception as e:
-                log.error("Scan error: %s", e, exc_info=args.debug)
-                time.sleep(args.watch * 60)
+        except KeyboardInterrupt:
+            log.info("Watch mode stopped")
+            sys.exit(0)
     else:
         _step()
 

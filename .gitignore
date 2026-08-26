@@ -16,8 +16,9 @@ tmp/
 .mypy_cache/
 .vscode/
 .idea/
-.DS_Store
 .agent/
+!.agent/scripts/checklist.py
+.DS_Store
 scripts/test_yf_layout.py
 
 # Runtime directories

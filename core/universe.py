@@ -143,3 +143,19 @@ def fyers_to_yfi(symbol: str) -> str:
     if ":" not in symbol:
         return symbol
     return f"{symbol.split(':')[1].replace('-EQ', '')}.NS"
+
+
+def refresh_universe(source: str = "nse_csv") -> None:
+    """
+    Refresh the universe by downloading the latest indices constituents (e.g. NIFTY 500).
+    Dynamically rebuilds the SECTORS and ALL_TICKERS mappings.
+    This is a stub implementation meant to handle index reconstitutions.
+    """
+    import logging
+    log = logging.getLogger("sovereign.universe")
+    log.info(f"Refreshing universe from source: {source}")
+
+    # In a real implementation, this would fetch from NSE website or a data provider,
+    # parse the CSV, map industries to internal SECTORS, and update the globals.
+    # We will log a warning indicating it relies on the hardcoded fallback for now.
+    log.warning("Dynamic universe refresh not fully implemented; using hardcoded lists.")

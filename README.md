@@ -2,7 +2,7 @@
 
 [![Security Scan](https://img.shields.io/badge/Security-Verified-success?style=flat-square)](#)
 [![Lint Compliance](https://img.shields.io/badge/Lint-Strict.Ruff-blue?style=flat-square)](#)
-[![Test Suite](https://img.shields.io/badge/Tests-459%20Passed-success?style=flat-square)](#)
+[![CI Tests](https://github.com/Tradeidesa/grclaudescript/actions/workflows/ci.yml/badge.svg)](https://github.com/Tradeidesa/grclaudescript/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/Version-14.6--Modular-indigo?style=flat-square)](#)
 
 **Institutional-Grade Quantitative Trading Intelligence for NSE India.**
