@@ -136,7 +136,7 @@ def _supertrend_vectorised(
     final_upper = np.ascontiguousarray((hl2 + mult * atr).values, dtype=np.float64)
     final_lower = np.ascontiguousarray((hl2 - mult * atr).values, dtype=np.float64)
 
-    return _supertrend_inner_loop(close, final_upper, final_lower, n)
+    return _supertrend_inner_loop(close, final_upper, final_lower, n)  # type: ignore[no-any-return]
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

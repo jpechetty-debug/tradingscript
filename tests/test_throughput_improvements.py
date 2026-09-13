@@ -11,11 +11,10 @@ Unit tests for suggestion throughput improvements (Phase 1):
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from core.config import SystemConfig, MarketRegimeType
 from core.regime import MarketRegime
-from core.scorer import score_ticker, TickerResult
+from core.scorer import score_ticker
 from core.services import passes_static_filters
 
 

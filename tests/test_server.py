@@ -132,3 +132,59 @@ def test_get_trades(client: TestClient) -> None:
     res_valid = client.get("/api/trades?limit=50")
     assert res_valid.status_code == 200
 
+
+def test_format_ticker_result_preserves_engine_swing_horizon_with_tight_stop() -> None:
+    from unittest.mock import MagicMock
+    from server import _format_ticker_result
+    from core.scorer import TickerResult
+
+    res = MagicMock(spec=TickerResult)
+    res.direction = "LONG"
+    res.entry = 1000.0
+    res.stop = 985.0  # 1.5% stop (< 2.5%)
+    res.t1 = 1050.0
+    res.reasons = []
+    res.trade_horizon = "SWING"
+    res.__dict__ = {
+        "direction": "LONG",
+        "entry": 1000.0,
+        "stop": 985.0,
+        "t1": 1050.0,
+        "trade_horizon": "SWING",
+    }
+    formatted = _format_ticker_result(res)
+    assert formatted["trade_horizon"] == "SWING"
+    assert formatted["horizon_label"] == "SWING (CNC)"
+
+
+def test_enrich_preserves_persisted_swing_horizon_with_tight_stop(tmp_path: pytest.TempPathFactory) -> None:
+    import json
+    from pathlib import Path
+    from unittest.mock import MagicMock
+
+    target_dir = Path(str(tmp_path)) / "state"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    scan_file = target_dir / "latest_scan.json"
+    scan_data = {
+        "scan_time": "2026-09-13T00:00:00Z",
+        "candidates": [{
+            "direction": "LONG",
+            "entry": 1000.0,
+            "stop": 985.0,  # 1.5% stop (< 2.5%)
+            "t1": 1050.0,
+            "reasons": [],
+            "trade_horizon": "SWING",
+        }],
+        "portfolio": [],
+    }
+    scan_file.write_text(json.dumps(scan_data), encoding="utf-8")
+
+    mock_persistence = MagicMock()
+    mock_persistence.paths.state_dir = target_dir
+
+    STATE.load_persisted_state(mock_persistence)
+    assert len(STATE.last_candidates) == 1
+    assert STATE.last_candidates[0]["trade_horizon"] == "SWING"
+    assert STATE.last_candidates[0]["horizon_label"] == "SWING (CNC)"
+
+

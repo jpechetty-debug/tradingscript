@@ -14,7 +14,6 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
-import pytest
 
 # Stub heavy/optional dependencies
 def _stub_modules() -> None:
@@ -39,7 +38,7 @@ from core.factors import (
     get_regime_factor_weights,
 )
 from core.portfolio import compute_targets
-from core.scorer import score_ticker, TickerResult
+from core.scorer import score_ticker
 from core.regime import MarketRegime, MarketRegimeType
 
 

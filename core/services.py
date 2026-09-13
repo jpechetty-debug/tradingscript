@@ -398,7 +398,7 @@ class ScanOutput(tuple):
         portfolio: list[TickerResult],
         regime: Optional[MarketRegime],
         sector_rs: Optional[dict[str, float]] = None,
-    ):
+    ) -> ScanOutput:
         instance = super().__new__(cls, (candidates, portfolio, regime))
         instance.candidates = candidates
         instance.portfolio = portfolio

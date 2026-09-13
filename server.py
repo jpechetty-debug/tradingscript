@@ -22,7 +22,7 @@ import os
 from pathlib import Path
 import sys
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Security
@@ -55,7 +55,7 @@ if not API_KEY:
     else:
         API_KEY = None
 
-def verify_api_key(api_key: str = Security(api_key_header)):
+def verify_api_key(api_key: str = Security(api_key_header)) -> None:
     if not API_KEY or not api_key or api_key != API_KEY:
         raise HTTPException(
             status_code=401,
@@ -69,7 +69,7 @@ limiter = Limiter(key_func=get_remote_address)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Validate server security config and trigger initial non-blocking market scan."""
     is_testing = bool(os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules)
     if not API_KEY and not is_testing:
@@ -201,12 +201,18 @@ class EngineState:
                         t1_dist = abs(new_t1 - entry)
                         t1_pct = (t1_dist / entry * 100) if entry > 0 else 2.8
 
-                    if dirn == "SHORT" or sl_pct < 2.5 or (is_mean_rev and sl_pct < 3.0):
-                        d["trade_horizon"] = "INTRADAY"
-                        d["horizon_label"] = "INTRADAY (MIS)"
+                    engine_horizon = d.get("trade_horizon")
+                    if dirn == "SHORT":
+                        horizon = "INTRADAY"
+                    elif engine_horizon in ("INTRADAY", "SWING"):
+                        horizon = engine_horizon
+                    elif sl_pct < 2.5 or (is_mean_rev and sl_pct < 3.0):
+                        horizon = "INTRADAY"
                     else:
-                        d["trade_horizon"] = "SWING"
-                        d["horizon_label"] = "SWING (CNC)"
+                        horizon = "SWING"
+
+                    d["trade_horizon"] = horizon
+                    d["horizon_label"] = "INTRADAY (MIS)" if horizon == "INTRADAY" else "SWING (CNC)"
                     d["stop_pct"] = round(sl_pct, 2)
                     d["target_pct"] = round(t1_pct, 2)
                     return d
@@ -551,7 +557,7 @@ async def sse_events(
     """
     queue = await BROADCASTER.subscribe()
 
-    async def event_generator():
+    async def event_generator() -> AsyncGenerator[str, None]:
         yielded_count = 0
         # Emit initial state snapshot upon connection
         initial_payload = {

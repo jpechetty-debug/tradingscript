@@ -23,7 +23,7 @@ import argparse
 import logging
 import sys
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from core.regime import RegimeTracker
 from core.runtime_components import create_runtime_components
@@ -129,10 +129,10 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
             from datetime import datetime, timezone
             target = services.persistence.paths.state_dir / "latest_scan.json"
             target.parent.mkdir(parents=True, exist_ok=True)
-            def _fmt(r):
-                d = r.__dict__.copy()
+            def _fmt(r: Any) -> dict[str, Any]:
+                d: dict[str, Any] = dict(r.__dict__)
                 if hasattr(r, "factors") and r.factors is not None:
-                    d["factors"] = r.factors.__dict__.copy()
+                    d["factors"] = dict(r.factors.__dict__)
                 dirn = d.get("direction", "LONG")
                 d["action"] = "BUY" if dirn == "LONG" else "SELL"
                 entry = float(d.get("entry") or 0.0)
@@ -143,12 +143,19 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
                 t1_dist = abs(t1 - entry) if (entry and t1) else 0.0
                 t1_pct = (t1_dist / entry * 100) if entry > 0 else 10.0
                 is_mean_rev = any("MeanRev" in str(x) for x in d.get("reasons", []))
-                if dirn == "SHORT" or sl_pct < 2.5 or (is_mean_rev and sl_pct < 3.0):
-                    d["trade_horizon"] = "INTRADAY"
-                    d["horizon_label"] = "INTRADAY (MIS)"
+
+                engine_horizon = d.get("trade_horizon")
+                if dirn == "SHORT":
+                    horizon = "INTRADAY"
+                elif engine_horizon in ("INTRADAY", "SWING"):
+                    horizon = engine_horizon
+                elif sl_pct < 2.5 or (is_mean_rev and sl_pct < 3.0):
+                    horizon = "INTRADAY"
                 else:
-                    d["trade_horizon"] = "SWING"
-                    d["horizon_label"] = "SWING (CNC)"
+                    horizon = "SWING"
+
+                d["trade_horizon"] = horizon
+                d["horizon_label"] = "INTRADAY (MIS)" if horizon == "INTRADAY" else "SWING (CNC)"
                 d["stop_pct"] = round(sl_pct, 2)
                 d["target_pct"] = round(t1_pct, 2)
                 return d

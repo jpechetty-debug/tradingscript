@@ -14,7 +14,6 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
-import pytest
 
 # Stub heavy/optional dependencies
 def _stub_modules() -> None:

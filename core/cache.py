@@ -257,7 +257,7 @@ class TieredMarketDataCache:
         url = redis_url or os.environ.get("REDIS_URL")
         if url:
             try:
-                import redis
+                import redis  # type: ignore[import-untyped]
                 client = redis.Redis.from_url(url, socket_timeout=2.0, decode_responses=False)
                 client.ping()
                 self._redis_client = client
