@@ -13,6 +13,7 @@ Public API:
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
@@ -21,8 +22,8 @@ import numpy as np
 import pandas as pd
 from scipy.special import expit as _sigmoid
 
-from .config import SystemConfig
-from .factors import FactorScores, compute_factors, true_volume_profile
+from .config import SystemConfig, IST
+from .factors import FactorScores, compute_factors, true_volume_profile, get_regime_factor_weights
 from .portfolio import compute_targets, calculate_kelly_size
 from .regime import MarketRegime, MarketRegimeType, compute_rs
 from .universe import TICKER_TO_SECTOR, N_SECTORS
@@ -95,8 +96,13 @@ class TickerResult:
     regime:  str
     session: str
 
+    # Trade horizon & action (v14.2)
+    trade_horizon: str = "SWING"   # "INTRADAY" | "SWING"
+    action:        str = ""        # "BUY" | "SELL"
+
     # Human-readable signal reasons
     reasons: list[str] = field(default_factory=list)
+    is_watchlist: bool = False
 
     def display_score(self) -> int:
         return int(self.composite * 100)
@@ -293,6 +299,8 @@ def score_ticker(
     capital_fraction: float = 1.0,
     debug:        bool = False,
     force_score:  bool = False,
+    allow_watchlist: bool = False,
+    now:          Optional[datetime] = None,
 ) -> Optional[TickerResult]:
     """
     Full ticker evaluation pipeline. Returns None if the ticker does not
@@ -311,6 +319,8 @@ def score_ticker(
         mtf_60m:        Optional dict from fetch_60m_single()
         factor_weights: IC-calibrated weights — falls back to equal 1/7
         debug:          Print rejection reason to stdout
+        force_score:    Bypass direction and regime gates
+        allow_watchlist:Return watchlist tier candidates below MIN_PROB_WIN
 
     Returns:
         TickerResult or None
@@ -343,14 +353,21 @@ def score_ticker(
     # ── 2. Direction ─────────────────────────────────────────────────────────
     live_price  = intraday.get("live_price", 0.0)
     close       = live_price if live_price > 0 else float(row["Close"])
+    has_intraday_vwap = "above_vwap" in intraday
     above_vwap  = intraday.get("above_vwap", close > float(row["EMA_20"]))
 
     super_up = bool(row["Super_Up"])
     ema20    = float(row["EMA_20"])
     ema200   = float(row["EMA_200"])
 
-    is_bull = super_up and close > ema20 and above_vwap
-    is_bear = (not super_up) and close < ema20 and (not above_vwap)
+    if has_intraday_vwap:
+        bull_signals = (1 if super_up else 0) + (1 if close > ema20 else 0) + (1 if above_vwap else 0)
+        bear_signals = (1 if not super_up else 0) + (1 if close < ema20 else 0) + (1 if not above_vwap else 0)
+        is_bull = bull_signals >= 2
+        is_bear = bear_signals >= 2
+    else:
+        is_bull = super_up and close > ema20
+        is_bear = (not super_up) and close < ema20
 
     if force_score:
         direction = "LONG"
@@ -363,14 +380,26 @@ def score_ticker(
 
     # ── 3. Regime gate ───────────────────────────────────────────────────────
     if not force_score:
-        if direction == "LONG"  and not regime.allows_long():
-            if debug:
-                log.debug("%s: regime blocks LONG (%s)", ticker, regime.regime)
-            return None
-        if direction == "SHORT" and not regime.allows_short():
-            if debug:
-                log.debug("%s: regime blocks SHORT (%s)", ticker, regime.regime)
-            return None
+        if direction == "LONG":
+            if not regime.allows_long():
+                # In confirmed RANGE, allow mean-reversion LONG if setup is not overbought
+                rsi_val = float(row.get("RSI", 50))
+                if regime.allows_mean_reversion() and rsi_val <= 55:
+                    pass
+                else:
+                    if debug:
+                        log.debug("%s: regime blocks LONG (%s)", ticker, regime.regime)
+                    return None
+        if direction == "SHORT":
+            if not regime.allows_short():
+                # In confirmed RANGE, allow mean-reversion SHORT if setup is not oversold
+                rsi_val = float(row.get("RSI", 50))
+                if regime.allows_mean_reversion() and rsi_val >= 45:
+                    pass
+                else:
+                    if debug:
+                        log.debug("%s: regime blocks SHORT (%s)", ticker, regime.regime)
+                    return None
 
     # ── 4. EMA-200 structural filter ─────────────────────────────────────────
     if config.USE_EMA200_FILTER:
@@ -384,7 +413,37 @@ def score_ticker(
                 log.debug("%s: EMA-200 VETO (SHORT above 200)", ticker)
             return None
 
-    # ── 5. Factor model ──────────────────────────────────────────────────────
+    # ── 5a. Trade horizon classification & Cutoff Gate ───────────────────────
+    # In Indian cash equity markets, SHORT is strictly INTRADAY (MIS auto-square-off by 15:15)
+    # when SHORT_IS_INTRADAY_ONLY is True.
+    # For LONGs: OPENING_RANGE or low ADX is INTRADAY scalp; otherwise SWING hold
+    adx_now = float(row.get("ADX", 0) or 0)
+    short_intraday = getattr(config, "SHORT_IS_INTRADAY_ONLY", True)
+    if direction == "SHORT" and short_intraday:
+        trade_horizon = "INTRADAY"
+    elif session == "OPENING_RANGE" or (adx_now < 20 and session != "CLOSING_TREND"):
+        trade_horizon = "INTRADAY"
+    else:
+        trade_horizon = "SWING"
+
+    # Intraday Hard Entry Freeze: Veto new MIS entries past INTRADAY_ENTRY_CUTOFF (14:30)
+    # because broker auto-square-off occurs at 15:15 (less than 45 min runway)
+    if trade_horizon == "INTRADAY" and not force_score:
+        current_dt = now.astimezone(IST) if now is not None else datetime.now(IST)
+        current_time = current_dt.time()
+        cutoff_time_str = getattr(config, "INTRADAY_ENTRY_CUTOFF", "14:30")
+        t_cutoff = datetime.strptime(cutoff_time_str, "%H:%M").time()
+        if session == "CLOSING_TREND" and current_time >= t_cutoff:
+            if debug:
+                log.debug("%s: INTRADAY_CUTOFF veto (time %s >= cutoff %s)", ticker, current_time, t_cutoff)
+            return None
+
+    # ── 5b. Regime-conditional weights (fallback when IC not calibrated) ──────
+    effective_weights = factor_weights
+    if not effective_weights:
+        effective_weights = get_regime_factor_weights(regime.label)
+
+    # ── 5c. Factor model ─────────────────────────────────────────────────────
     sector = TICKER_TO_SECTOR.get(ticker, "")
     factors = compute_factors(
         ticker=ticker,
@@ -396,7 +455,7 @@ def score_ticker(
         close=close,
         row=row,
         n_sectors=N_SECTORS,
-        weights=factor_weights,
+        weights=effective_weights,
         intraday=intraday,
         mtf_60m=mtf_60m,
         vprofile_lookback=config.VPROFILE_LOOKBACK,
@@ -424,10 +483,10 @@ def score_ticker(
         bins=config.VPROFILE_BINS,
     )
 
-    targets = compute_targets(direction, close, atr, config)
+    targets = compute_targets(direction, close, atr, config, trade_horizon=trade_horizon)
 
-    # Use value-area T1 if RR qualifies
-    if config.USE_VALUE_AREA_RR:
+    # Use value-area T1 if RR qualifies (only for SWING trades; INTRADAY preserves tight ATR targets)
+    if config.USE_VALUE_AREA_RR and trade_horizon != "INTRADAY":
         sl_dist = config.STOP_ATR_MULT * atr
         if direction == "LONG":
             rr_va = (vah - close) / sl_dist if sl_dist > 0 else 0
@@ -451,11 +510,25 @@ def score_ticker(
     exp_r = round(prob_win * targets.rr - (1 - prob_win) * 1.0, 3)
 
     # ── 9. Probability & expectancy gates ────────────────────────────────────
-    if prob_win < config.MIN_PROB_WIN:
-        if debug:
-            log.debug("%s: prob %.2f < gate %.2f", ticker, prob_win, config.MIN_PROB_WIN)
-        return None
-    if exp_r < config.MIN_EXPECTANCY_R:
+    min_prob = config.MIN_PROB_WIN
+
+    # Midday Chop Gate (10:30–13:30): Require higher hurdle (0.55) for directional breakouts
+    # to protect against false breakouts, while allowing mean-reversion pullbacks
+    if session == "MIDDAY_CHOP" and not regime.allows_mean_reversion():
+        midday_hurdle = getattr(config, "MIDDAY_BREAKOUT_MIN_PROB", 0.55)
+        min_prob = max(min_prob, midday_hurdle)
+
+    watchlist_floor = getattr(config, "WATCHLIST_MIN_PROB", 0.45)
+    is_watchlist = False
+
+    if prob_win < min_prob:
+        if allow_watchlist and prob_win >= watchlist_floor and exp_r >= 0.0:
+            is_watchlist = True
+        else:
+            if debug:
+                log.debug("%s: prob %.2f < gate %.2f", ticker, prob_win, min_prob)
+            return None
+    if exp_r < config.MIN_EXPECTANCY_R and not is_watchlist:
         if debug:
             log.debug("%s: E(R) %.3f < gate %.3f", ticker, exp_r, config.MIN_EXPECTANCY_R)
         return None
@@ -533,6 +606,10 @@ def score_ticker(
         reasons.append(f"ADX{adx:.0f}")
     if mtf_full:
         reasons.append("MTF✅")
+    if regime.allows_mean_reversion():
+        reasons.append("MeanRev✅")
+    if is_watchlist:
+        reasons.append("Watchlist")
     reasons.append(f"Regime:{regime.label}")
     reasons.append(f"RR:{targets.rr:.1f}x")
     reasons.append(f"Kurt:k={excess_kurt:.1f}->{kurt_corr:.0%}Kelly")
@@ -586,5 +663,8 @@ def score_ticker(
         vah=round(vah, 2),
         regime=regime.label,
         session=session,
+        trade_horizon=trade_horizon,
+        action="BUY" if direction == "LONG" else "SELL",
         reasons=reasons,
+        is_watchlist=is_watchlist,
     )

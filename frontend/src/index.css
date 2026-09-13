@@ -1,0 +1,436 @@
+:root {
+  --bg: #090b0e;
+  --surface: #101317;
+  --surface2: #161b22;
+  --surface3: #1c222b;
+  --surface-hover: #222934;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-active: rgba(255, 255, 255, 0.18);
+  --border-focus: #00e676;
+
+  /* Strict Institutional Palette (Teal / Cyan / Emerald / Amber / Red) */
+  --green: #00e676;
+  --green-dim: rgba(0, 230, 118, 0.12);
+  --green-border: rgba(0, 230, 118, 0.3);
+  --green-glow: 0 0 12px rgba(0, 230, 118, 0.3);
+
+  --red: #ff334b;
+  --red-dim: rgba(255, 51, 75, 0.12);
+  --red-border: rgba(255, 51, 75, 0.3);
+
+  --amber: #ffb300;
+  --amber-dim: rgba(255, 179, 0, 0.12);
+  --amber-border: rgba(255, 179, 0, 0.3);
+
+  --cyan: #00d2ff;
+  --cyan-dim: rgba(0, 210, 255, 0.12);
+  --cyan-border: rgba(0, 210, 255, 0.3);
+
+  --text-main: #f0f3f6;
+  --text-muted: #8b949e;
+  --text-faint: #484f58;
+
+  --mono: 'Space Mono', 'JetBrains Mono', monospace;
+  --sans: 'Syne', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text-main);
+  font-family: var(--sans);
+  min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  background-image: 
+    radial-gradient(ellipse at 50% -20%, rgba(0, 210, 255, 0.05) 0%, transparent 60%),
+    radial-gradient(ellipse at 80% 90%, rgba(0, 230, 118, 0.03) 0%, transparent 50%);
+}
+
+/* Subtle scanline overlay */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.04) 3px, rgba(0,0,0,0.04) 6px);
+  pointer-events: none;
+  z-index: 9999;
+}
+
+.dashboard-container {
+  max-width: 1380px;
+  margin: 0 auto;
+  padding: 24px 32px 80px;
+}
+
+/* Typography utilities */
+.mono {
+  font-family: var(--mono);
+}
+
+/* Card components */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 20px;
+  transition: var(--transition);
+  position: relative;
+  overflow: hidden;
+}
+
+.card:hover {
+  border-color: var(--border-active);
+}
+
+/* Metric Pill */
+.metric-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.metric-pill.green {
+  background: var(--green-dim);
+  color: var(--green);
+  border: 1px solid var(--green-border);
+}
+
+.metric-pill.cyan {
+  background: var(--cyan-dim);
+  color: var(--cyan);
+  border: 1px solid var(--cyan-border);
+}
+
+.metric-pill.amber {
+  background: var(--amber-dim);
+  color: var(--amber);
+  border: 1px solid var(--amber-border);
+}
+
+.metric-pill.red {
+  background: var(--red-dim);
+  color: var(--red);
+  border: 1px solid var(--red-border);
+}
+
+/* Interactive Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text-main);
+  transition: var(--transition);
+}
+
+.btn:hover {
+  background: var(--surface3);
+  border-color: var(--border-active);
+}
+
+.btn.primary {
+  background: var(--green);
+  color: #000;
+  border-color: var(--green);
+}
+
+.btn.primary:hover {
+  box-shadow: var(--green-glow);
+  filter: brightness(1.1);
+}
+
+.btn.danger {
+  background: var(--red-dim);
+  color: var(--red);
+  border-color: var(--red-border);
+}
+
+.btn.danger:hover {
+  background: var(--red);
+  color: #fff;
+}
+
+/* Tables */
+.table-container {
+  overflow-x: auto;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 13px;
+}
+
+th {
+  background: var(--surface2);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+td {
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  white-space: nowrap;
+}
+
+tr:last-child td {
+  border-bottom: none;
+}
+
+tr:hover td {
+  background: var(--surface-hover);
+}
+
+/* Badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  transition: var(--transition);
+}
+
+/* Explicit Action Badges (BUY / SELL) */
+.badge-action-buy {
+  background: linear-gradient(135deg, rgba(0, 230, 118, 0.22) 0%, rgba(0, 200, 83, 0.12) 100%);
+  color: #00e676;
+  border: 1px solid rgba(0, 230, 118, 0.45);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 4px 10px;
+  border-radius: 5px;
+  box-shadow: 0 0 10px rgba(0, 230, 118, 0.15);
+}
+
+.badge-action-buy:hover {
+  box-shadow: 0 0 14px rgba(0, 230, 118, 0.35);
+  border-color: #00e676;
+}
+
+.badge-action-sell {
+  background: linear-gradient(135deg, rgba(255, 51, 75, 0.22) 0%, rgba(213, 0, 0, 0.12) 100%);
+  color: #ff334b;
+  border: 1px solid rgba(255, 51, 75, 0.45);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 4px 10px;
+  border-radius: 5px;
+  box-shadow: 0 0 10px rgba(255, 51, 75, 0.15);
+}
+
+.badge-action-sell:hover {
+  box-shadow: 0 0 14px rgba(255, 51, 75, 0.35);
+  border-color: #ff334b;
+}
+
+/* Trade Horizon Badges (SWING vs INTRADAY) */
+.badge-horizon-swing {
+  background: rgba(0, 210, 255, 0.12);
+  color: var(--cyan);
+  border: 1px solid rgba(0, 210, 255, 0.35);
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+
+.badge-horizon-intraday {
+  background: rgba(255, 179, 0, 0.12);
+  color: var(--amber);
+  border: 1px solid rgba(255, 179, 0, 0.35);
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+
+.badge-long {
+  background: var(--green-dim);
+  color: var(--green);
+  border: 1px solid var(--green-border);
+}
+
+.badge-short {
+  background: var(--red-dim);
+  color: var(--red);
+  border: 1px solid var(--red-border);
+}
+
+.badge-watchlist {
+  background: var(--amber-dim);
+  color: var(--amber);
+  border: 1px solid var(--amber-border);
+}
+
+.badge-primary {
+  background: var(--cyan-dim);
+  color: var(--cyan);
+  border: 1px solid var(--cyan-border);
+}
+
+.badge-meanrev {
+  background: rgba(0, 210, 255, 0.12);
+  color: var(--cyan);
+  border: 1px solid var(--cyan-border);
+}
+
+.badge-tag {
+  background: var(--surface3);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+/* Percentage and Delta Indicators */
+.pct-pill-green {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--green);
+  background: rgba(0, 230, 118, 0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 4px;
+}
+
+.pct-pill-red {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--red);
+  background: rgba(255, 51, 75, 0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 4px;
+}
+
+/* Filter Controls */
+.filter-btn-group {
+  display: inline-flex;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  gap: 2px;
+}
+
+.filter-pill-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.filter-pill-btn:hover {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.filter-pill-btn.active {
+  background: var(--surface3);
+  color: var(--text-main);
+  border: 1px solid var(--border-active);
+}
+
+.filter-pill-btn.active-buy {
+  background: var(--green-dim);
+  color: var(--green);
+  border: 1px solid var(--green-border);
+}
+
+.filter-pill-btn.active-sell {
+  background: var(--red-dim);
+  color: var(--red);
+  border: 1px solid var(--red-border);
+}
+
+/* Modal Backdrop */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  padding: 20px;
+}
+
+.modal-content {
+  background: var(--surface);
+  border: 1px solid var(--border-active);
+  border-radius: var(--radius-lg);
+  max-width: 500px;
+  width: 100%;
+  padding: 24px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+}
+
+/* Form inputs */
+input, select {
+  width: 100%;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-main);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 13px;
+  margin-top: 8px;
+  outline: none;
+  transition: var(--transition);
+}
+
+input:focus, select:focus {
+  border-color: var(--green);
+  box-shadow: 0 0 0 1px var(--green);
+}

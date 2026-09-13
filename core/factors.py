@@ -201,7 +201,18 @@ def factor_momentum(
             break
 
     if direction == "LONG":
-        m = (0.30 * (1 if 48 <= rsi <= 73 else (0.2 if rsi > 73 else 0.1 if rsi < 40 else 0))
+        # RSI scoring: ideal zone 48-73, bull pullback zone 42-48 scores 0.85
+        if 48 <= rsi <= 73:
+            rsi_score = 1.0
+        elif 42 <= rsi < 48:  # bull pullback dip — high-quality entry zone
+            rsi_score = 0.85
+        elif rsi > 73:
+            rsi_score = 0.2   # overbought
+        elif rsi < 40:
+            rsi_score = 0.1
+        else:
+            rsi_score = 0.0
+        m = (0.30 * rsi_score
            + 0.25 * (1 if mh > 0 and macc else (0.5 if mh > 0 else 0))
            + 0.15 * (1 if 20 < sk < 80 else (-0.3 if sk > 90 else 0))
            + 0.20 * (1 if adx >= 25 else (0.5 if adx >= 20 else 0))
@@ -240,11 +251,23 @@ def factor_volume(
     rvol  = vol_today / vol_avg if vol_avg > 0 else 1.0
     atr   = float(row["ATR"])
 
+    # VCP detection: low volume + contracting ATR = absorption / consolidation
+    atr50m_raw = row.get("ATR_50_mean", None)
+    atr50m = float(atr50m_raw) if atr50m_raw is not None and not pd.isna(atr50m_raw) else atr
+    atr_contracting = (atr < 0.85 * atr50m) if atr50m > 0 else False
+    is_vcp = (rvol < 0.80) and atr_contracting
+
     poc, val, vah = true_volume_profile(daily_df, lookback=vprofile_lookback, bins=vprofile_bins)
     poc_ok = (close > poc - 0.3 * atr) if direction == "LONG" else (close < poc + 0.3 * atr)
     va_ok  = (close > val)              if direction == "LONG" else (close < vah)
-    rvol_s = min(1.0, (rvol - 1.0) / 1.0) if rvol >= 1.0 else 0.0
     turn_r = float(row["Turnover_Avg_20"]) / adv_turnover_floor
+
+    if is_vcp:
+        # Low-volume coil during ATR contraction: award consolidation score
+        # (0.40 base + location bonus) — better than zeroing out for low RVOL
+        rvol_s = 0.40
+    else:
+        rvol_s = min(1.0, (rvol - 1.0) / 1.0) if rvol >= 1.0 else 0.0
 
     v = (rvol_s * 0.55
          + (0.25 if poc_ok else 0)
@@ -351,13 +374,12 @@ def factor_breakout(
     near_52w_max_dist_pct: float = 8.0,
 ) -> float:
     """
-    Breakout factor [0, 1].
+    Breakout factor [0, 1] — direction-aware, no SHORT penalty.
 
-    65% — Proximity to 52-week high (for LONG; inverse for SHORT)
-    35% — Bollinger Band Width contraction (narrow = coiling)
+    LONG (65%): Proximity to 52-week high — near highs scores 1.0.
+    SHORT (65%): Proximity to 52-week low / 20-day breakdown — near lows scores 1.0.
+    Both (35%): Bollinger Band Width contraction (narrow = coiling for breakout).
     """
-    h52  = float(daily_df["High"].max())
-    dist = ((h52 - close) / h52 * 100) if h52 > 0 else 100.0
     bw   = float(row.get("BB_Width", 0.05) or 0.05)
 
     bwavg = 0.0
@@ -368,9 +390,17 @@ def factor_breakout(
     narrow = (bw < bwavg * 0.85) if bwavg > 0 else False
 
     if direction == "LONG":
+        h52  = float(daily_df["High"].max())
+        dist = ((h52 - close) / h52 * 100) if h52 > 0 else 100.0
         ds = max(0.0, 1.0 - dist / near_52w_max_dist_pct)
     else:
-        ds = 0.5  # short setups don't benefit from 52w high proximity
+        # SHORT: measure distance FROM 52-week low — near lows = high breakdown score
+        l52 = float(daily_df["Low"].min())
+        lo20 = float(daily_df["Low"].tail(20).min())
+        low_ref = max(l52, lo20)  # use the nearer of the two breakdown levels
+        dist_from_low = ((close - low_ref) / close * 100) if close > 0 else 100.0
+        # Score 1.0 when within near_52w_max_dist_pct of the breakdown level
+        ds = max(0.0, 1.0 - dist_from_low / near_52w_max_dist_pct)
 
     bo = ds * 0.65 + (0.35 if narrow else 0.0)
     return float(np.clip(bo, 0.0, 1.0))
@@ -380,32 +410,46 @@ def factor_quality(
     daily_df: pd.DataFrame,
     row: pd.Series,
     close: float,
+    direction: str = "LONG",
 ) -> float:
     """
-    Price-momentum quality factor [0, 1] — Fix C from v12.
+    Price-momentum quality factor [0, 1] — direction-aware (v14.2).
 
-    Replaces the dead liquidity-only quality factor. Three components
-    with genuine cross-sectional spread among liquid stocks:
+    For LONG: rewards positive 63d momentum and up-day persistence.
+    For SHORT: rewards negative 63d momentum and down-day persistence,
+               eliminating the systematic SHORT penalty in the original.
 
-    50% — 63-day log momentum ([-10%, +10%] mapped to [0, 1])
-    30% — Directional persistence (close > open win-rate, last 20 bars)
-    20% — ATR expansion vs 50d mean (breakout readiness)
+    50% — 63-day log momentum (direction-adjusted, [-10%, +10%] -> [0, 1])
+    30% — Directional persistence (up-days for LONG, down-days for SHORT)
+    20% — ATR expansion vs 50d mean (breakout/breakdown readiness)
     """
-    # (a) 63d momentum
+    # (a) 63d momentum — direction-aware
     if len(daily_df) >= 64:
         c63 = float(daily_df["Close"].iloc[-64])
         mom63 = np.log(close / c63) if c63 > 0 else 0.0
-        mom_score = min(1.0, max(0.0, (mom63 + 0.10) / 0.20))
+        if direction == "LONG":
+            # Positive momentum rewards LONG quality
+            mom_score = min(1.0, max(0.0, (mom63 + 0.10) / 0.20))
+        else:
+            # Negative momentum rewards SHORT quality (invert sign)
+            mom_score = min(1.0, max(0.0, (-mom63 + 0.10) / 0.20))
     else:
         mom_score = 0.5
 
-    # (b) Directional persistence
-    up_days = (daily_df["Up_Day"].tail(20)
-               if "Up_Day" in daily_df.columns
-               else pd.Series([0.5] * 20))
-    persist = float(up_days.mean())
+    # (b) Directional persistence — use down-days for SHORT
+    if direction == "LONG":
+        day_col = "Up_Day"
+        fallback = pd.Series([0.5] * 20)
+    else:
+        day_col = "Dn_Day"
+        fallback = pd.Series([0.5] * 20)
 
-    # (c) ATR expansion
+    day_series = (daily_df[day_col].tail(20)
+                  if day_col in daily_df.columns
+                  else fallback)
+    persist = float(day_series.mean())
+
+    # (c) ATR expansion vs 50d mean (breakout readiness)
     atr    = float(row.get("ATR", 1.0) or 1.0)
     atr50m = float(row.get("ATR_50_mean", atr) or atr)
     atr_exp = min(1.0, max(0.0, (atr / atr50m - 0.8) / 0.8)) if atr50m > 0 else 0.5
@@ -415,7 +459,7 @@ def factor_quality(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# COMPOSITE ASSEMBLER
+# REGIME-CONDITIONAL FACTOR WEIGHTS
 # ─────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_WEIGHTS: dict[str, float] = {
@@ -427,6 +471,75 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "breakout":   1 / 7,
     "quality":    1 / 7,
 }
+
+# Regime-specific weights (sum to 1.0) — calibrated for each market state.
+# TREND_UP:   Emphasise trend continuity, momentum, RS leadership.
+# RANGE:      Emphasise mean-reversion squeeze, volume profile positioning.
+# TREND_DOWN: Emphasise breakdown proximity, RS weakness, negative momentum.
+_REGIME_WEIGHTS: dict[str, dict[str, float]] = {
+    "TREND_UP": {
+        "trend":      0.22,
+        "momentum":   0.22,
+        "rs":         0.22,
+        "breakout":   0.14,
+        "volume":     0.10,
+        "volatility": 0.05,
+        "quality":    0.05,
+    },
+    "RANGE": {
+        "volatility": 0.25,
+        "volume":     0.25,
+        "momentum":   0.20,
+        "quality":    0.15,
+        "trend":      0.05,
+        "rs":         0.05,
+        "breakout":   0.05,
+    },
+    "TREND_DOWN": {
+        "trend":      0.25,
+        "rs":         0.25,
+        "breakout":   0.20,
+        "momentum":   0.15,
+        "volume":     0.08,
+        "volatility": 0.04,
+        "quality":    0.03,
+    },
+    "EXPANSION": {
+        "breakout":   0.25,
+        "momentum":   0.25,
+        "volume":     0.20,
+        "trend":      0.15,
+        "rs":         0.10,
+        "volatility": 0.03,
+        "quality":    0.02,
+    },
+    "PANIC": {
+        "volatility": 0.30,
+        "momentum":   0.25,
+        "rs":         0.20,
+        "trend":      0.10,
+        "volume":     0.08,
+        "quality":    0.04,
+        "breakout":   0.03,
+    },
+}
+
+
+def get_regime_factor_weights(regime: str) -> dict[str, float]:
+    """
+    Return regime-optimal factor weights.
+
+    Falls back to equal (1/7) weights for unknown regime labels.
+    These weights are applied when IC calibration has insufficient data
+    (< ICIR_MIN_OBS observations) or when called explicitly from scorer.
+
+    Args:
+        regime: Regime label string — e.g. "TREND_UP", "RANGE", "PANIC".
+
+    Returns:
+        dict mapping factor name -> weight (sums to ~1.0).
+    """
+    return _REGIME_WEIGHTS.get(regime, DEFAULT_WEIGHTS)
 
 
 def compute_factors(
@@ -510,7 +623,7 @@ def compute_factors(
         direction=direction,
         near_52w_max_dist_pct=near_52w_max_dist_pct,
     )
-    q  = factor_quality(daily_df=daily_df, row=row, close=close)
+    q  = factor_quality(daily_df=daily_df, row=row, close=close, direction=direction)
 
     raw = {"trend": t, "momentum": m, "volume": v, "volatility": vl,
            "rs": rs, "breakout": bo, "quality": q}

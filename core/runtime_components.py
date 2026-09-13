@@ -14,10 +14,9 @@ import json
 import logging
 import os
 import threading
-import time
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -88,7 +87,7 @@ class TieredCapitalScaler:
 
     def update_peak(self, current_nav: float) -> None:
         self.peak = max(self.peak, current_nav)
-        self._history.append((datetime.utcnow(), current_nav))
+        self._history.append((datetime.now(timezone.utc), current_nav))
 
     def current_drawdown(self, current_nav: float) -> float:
         if self.peak <= 0:
@@ -100,7 +99,7 @@ class TieredCapitalScaler:
         self.update_peak(current_nav)
         dd = self.current_drawdown(current_nav)
 
-        if regime_name not in ("PANIC", "TREND_DOWN"):
+        if regime_name != "PANIC":
             base = REGIME_CAPITAL.get(regime_name, 1.0)
             if dd > 0.02:
                 base *= max(0.5, 1.0 - dd * 3)
@@ -152,6 +151,7 @@ class RollingFactorCalibrator:
         self._buffer: deque[dict[str, Any]] = deque(maxlen=window)
         self._weights: dict[str, float] = self._load_weights()
         self._lock = threading.Lock()
+        self._stop_event = threading.Event()
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._last_calibration: Optional[datetime] = None
@@ -159,6 +159,7 @@ class RollingFactorCalibrator:
     def start(self) -> None:
         if self._running:
             return
+        self._stop_event.clear()
         self._running = True
         self._thread = threading.Thread(target=self._loop, name="factor-calibrator", daemon=True)
         self._thread.start()
@@ -168,11 +169,14 @@ class RollingFactorCalibrator:
             self._interval,
         )
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 5.0) -> None:
         self._running = False
+        self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
 
     def record_trade(self, factor_scores: dict[str, float], pnl_pct: float) -> None:
-        entry = {"factors": factor_scores, "pnl": pnl_pct, "ts": datetime.utcnow().isoformat()}
+        entry = {"factors": factor_scores, "pnl": pnl_pct, "ts": datetime.now(timezone.utc).isoformat()}
         with self._lock:
             self._buffer.append(entry)
         self._persist_trade(entry)
@@ -182,8 +186,9 @@ class RollingFactorCalibrator:
             return dict(self._weights)
 
     def _loop(self) -> None:
-        while self._running:
-            time.sleep(self._interval)
+        while self._running and not self._stop_event.is_set():
+            if self._stop_event.wait(timeout=self._interval):
+                break
             if len(self._buffer) >= max(10, self._window // 5):
                 self._calibrate()
 
@@ -211,7 +216,7 @@ class RollingFactorCalibrator:
 
             with self._lock:
                 self._weights = new_weights
-            self._last_calibration = datetime.utcnow()
+            self._last_calibration = datetime.now(timezone.utc)
 
             self._save_weights(new_weights)
             logger.info("Factor weights recalibrated: %s", new_weights)
@@ -223,9 +228,11 @@ class RollingFactorCalibrator:
     def _load_weights(self) -> dict[str, float]:
         if self._wpath.exists():
             try:
-                loaded = json.loads(self._wpath.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    return {str(key): float(value) for key, value in loaded.items()}
+                text = self._wpath.read_text(encoding="utf-8").strip()
+                if text:
+                    loaded = json.loads(text)
+                    if isinstance(loaded, dict):
+                        return {str(key): float(value) for key, value in loaded.items()}
             except Exception:
                 pass
         return {
@@ -247,14 +254,21 @@ class RollingFactorCalibrator:
     def _persist_trade(self, entry: dict[str, Any]) -> None:
         try:
             if self._tpath.exists():
-                loaded = json.loads(self._tpath.read_text(encoding="utf-8"))
-                log_entries = [item for item in loaded if isinstance(item, dict)] if isinstance(loaded, list) else []
+                text = self._tpath.read_text(encoding="utf-8").strip()
+                if text:
+                    try:
+                        loaded = json.loads(text)
+                        log_entries = [item for item in loaded if isinstance(item, dict)] if isinstance(loaded, list) else []
+                    except json.JSONDecodeError:
+                        log_entries = []
+                else:
+                    log_entries = []
             else:
                 log_entries = []
             log_entries.append(entry)
             ensure_parent(self._tpath).write_text(json.dumps(log_entries[-2000:], indent=2), encoding="utf-8")
-        except OSError:
-            pass
+        except Exception as exc:
+            logger.error("Could not persist trade: %s", exc)
 
 
 class RegimeAwareTelegramAlerter:

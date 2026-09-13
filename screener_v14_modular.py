@@ -107,6 +107,12 @@ def run_scan(
     )
 
 
+def get_last_sector_rs(services: Optional[ServiceBundle] = None) -> dict[str, float]:
+    """Return the last computed sector relative strength dictionary."""
+    bundle = _resolve_services(services)
+    return bundle.scan_service.get_last_sector_rs()
+
+
 def _send_alert(
     portfolio: list[TickerResult],
     regime: MarketRegime,
@@ -127,7 +133,7 @@ def run_backtest(
     config: SystemConfig = CONFIG,
     train_days: int = 120,
     test_days: int = 20,
-    step_days: int = 10,
+    step_days: int = 20,
     out_csv: str = "backtest_results.csv",
     direction: str = "LONG",
     debug: bool = False,

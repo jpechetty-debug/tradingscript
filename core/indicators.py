@@ -61,31 +61,20 @@ def _wilder(s: pd.Series, period: int) -> pd.Series:
     return s.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
 
 
-def _supertrend_vectorised(
-    df: pd.DataFrame,
-    period: int,
-    mult: float,
+try:
+    from numba import njit
+    _NUMBA_AVAILABLE = True
+except Exception:
+    _NUMBA_AVAILABLE = False
+
+
+def _supertrend_inner_loop_py(
+    close: np.ndarray,
+    final_upper: np.ndarray,
+    final_lower: np.ndarray,
+    n: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Vectorised Supertrend — returns (supertrend_line, trend_up_mask).
-
-    Bar-0 fix (v14.1)
-    -----------------
-    Wilder ATR requires ``period`` bars to warm up.  This version scans forward
-    to the first bar where both bands are finite, seeding ``trend_up`` there
-    from ``close >= final_lower``.  Prevents silent NaN propagation and
-    incorrect initial signals.
-    """
-    tr   = _true_range(df)
-    atr  = _wilder(tr, period)
-    hl2  = (df["High"] + df["Low"]) / 2
-    close = df["Close"].values
-    n = len(close)
-
-    final_upper = (hl2 + mult * atr).values.copy()
-    final_lower = (hl2 - mult * atr).values.copy()
-
-    # ── Band carry-forward (bars 1..n-1) ─────────────────────────────────────
+    """Pure-Python implementation of recursive Supertrend band tracking."""
     for i in range(1, n):
         if np.isnan(final_upper[i - 1]) or np.isnan(final_lower[i - 1]):
             continue
@@ -98,11 +87,9 @@ def _supertrend_vectorised(
             else max(final_lower[i], final_lower[i - 1])
         )
 
-    # ── Trend direction array ─────────────────────────────────────────────────
-    trend_up = np.empty(n, dtype=bool)
-    st       = np.full(n, np.nan)
+    trend_up = np.empty(n, dtype=np.bool_)
+    st = np.full(n, np.nan)
 
-    # Find first bar where both bands are valid and seed from price.
     seed = -1
     for i in range(n):
         if not (np.isnan(final_upper[i]) or np.isnan(final_lower[i])):
@@ -113,9 +100,8 @@ def _supertrend_vectorised(
         return st, trend_up
 
     trend_up[seed] = close[seed] >= final_lower[seed]
-    st[seed]       = final_lower[seed] if trend_up[seed] else final_upper[seed]
+    st[seed] = final_lower[seed] if trend_up[seed] else final_upper[seed]
 
-    # ── Loop bars seed+1..n-1 ─────────────────────────────────────────────────
     for i in range(seed + 1, n):
         if st[i - 1] == final_lower[i - 1]:
             trend_up[i] = close[i] >= final_lower[i]
@@ -124,6 +110,33 @@ def _supertrend_vectorised(
         st[i] = final_lower[i] if trend_up[i] else final_upper[i]
 
     return st, trend_up
+
+
+if _NUMBA_AVAILABLE:
+    _supertrend_inner_loop = njit(fastmath=True, cache=True)(_supertrend_inner_loop_py)
+else:
+    _supertrend_inner_loop = _supertrend_inner_loop_py
+
+
+def _supertrend_vectorised(
+    df: pd.DataFrame,
+    period: int,
+    mult: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Vectorised Supertrend — returns (supertrend_line, trend_up_mask).
+    Accelerated via Numba JIT when available with pure-Python fallback.
+    """
+    tr = _true_range(df)
+    atr = _wilder(tr, period)
+    hl2 = (df["High"] + df["Low"]) / 2
+    close = np.ascontiguousarray(df["Close"].values, dtype=np.float64)
+    n = len(close)
+
+    final_upper = np.ascontiguousarray((hl2 + mult * atr).values, dtype=np.float64)
+    final_lower = np.ascontiguousarray((hl2 - mult * atr).values, dtype=np.float64)
+
+    return _supertrend_inner_loop(close, final_upper, final_lower, n)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

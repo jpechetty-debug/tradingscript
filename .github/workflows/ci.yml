@@ -26,15 +26,34 @@ jobs:
 
       - name: Lint with ruff
         run: |
-          ruff check core/ tests/ run.py screener_v14_modular.py --output-format=github
+          ruff check core/ tests/ run.py screener_v14_modular.py server.py --output-format=github
 
       - name: Type-check with mypy
         run: |
-          mypy core/ run.py screener_v14_modular.py \
+          mypy core/ run.py screener_v14_modular.py server.py \
             --ignore-missing-imports \
             --disallow-untyped-defs \
             --warn-return-any \
             --warn-unused-ignores
+
+  frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci || npm install
+
+      - name: Build frontend bundle
+        working-directory: frontend
+        run: npm run build
 
   test:
     strategy:

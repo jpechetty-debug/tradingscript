@@ -23,6 +23,7 @@ def test_tiered_capital_scaler():
     assert scaler.capital_fraction(100000.0, "TREND_UP") == 1.0
     assert scaler.capital_fraction(100000.0, "EXPANSION") == 1.0
     assert scaler.capital_fraction(100000.0, "RANGE") == 0.75
+    assert scaler.capital_fraction(100000.0, "TREND_DOWN") == 0.50
 
     # Peak tracking
     assert scaler.capital_fraction(110000.0, "TREND_UP") == 1.0
@@ -38,7 +39,8 @@ def test_tiered_capital_scaler():
     # Panic tiers
     # 110000 -> 105000 is ~4.5% DD. PANIC cap should be 0.50 (for DD 2-5%)
     assert scaler.capital_fraction(105000.0, "PANIC") == 0.50
-    assert scaler.capital_fraction(105000.0, "TREND_DOWN") == 0.50
+    # TREND_DOWN scales from base 0.50: 0.50 * (1 - 0.04545*3) = 0.4318
+    assert scaler.capital_fraction(105000.0, "TREND_DOWN") == 0.4318
 
     # DD > 10%
     assert scaler.capital_fraction(95000.0, "PANIC") == 0.00

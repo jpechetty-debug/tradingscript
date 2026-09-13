@@ -159,24 +159,39 @@ def compute_targets(
     close: float,
     atr: float,
     config: SystemConfig,
+    trade_horizon: str = "SWING",
 ) -> TradeTargets:
     """
     ATR-based stop, T1, T2 and reward:risk ratio.
 
-    Uses config.STOP_ATR_MULT, TARGET1_ATR_MULT, TARGET2_ATR_MULT.
+    Horizon-aware (v14.2):
+    - INTRADAY: Tighter stops (0.50x ATR) and closer targets (1.20x/1.80x)
+                for realistic R:R within a single 6-hour session.
+    - SWING:    Wider stops (1.50x ATR) and multi-day targets (3.80x/6.00x)
+                for holding through volatility over several days.
+
     Value-area override (USE_VALUE_AREA_RR) is handled in scorer.py
     after the volume profile is computed.
     """
-    sl_dist = config.STOP_ATR_MULT * atr
+    if trade_horizon == "INTRADAY":
+        stop_mult   = config.INTRADAY_STOP_ATR_MULT    # 0.50
+        t1_mult     = config.INTRADAY_TARGET1_ATR_MULT  # 1.20
+        t2_mult     = config.INTRADAY_TARGET2_ATR_MULT  # 1.80
+    else:
+        stop_mult   = config.STOP_ATR_MULT     # 1.50
+        t1_mult     = config.TARGET1_ATR_MULT  # 3.80
+        t2_mult     = config.TARGET2_ATR_MULT  # 6.00
+
+    sl_dist = stop_mult * atr
 
     if direction == "LONG":
         stop = round(close - sl_dist, 2)
-        t1   = round(close + config.TARGET1_ATR_MULT * atr, 2)
-        t2   = round(close + config.TARGET2_ATR_MULT * atr, 2)
+        t1   = round(close + t1_mult * atr, 2)
+        t2   = round(close + t2_mult * atr, 2)
     else:
         stop = round(close + sl_dist, 2)
-        t1   = round(close - config.TARGET1_ATR_MULT * atr, 2)
-        t2   = round(close - config.TARGET2_ATR_MULT * atr, 2)
+        t1   = round(close - t1_mult * atr, 2)
+        t2   = round(close - t2_mult * atr, 2)
 
     rr = round(abs(t1 - close) / sl_dist, 2) if sl_dist > 0 else 0.0
     return TradeTargets(stop=stop, t1=t1, t2=t2, rr=rr)
@@ -192,12 +207,14 @@ def _ticker_excess_kurtosis(daily_df: pd.DataFrame, config: SystemConfig) -> flo
     Falls back to KELLY_KURTOSIS_FALLBACK (4.0) if insufficient history.
     Clipped to [0, 20] -- extreme values destabilise the correction.
     """
-    rets = daily_df["Close"].pct_change().dropna()
+    rets = daily_df["Close"].pct_change(fill_method=None).dropna()
     if len(rets) < config.KELLY_KURTOSIS_MIN_OBS:
         return config.KELLY_KURTOSIS_FALLBACK
     rets_arr = rets.tail(config.KELLY_KURTOSIS_WINDOW).values
     try:
         ek = float(_kurtosis(rets_arr, fisher=True))
+        if np.isnan(ek):
+            return config.KELLY_KURTOSIS_FALLBACK
         return float(np.clip(ek, 0.0, 20.0))
     except Exception:
         log.debug("Kurtosis calc failed, using fallback.", exc_info=True)
@@ -282,6 +299,9 @@ def calculate_kelly_size(
         risk_inr,
         config.RISK_PER_TRADE_INR * 0.25 * capital_fraction,
     )
+
+    if np.isnan(risk_inr) or np.isnan(rps) or rps <= 0:
+        return config.KELLY_MIN_SHARES, 0.0, 0.0, 1.0
 
     shares = (
         max(config.KELLY_MIN_SHARES, int(risk_inr / rps))

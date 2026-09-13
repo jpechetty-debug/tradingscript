@@ -440,6 +440,13 @@ def test_market_data_service_raises_when_benchmark_missing():
         service.prepare_scan_data(["NOT_THE_BENCHMARK.NS"], CONFIG)
 
 
+def test_market_data_service_default_fetcher_is_async():
+    """MarketDataService should use fetch_daily_batch_async by default."""
+    from core.async_data import fetch_daily_batch_async
+    service = MarketDataService()
+    assert service._fetcher is fetch_daily_batch_async
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ScanService.run_calibration — full path and edge cases
 # ─────────────────────────────────────────────────────────────────────────────

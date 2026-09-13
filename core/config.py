@@ -14,7 +14,8 @@ import os
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta
 from enum import Enum
-from typing import Mapping
+from pathlib import Path
+from typing import Mapping, Optional
 from zoneinfo import ZoneInfo
 
 
@@ -54,6 +55,17 @@ class MarketRegimeType(Enum):
     PANIC      = "PANIC"
 
 
+class MarketPhase(str, Enum):
+    PRE_MARKET          = "PRE_MARKET"           # Before 09:15
+    OPENING_NOISE       = "OPENING_NOISE"       # 09:15 - 09:30: Gap auction & Initial Range formation
+    PRIME_MORNING       = "PRIME_MORNING"       # 09:30 - 10:15: Prime ORB / Trend Discovery (Golden Window #1)
+    MIDDAY_CHOP         = "MIDDAY_CHOP"         # 10:15 - 13:30: Low volume consolidation (Mean-Rev / Strict Hurdle)
+    AFTERNOON_EXPANSION = "AFTERNOON_EXPANSION" # 13:30 - 14:30: European open trend momentum (Golden Window #2)
+    INTRADAY_FREEZE     = "INTRADAY_FREEZE"     # 14:30 - 15:15: Hard freeze on new MIS entries; broker cutoff approaches
+    SWING_CLOSING       = "SWING_CLOSING"       # 14:30 - 15:30: Daily candle confirmation (Prime SWING / BTST)
+    POST_MARKET         = "POST_MARKET"         # After 15:30
+
+
 # ── Domain-specific Frozen Settings Dataclasses ─────────────────────────────
 
 @dataclass(frozen=True)
@@ -84,6 +96,12 @@ class RegimeSettings:
     regime_lock_minutes: int = 20
     session_open_end: str = "10:15"
     session_midday_end: str = "13:30"
+    intraday_entry_start: str = "09:30"
+    intraday_entry_cutoff: str = "14:30"
+    swing_scan_start: str = "14:30"
+    mis_squareoff_time: str = "15:15"
+    market_close_time: str = "15:30"
+    midday_breakout_min_prob: float = 0.55
 
     def session_from_time(self, now: datetime | None = None) -> str:
         current_time = (now.astimezone(IST) if now is not None else datetime.now(IST)).time()
@@ -94,6 +112,36 @@ class RegimeSettings:
         if current_time < t2:
             return "MIDDAY_CHOP"
         return "CLOSING_TREND"
+
+    def get_market_phase(self, now: datetime | None = None) -> MarketPhase:
+        current_time = (now.astimezone(IST) if now is not None else datetime.now(IST)).time()
+        t_open = datetime.strptime(self.market_open_time, "%H:%M").time()
+        t_intra_start = datetime.strptime(self.intraday_entry_start, "%H:%M").time()
+        t_morning_end = datetime.strptime(self.session_open_end, "%H:%M").time()
+        t_midday_end = datetime.strptime(self.session_midday_end, "%H:%M").time()
+        t_cutoff = datetime.strptime(self.intraday_entry_cutoff, "%H:%M").time()
+        t_close = datetime.strptime(self.market_close_time, "%H:%M").time()
+
+        if current_time < t_open:
+            return MarketPhase.PRE_MARKET
+        if current_time < t_intra_start:
+            return MarketPhase.OPENING_NOISE
+        if current_time < t_morning_end:
+            return MarketPhase.PRIME_MORNING
+        if current_time < t_midday_end:
+            return MarketPhase.MIDDAY_CHOP
+        if current_time < t_cutoff:
+            return MarketPhase.AFTERNOON_EXPANSION
+        if current_time < t_close:
+            return MarketPhase.INTRADAY_FREEZE
+        return MarketPhase.POST_MARKET
+
+    def minutes_to_squareoff(self, now: datetime | None = None) -> int:
+        dt = now.astimezone(IST) if now is not None else datetime.now(IST)
+        t_sq = datetime.strptime(self.mis_squareoff_time, "%H:%M").time()
+        sq_dt = dt.replace(hour=t_sq.hour, minute=t_sq.minute, second=0, microsecond=0)
+        diff = (sq_dt - dt).total_seconds() / 60.0
+        return max(0, int(diff))
 
     def is_regime_locked(self, now: datetime | None = None) -> bool:
         current_time = (now.astimezone(IST) if now is not None else datetime.now(IST)).time()
@@ -126,6 +174,9 @@ class SignalSettings:
     ic_forward_bars: int = 1
     icir_min_obs: int = 20
     ic_calib_offset: int = 60
+    watchlist_min_prob: float = 0.45
+    enable_watchlist: bool = True
+    short_is_intraday_only: bool = True
 
 
 @dataclass(frozen=True)
@@ -142,6 +193,7 @@ class PortfolioSettings:
     max_corr: float = 0.70
     max_sector_picks: int = 2
     portfolio_size: int = 6
+    candidates_max: int = 20
 
 
 @dataclass(frozen=True)
@@ -192,6 +244,8 @@ class ScoringRuntime:
         "quality":    1 / 7,
     })
     min_prob_win: float = 0.52
+    min_prob_watchlist: float = 0.45
+    enable_watchlist: bool = True
     min_expectancy_r: float = 0.15
     use_ema200_filter: bool = True
 
@@ -201,8 +255,10 @@ class ScoringRuntime:
 @dataclass
 class SystemConfig:
     # ── Probability & expectancy gates ───────────────────────────────────────
-    MIN_PROB_WIN:      float = 0.52
-    MIN_EXPECTANCY_R:  float = 0.15
+    MIN_PROB_WIN:       float = field(default_factory=lambda: float(os.getenv("MIN_PROB_WIN", "0.52")))
+    WATCHLIST_MIN_PROB: float = field(default_factory=lambda: float(os.getenv("WATCHLIST_MIN_PROB", "0.45")))
+    ENABLE_WATCHLIST:   bool  = field(default_factory=lambda: os.getenv("ENABLE_WATCHLIST", "true").lower() in ("true", "1", "yes"))
+    MIN_EXPECTANCY_R:   float = field(default_factory=lambda: float(os.getenv("MIN_EXPECTANCY_R", "0.15")))
 
     # ── Kelly position sizing ─────────────────────────────────────────────────
     KELLY_FRACTION:          float = 0.25
@@ -247,11 +303,17 @@ class SystemConfig:
     ADX_PERIOD:   int   = 14
     ADX_STRONG:   int   = 25
 
-    # ── Trade targets ─────────────────────────────────────────────────────────
+    # ── Trade targets (SWING defaults) ────────────────────────────────────────
     STOP_ATR_MULT:    float = 1.5
     TARGET1_ATR_MULT: float = 3.8
     TARGET2_ATR_MULT: float = 6.0
-    RISK_PER_TRADE_INR: float = 10_000.0
+    RISK_PER_TRADE_INR: float = field(default_factory=lambda: float(os.getenv("RISK_PER_TRADE_INR", "10000.0")))
+
+    # ── Intraday trade targets (tighter for 6-hour sessions) ─────────────────
+    INTRADAY_STOP_ATR_MULT:    float = 0.50
+    INTRADAY_TARGET1_ATR_MULT: float = 1.20
+    INTRADAY_TARGET2_ATR_MULT: float = 1.80
+    SHORT_IS_INTRADAY_ONLY:    bool  = True
 
     # ── Market regime ─────────────────────────────────────────────────────────
     BREADTH_VETO_BELOW:    float = 0.35
@@ -271,16 +333,17 @@ class SystemConfig:
     REGIME_LOCK_MINUTES: int = 20
 
     # ── EMA / structural filters ──────────────────────────────────────────────
-    USE_EMA200_FILTER: bool  = True
+    USE_EMA200_FILTER: bool  = field(default_factory=lambda: os.getenv("USE_EMA200_FILTER", "true").lower() in ("true", "1", "yes"))
     MAX_CORR:          float = 0.70
 
     # ── Portfolio construction ────────────────────────────────────────────────
     MAX_SECTOR_PICKS: int = 2
-    PORTFOLIO_SIZE:   int = 6
+    PORTFOLIO_SIZE:   int = field(default_factory=lambda: int(os.getenv("PORTFOLIO_SIZE", "6")))
+    CANDIDATES_MAX:   int = field(default_factory=lambda: int(os.getenv("CANDIDATES_MAX", "20")))
 
     # ── Execution costs ───────────────────────────────────────────────────────
-    SLIPPAGE_BPS:   int = 8
-    COMMISSION_INR: int = 20
+    SLIPPAGE_BPS:   int = field(default_factory=lambda: int(os.getenv("SLIPPAGE_BPS", "8")))
+    COMMISSION_INR: int = field(default_factory=lambda: int(os.getenv("COMMISSION_INR", "20")))
 
     # ── Volume profile ────────────────────────────────────────────────────────
     VPROFILE_LOOKBACK: int  = 30
@@ -296,6 +359,12 @@ class SystemConfig:
     # ── Session times (IST) ───────────────────────────────────────────────────
     SESSION_OPEN_END:   str = "10:15"
     SESSION_MIDDAY_END: str = "13:30"
+    INTRADAY_ENTRY_START:     str = "09:30"
+    INTRADAY_ENTRY_CUTOFF:    str = "14:30"
+    SWING_SCAN_START:         str = "14:30"
+    MIS_SQUAREOFF_TIME:       str = "15:15"
+    MARKET_CLOSE_TIME:        str = "15:30"
+    MIDDAY_BREAKOUT_MIN_PROB: float = 0.55
 
     # ── Telegram alerts ───────────────────────────────────────────────────────
     TELEGRAM_BOT_TOKEN:    SecretStr = field(
@@ -368,7 +437,19 @@ class SystemConfig:
             regime_lock_minutes=self.REGIME_LOCK_MINUTES,
             session_open_end=self.SESSION_OPEN_END,
             session_midday_end=self.SESSION_MIDDAY_END,
+            intraday_entry_start=self.INTRADAY_ENTRY_START,
+            intraday_entry_cutoff=self.INTRADAY_ENTRY_CUTOFF,
+            swing_scan_start=self.SWING_SCAN_START,
+            mis_squareoff_time=self.MIS_SQUAREOFF_TIME,
+            market_close_time=self.MARKET_CLOSE_TIME,
+            midday_breakout_min_prob=self.MIDDAY_BREAKOUT_MIN_PROB,
         )
+
+    def get_market_phase(self, now: datetime | None = None) -> MarketPhase:
+        return self.as_regime().get_market_phase(now)
+
+    def minutes_to_squareoff(self, now: datetime | None = None) -> int:
+        return self.as_regime().minutes_to_squareoff(now)
 
     def as_signal(self) -> SignalSettings:
         return SignalSettings(
@@ -391,6 +472,8 @@ class SystemConfig:
             ic_forward_bars=self.IC_FORWARD_BARS,
             icir_min_obs=self.ICIR_MIN_OBS,
             ic_calib_offset=self.IC_CALIB_OFFSET,
+            watchlist_min_prob=self.WATCHLIST_MIN_PROB,
+            enable_watchlist=self.ENABLE_WATCHLIST,
         )
 
     def as_portfolio(self) -> PortfolioSettings:
@@ -407,6 +490,7 @@ class SystemConfig:
             max_corr=self.MAX_CORR,
             max_sector_picks=self.MAX_SECTOR_PICKS,
             portfolio_size=self.PORTFOLIO_SIZE,
+            candidates_max=self.CANDIDATES_MAX,
         )
 
     def as_execution_cost(self) -> ExecutionCostSettings:
@@ -436,6 +520,8 @@ class SystemConfig:
             platt_b=self.PLATT_B,
             factor_weights=self.FACTOR_WEIGHTS,
             min_prob_win=self.MIN_PROB_WIN,
+            min_prob_watchlist=self.WATCHLIST_MIN_PROB,
+            enable_watchlist=self.ENABLE_WATCHLIST,
             min_expectancy_r=self.MIN_EXPECTANCY_R,
             use_ema200_filter=self.USE_EMA200_FILTER,
         )
@@ -452,4 +538,19 @@ class SystemConfig:
         )
 
 
-CONFIG = SystemConfig()
+def load_system_config(env_file: Optional[str | Path] = None) -> SystemConfig:
+    """
+    Load environment variables via dotenv (if installed) and produce a typed SystemConfig.
+    """
+    try:
+        from dotenv import load_dotenv
+        if env_file:
+            load_dotenv(env_file, override=True)
+        else:
+            load_dotenv()
+    except Exception:
+        pass
+    return SystemConfig()
+
+
+CONFIG = load_system_config()

@@ -1,3 +1,5 @@
+-r requirements.txt
+
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest==8.2.2
 pytest-cov==5.0.0           # coverage reports: pytest --cov=. --cov-report=term-missing

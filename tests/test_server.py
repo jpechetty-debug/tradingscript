@@ -6,6 +6,8 @@ Unit tests for FastAPI REST API endpoints in server.py.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -77,3 +79,56 @@ def test_get_config(client: TestClient) -> None:
     assert "benchmark" in data
     assert "risk_per_trade_inr" in data
     assert "regime_settings" in data
+
+
+def test_trigger_scan_unauthorized(client: TestClient) -> None:
+    # No header
+    res = client.post("/api/scan/trigger")
+    assert res.status_code == 401
+
+    # Wrong header
+    res_wrong = client.post("/api/scan/trigger", headers={"X-API-Key": "invalid_key"})
+    assert res_wrong.status_code == 401
+
+
+def test_trigger_scan_already_running(client: TestClient) -> None:
+    with STATE._lock:
+        STATE.is_scanning = True
+
+    try:
+        res = client.post("/api/scan/trigger", headers={"X-API-Key": API_KEY or ""})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "already_running"
+    finally:
+        with STATE._lock:
+            STATE.is_scanning = False
+
+
+def test_trigger_scan_authorized(client: TestClient) -> None:
+    with STATE._lock:
+        STATE.is_scanning = False
+
+    with patch("server.svm.run_scan", return_value=([], [], None)):
+        res = client.post("/api/scan/trigger", headers={"X-API-Key": API_KEY or ""})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "triggered"
+
+
+def test_get_trades(client: TestClient) -> None:
+    res = client.get("/api/trades")
+    assert res.status_code == 200
+    data = res.json()
+    assert "count" in data
+    assert "trades" in data
+    assert isinstance(data["trades"], list)
+
+    # limit=0 is rejected by ge=1
+    res_zero = client.get("/api/trades?limit=0")
+    assert res_zero.status_code == 422
+
+    # valid limit
+    res_valid = client.get("/api/trades?limit=50")
+    assert res_valid.status_code == 200
+

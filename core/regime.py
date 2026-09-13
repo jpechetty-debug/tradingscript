@@ -92,6 +92,9 @@ class MarketRegime:
             and self.confirmed
         )
 
+    def allows_mean_reversion(self) -> bool:
+        return self.regime == MarketRegimeType.RANGE and self.confirmed
+
     def is_tradeable(self) -> bool:
         return self.regime != MarketRegimeType.PANIC
 
@@ -99,7 +102,7 @@ class MarketRegime:
         s = {
             MarketRegimeType.TREND_UP:   "BREAKOUT / MOMENTUM (confirmed)",
             MarketRegimeType.TREND_DOWN: "SHORT MOMENTUM (confirmed)",
-            MarketRegimeType.RANGE:      "MEAN REVERSION ONLY — directional trades blocked",
+            MarketRegimeType.RANGE:      "MEAN REVERSION (confirmed)",
             MarketRegimeType.EXPANSION:  "VOLATILITY BREAKOUT — both sides",
             MarketRegimeType.PANIC:      "NO TRADE — protect capital",
         }[self.regime]

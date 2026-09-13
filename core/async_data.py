@@ -294,11 +294,10 @@ def fetch_daily_batch_async(
     """
     try:
         loop = asyncio.get_running_loop()
-        # Already inside an event loop — schedule as a coroutine
-        future = asyncio.run_coroutine_threadsafe(
-            async_fetch_daily_batch(tickers, config), loop
-        )
-        return future.result()
     except RuntimeError:
-        # No running loop — create one
-        return asyncio.run(async_fetch_daily_batch(tickers, config))
+        loop = None
+
+    if loop is not None and loop.is_running():
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, async_fetch_daily_batch(tickers, config)).result()
+    return asyncio.run(async_fetch_daily_batch(tickers, config))

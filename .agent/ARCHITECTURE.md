@@ -9,8 +9,9 @@
 Antigravity Kit is a modular system consisting of:
 
 - **20 Specialist Agents** - Role-based AI personas
-- **36 Skills** - Domain-specific knowledge modules
+- **44 Skills** - Domain-specific knowledge modules (including ECC curated packs)
 - **11 Workflows** - Slash command procedures
+- **ECC Rule Packs** - Common and Python standards under `.agent/rules/ecc/`
 
 ---
 
@@ -76,16 +77,19 @@ Modular knowledge domains that agents can load on-demand. based on task context.
 | Skill                   | Description                    |
 | ----------------------- | ------------------------------ |
 | `api-patterns`          | REST, GraphQL, tRPC            |
+| `fastapi-patterns`      | Lifespan, DI, Pydantic v2 (ECC)|
 | `nestjs-expert`         | NestJS modules, DI, decorators |
 | `nodejs-best-practices` | Node.js async, modules         |
 | `python-patterns`       | Python standards, FastAPI      |
 
 ### Database
 
-| Skill             | Description                 |
-| ----------------- | --------------------------- |
-| `database-design` | Schema design, optimization |
-| `prisma-expert`   | Prisma ORM, migrations      |
+| Skill               | Description                             |
+| ------------------- | --------------------------------------- |
+| `database-design`   | Schema design, optimization             |
+| `postgres-patterns` | Indexing (BRIN/B-tree), pagination (ECC)|
+| `redis-patterns`    | Caching, rate limiting, pub/sub (ECC)   |
+| `prisma-expert`     | Prisma ORM, migrations                  |
 
 ### TypeScript/JavaScript
 
@@ -103,29 +107,34 @@ Modular knowledge domains that agents can load on-demand. based on task context.
 
 ### Testing & Quality
 
-| Skill                   | Description              |
-| ----------------------- | ------------------------ |
-| `testing-patterns`      | Jest, Vitest, strategies |
-| `webapp-testing`        | E2E, Playwright          |
-| `tdd-workflow`          | Test-driven development  |
-| `code-review-checklist` | Code review standards    |
-| `lint-and-validate`     | Linting, validation      |
+| Skill                   | Description                     |
+| ----------------------- | ------------------------------- |
+| `testing-patterns`      | Jest, Vitest, Pytest strategies |
+| `webapp-testing`        | E2E, Playwright                 |
+| `tdd-workflow`          | Test-driven development         |
+| `verification-loop`     | 6-phase verification cycle (ECC)|
+| `code-review-checklist` | Code review standards           |
+| `lint-and-validate`     | Linting, validation             |
 
 ### Security
 
-| Skill                   | Description              |
-| ----------------------- | ------------------------ |
-| `vulnerability-scanner` | Security auditing, OWASP |
-| `red-team-tactics`      | Offensive security       |
+| Skill                         | Description                         |
+| ----------------------------- | ----------------------------------- |
+| `vulnerability-scanner`       | Security auditing, OWASP            |
+| `security-review`             | Pre-deploy threat/secret audit (ECC)|
+| `llm-trading-agent-security`  | Financial safeguards & breaker (ECC)|
+| `red-team-tactics`            | Offensive security                  |
 
 ### Architecture & Planning
 
-| Skill           | Description                |
-| --------------- | -------------------------- |
-| `app-builder`   | Full-stack app scaffolding |
-| `architecture`  | System design patterns     |
-| `plan-writing`  | Task planning, breakdown   |
-| `brainstorming` | Socratic questioning       |
+| Skill            | Description                         |
+| ---------------- | ----------------------------------- |
+| `app-builder`    | Full-stack app scaffolding          |
+| `architecture`   | System design patterns              |
+| `plan-writing`   | Task planning, breakdown            |
+| `brainstorming`  | Socratic questioning                |
+| `search-first`   | Research-before-coding (ECC)        |
+| `context-budget` | Token budget & window hygiene (ECC) |
 
 ### Mobile
 

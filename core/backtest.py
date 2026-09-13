@@ -464,6 +464,14 @@ def walk_forward(
         )
         return WalkForwardResult(trades=[], fold_stats=[], overall=_overall_stats([], []))
 
+    if step_days < test_days:
+        log.warning(
+            "Overlapping walk-forward test periods detected: step_days (%d) < test_days (%d). "
+            "Auto-adjusting step_days to %d to ensure statistically independent out-of-sample test windows.",
+            step_days, test_days, test_days,
+        )
+        step_days = test_days
+
     fold_starts = range(0, total_bars - required + 1, step_days)
     n_folds     = len(list(fold_starts))
     log.info(

@@ -36,6 +36,7 @@ class RuntimePaths:
     factor_weights_file: Path
     degradation_log_file: Path
     telemetry_log_file: Path
+    state_db_file: Path
 
     @classmethod
     def discover(cls, root: Path | None = None) -> "RuntimePaths":
@@ -71,6 +72,10 @@ class RuntimePaths:
             ),
             telemetry_log_file=_resolve_repo_path(
                 os.getenv("TELEMETRY_LOG_PATH", logs_dir / "sovereign.jsonl"),
+                root=repo_root,
+            ),
+            state_db_file=_resolve_repo_path(
+                os.getenv("STATE_DB_PATH", state_dir / "sovereign_state.db"),
                 root=repo_root,
             ),
         )

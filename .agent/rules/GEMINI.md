@@ -17,7 +17,7 @@ trigger: always_on
 Agent activated → Check frontmatter "skills:" → Read SKILL.md (INDEX) → Read specific sections.
 
 - **Selective Reading:** DO NOT read ALL files in a skill folder. Read `SKILL.md` first, then only read sections matching the user's request.
-- **Rule Priority:** P0 (GEMINI.md) > P1 (Agent .md) > P2 (SKILL.md). All rules are binding.
+- **Rule Priority:** P0 (GEMINI.md) > P1 (Agent .md) > P2 (ECC Rules: `.agent/rules/ecc/*`) > P3 (SKILL.md). All rules are binding.
 
 ### 2. Enforcement Protocol
 
@@ -149,11 +149,12 @@ When user's prompt is NOT in English:
 
 ### 📱 Project Type Routing
 
-| Project Type                           | Primary Agent         | Skills                        |
-| -------------------------------------- | --------------------- | ----------------------------- |
-| **MOBILE** (iOS, Android, RN, Flutter) | `mobile-developer`    | mobile-design                 |
-| **WEB** (Next.js, React web)           | `frontend-specialist` | frontend-design               |
-| **BACKEND** (API, server, DB)          | `backend-specialist`  | api-patterns, database-design |
+| Project Type                           | Primary Agent         | Skills                                                      |
+| -------------------------------------- | --------------------- | ----------------------------------------------------------- |
+| **MOBILE** (iOS, Android, RN, Flutter) | `mobile-developer`    | mobile-design                                               |
+| **WEB** (Next.js, React web)           | `frontend-specialist` | frontend-design                                             |
+| **BACKEND** (API, server, DB)          | `backend-specialist`  | api-patterns, fastapi-patterns, redis-patterns, database-design |
+| **FINANCIAL / TRADING** (Screener/Algo)| `backend-specialist`  | llm-trading-agent-security, search-first, verification-loop  |
 
 > 🔴 **Mobile + frontend-specialist = WRONG.** Mobile = mobile-developer ONLY.
 
@@ -261,7 +262,7 @@ When user's prompt is NOT in English:
 ### Agents & Skills
 
 - **Masters**: `orchestrator`, `project-planner`, `security-auditor` (Cyber/Audit), `backend-specialist` (API/DB), `frontend-specialist` (UI/UX), `mobile-developer`, `debugger`, `game-developer`
-- **Key Skills**: `clean-code`, `brainstorming`, `app-builder`, `frontend-design`, `mobile-design`, `plan-writing`, `behavioral-modes`
+- **Key Skills**: `clean-code`, `search-first`, `security-review`, `verification-loop`, `llm-trading-agent-security`, `fastapi-patterns`, `brainstorming`, `app-builder`, `frontend-design`, `plan-writing`
 
 ### Key Scripts
 

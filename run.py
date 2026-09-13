@@ -51,6 +51,12 @@ def _build_current_nav_provider(persistence: PersistenceService) -> Callable[[],
 
 
 def main(argv: list[str] | None = None, prog: str | None = None) -> None:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+
     from core.telemetry import setup_logging
     from core.runtime_paths import RUNTIME_PATHS
 
@@ -67,7 +73,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
     parser.add_argument("--backtest",      action="store_true",  help="Run walk-forward backtest and exit")
     parser.add_argument("--bt-train",      type=int, default=120, metavar="DAYS", help="Backtest train window (default 120)")
     parser.add_argument("--bt-test",       type=int, default=20,  metavar="DAYS", help="Backtest test window (default 20)")
-    parser.add_argument("--bt-step",       type=int, default=10,  metavar="DAYS", help="Backtest step between folds (default 10)")
+    parser.add_argument("--bt-step",       type=int, default=20,  metavar="DAYS", help="Backtest step between folds (default 20)")
     parser.add_argument("--bt-out",        type=str, default="backtest_results.csv", metavar="FILE", help="CSV output path (relative paths go under artifacts/)")
     parser.add_argument("--bt-direction",  type=str, default="LONG", choices=["LONG","SHORT","BOTH"], help="Trade direction")
     parser.add_argument("--regime-override", type=str, default=None, help="Force a specific regime (TREND_UP, RANGE, etc.)")
@@ -116,6 +122,52 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
         )
         if not args.no_telegram and portfolio and regime:
             _send_alert(portfolio, regime, config, services=services)
+
+        # Persist latest scan for FastAPI UI server
+        try:
+            import json
+            from datetime import datetime, timezone
+            target = services.persistence.paths.state_dir / "latest_scan.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            def _fmt(r):
+                d = r.__dict__.copy()
+                if hasattr(r, "factors") and r.factors is not None:
+                    d["factors"] = r.factors.__dict__.copy()
+                dirn = d.get("direction", "LONG")
+                d["action"] = "BUY" if dirn == "LONG" else "SELL"
+                entry = float(d.get("entry") or 0.0)
+                stop = float(d.get("stop") or 0.0)
+                t1 = float(d.get("t1") or 0.0)
+                sl_dist = abs(entry - stop) if (entry and stop) else 0.0
+                sl_pct = (sl_dist / entry * 100) if entry > 0 else 5.0
+                t1_dist = abs(t1 - entry) if (entry and t1) else 0.0
+                t1_pct = (t1_dist / entry * 100) if entry > 0 else 10.0
+                is_mean_rev = any("MeanRev" in str(x) for x in d.get("reasons", []))
+                if dirn == "SHORT" or sl_pct < 2.5 or (is_mean_rev and sl_pct < 3.0):
+                    d["trade_horizon"] = "INTRADAY"
+                    d["horizon_label"] = "INTRADAY (MIS)"
+                else:
+                    d["trade_horizon"] = "SWING"
+                    d["horizon_label"] = "SWING (CNC)"
+                d["stop_pct"] = round(sl_pct, 2)
+                d["target_pct"] = round(t1_pct, 2)
+                return d
+            payload = {
+                "scan_time": datetime.now(timezone.utc).isoformat(),
+                "candidates": [_fmt(c) for c in results],
+                "portfolio": [_fmt(p) for p in portfolio],
+                "sector_rs": services.scan_service.get_last_sector_rs(),
+                "regime_info": {
+                    "regime": str(regime.regime.value if hasattr(regime.regime, "value") else regime.regime),
+                    "label": regime.label,
+                    "confidence": regime.confidence,
+                    "confirmed": regime.confirmed,
+                } if regime else None,
+            }
+            target.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        except Exception as exc:
+            log.debug("Failed to persist latest_scan.json in run.py: %s", exc)
+
 
         # Feed completed trades into the calibrator buffer for live updates.
         # Sourcing outcomes from the persistence layer's most recently closed trades.

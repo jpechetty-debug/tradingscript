@@ -30,7 +30,8 @@ import pandas as pd
 from .backtest import OverallStats, WalkForwardResult, walk_forward
 from .cache import ScanCache
 from .config import CONFIG, IST, MarketRegimeType, SystemConfig
-from .data_provider import fetch_daily_batch
+from .database import SqliteDatabase
+from .async_data import fetch_daily_batch_async
 from .factors import DEFAULT_WEIGHTS, calibrate_ic_weights
 from .indicators import add_indicators
 from .portfolio import optimize_portfolio
@@ -116,7 +117,7 @@ def _rank_sectors(sector_rs: dict[str, float]) -> dict[str, int]:
 
 
 def passes_static_filters(df: pd.DataFrame, config: SystemConfig) -> bool:
-    """Check ADV and structural filters before spending scorer time."""
+    """Check ADV and minimum length before spending scorer time."""
     if len(df) < 200:
         return False
 
@@ -126,11 +127,6 @@ def passes_static_filters(df: pd.DataFrame, config: SystemConfig) -> bool:
     if turnover < config.ADV_TURNOVER_FLOOR:
         return False
 
-    if config.USE_EMA200_FILTER:
-        ema200 = close.ewm(span=200, adjust=False).mean().iloc[-1]
-        if close.iloc[-1] < ema200:
-            return False
-
     return True
 
 
@@ -138,6 +134,7 @@ class PersistenceService:
     def __init__(self, paths: RuntimePaths = RUNTIME_PATHS) -> None:
         self.paths = paths
         ensure_runtime_dirs(self.paths)
+        self.db = SqliteDatabase(self.paths.state_db_file)
 
     def create_scan_state(
         self,
@@ -149,40 +146,75 @@ class PersistenceService:
         return state
 
     def load_platt(self, config: SystemConfig) -> tuple[float, float, bool]:
+        latest = self.db.fetch_latest_platt()
+        if latest is not None:
+            a, b, _ = latest
+            return a, b, True
+
         for candidate in self._candidate_paths(self.paths.platt_calibration_file, "platt_calibration.json"):
             if not candidate.exists():
                 continue
             try:
                 payload = json.loads(candidate.read_text(encoding="utf-8"))
-                return float(payload["A"]), float(payload["B"]), True
+                a, b = float(payload["A"]), float(payload["B"])
+                ts = str(payload.get("fitted_at") or datetime.now(IST).isoformat())
+                self.db.upsert_platt(a, b, fitted_at=ts)
+                return a, b, True
             except Exception as exc:
                 log.warning("Could not load %s: %s; using config defaults.", candidate, exc)
         return config.PLATT_A, config.PLATT_B, False
 
     def save_platt(self, a: float, b: float) -> None:
+        ts = datetime.now(IST).isoformat()
+        self.db.upsert_platt(a, b, fitted_at=ts)
         payload = {
             "A": a,
             "B": b,
-            "fitted_at": datetime.now(IST).isoformat(),
+            "fitted_at": ts,
         }
         target = ensure_parent(self.paths.platt_calibration_file)
         target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        log.info("Platt params saved to %s: A=%.4f B=%.4f", target, a, b)
+        log.info("Platt params saved to DB and %s: A=%.4f B=%.4f", target, a, b)
 
     def load_trade_log(self) -> list[dict[str, Any]]:
+        trades = self.db.fetch_trades()
+        if trades:
+            return trades
+
         for candidate in self._candidate_paths(self.paths.trade_log_file, "trade_log.json"):
             if not candidate.exists():
                 continue
             try:
                 payload = json.loads(candidate.read_text(encoding="utf-8"))
                 if isinstance(payload, list):
-                    return [entry for entry in payload if isinstance(entry, dict)]
+                    entries = [entry for entry in payload if isinstance(entry, dict)]
+                    if entries:
+                        self.db.insert_trades(entries)
+                    return entries
             except Exception as exc:
                 log.error("Could not load trade log %s: %s", candidate, exc)
                 return []
         return []
 
+    def save_trade_log(self, trades: list[dict[str, Any]]) -> None:
+        target = ensure_parent(self.paths.trade_log_file)
+        target.write_text(json.dumps(trades, indent=2, default=str), encoding="utf-8")
+        self.db.insert_trades(trades)
+
+    def append_trade(self, trade: dict[str, Any]) -> None:
+        self.db.insert_trade(trade)
+        existing = self.load_trade_log()
+        target = ensure_parent(self.paths.trade_log_file)
+        target.write_text(json.dumps(existing[-2000:], indent=2, default=str), encoding="utf-8")
+
     def load_portfolio_state(self) -> Optional[PortfolioStateSnapshot]:
+        latest = self.db.fetch_latest_portfolio_state()
+        if latest is not None and latest.get("current_nav", 0) > 0:
+            return PortfolioStateSnapshot(
+                current_nav=float(latest["current_nav"]),
+                peak_nav=float(latest["peak_nav"]) if latest.get("peak_nav") is not None else None,
+            )
+
         for candidate in self._candidate_paths(self.paths.portfolio_state_file, "portfolio_state.json"):
             if not candidate.exists():
                 continue
@@ -197,6 +229,7 @@ class PersistenceService:
                     raise ValueError("current_nav must be positive")
                 if peak_nav is not None and peak_nav <= 0:
                     raise ValueError("peak_nav must be positive when provided")
+                self.db.upsert_portfolio_state(current_nav, peak_nav, updated_at=payload.get("updated_at"))
                 return PortfolioStateSnapshot(current_nav=current_nav, peak_nav=peak_nav)
             except Exception as exc:
                 log.warning("Could not load portfolio state %s: %s", candidate, exc)
@@ -204,15 +237,17 @@ class PersistenceService:
         return None
 
     def save_portfolio_state(self, current_nav: float, peak_nav: Optional[float] = None) -> None:
+        ts = datetime.now(IST).isoformat()
+        self.db.upsert_portfolio_state(current_nav, peak_nav, updated_at=ts)
         payload: dict[str, Any] = {
             "current_nav": float(current_nav),
-            "updated_at": datetime.now(IST).isoformat(),
+            "updated_at": ts,
         }
         if peak_nav is not None:
             payload["peak_nav"] = float(peak_nav)
         target = ensure_parent(self.paths.portfolio_state_file)
         target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        log.info("Portfolio state saved to %s", target)
+        log.info("Portfolio state saved to DB and %s", target)
 
     def artifact_path(self, output_path: str | Path) -> Path:
         return ensure_parent(resolve_artifact_path(output_path, self.paths))
@@ -227,7 +262,7 @@ class PersistenceService:
 class MarketDataService:
     def __init__(
         self,
-        fetcher: Callable[[list[str], SystemConfig], dict[str, pd.DataFrame]] = fetch_daily_batch,
+        fetcher: Callable[[list[str], SystemConfig], dict[str, pd.DataFrame]] = fetch_daily_batch_async,
     ) -> None:
         self._fetcher = fetcher
 
@@ -349,6 +384,29 @@ class AlertService:
             return None
 
 
+class ScanOutput(tuple):
+    """Structured scan output backward-compatible with 3-tuple (candidates, portfolio, regime)."""
+
+    candidates: list[TickerResult]
+    portfolio: list[TickerResult]
+    regime: Optional[MarketRegime]
+    sector_rs: dict[str, float]
+
+    def __new__(
+        cls,
+        candidates: list[TickerResult],
+        portfolio: list[TickerResult],
+        regime: Optional[MarketRegime],
+        sector_rs: Optional[dict[str, float]] = None,
+    ):
+        instance = super().__new__(cls, (candidates, portfolio, regime))
+        instance.candidates = candidates
+        instance.portfolio = portfolio
+        instance.regime = regime
+        instance.sector_rs = dict(sector_rs) if sector_rs is not None else {}
+        return instance
+
+
 class ScanService:
     def __init__(
         self,
@@ -372,6 +430,11 @@ class ScanService:
         self._alerter = alerter
         self._current_nav_provider = current_nav_provider
         self._default_current_nav = default_current_nav
+        self.last_sector_rs: dict[str, float] = {}
+        self.last_regime_info: Optional[MarketRegime] = None
+
+    def get_last_sector_rs(self) -> dict[str, float]:
+        return dict(self.last_sector_rs)
 
     def create_alert_service(
         self,
@@ -415,7 +478,9 @@ class ScanService:
             prepared = self._data_service.prepare_scan_data(ALL_TICKERS, config, metrics=metrics)
         except ValueError as exc:
             log.error("%s", exc)
-            return [], [], None
+            return ScanOutput([], [], None, sector_rs={})
+
+        self.last_sector_rs = dict(prepared.sector_rs)
 
         breadth = compute_breadth(prepared.processed, config)
         state.regime_locked = config.is_regime_locked()
@@ -435,6 +500,7 @@ class ScanService:
             sector_rs=prepared.sector_rs,
         )
         regime = self._apply_regime_override(regime, regime_override)
+        self.last_regime_info = regime
 
         session = config.session_from_time()
         scoring_config = self._apply_regime_probability_gate(config, regime, debug=debug)
@@ -444,7 +510,7 @@ class ScanService:
 
         if not regime.is_tradeable():
             log.warning("PANIC regime - no new positions.")
-            return [], [], regime
+            return ScanOutput([], [], regime, sector_rs=self.last_sector_rs)
 
         effective_config = scoring_config
         if no_ema_filter:
@@ -475,7 +541,8 @@ class ScanService:
         )
 
         corr_matrix = state.cache.corr_matrix(prepared.processed, config)
-        portfolio = optimize_portfolio(all_results, config, corr_matrix)
+        portfolio_candidates = [r for r in all_results if not getattr(r, "is_watchlist", False)]
+        portfolio = optimize_portfolio(portfolio_candidates, config, corr_matrix)
 
         metrics.record_portfolio(portfolio)
         metrics.emit_summary()
@@ -493,7 +560,7 @@ class ScanService:
                 result.risk_inr,
             )
 
-        return all_results, portfolio, regime
+        return ScanOutput(all_results, portfolio, regime, sector_rs=self.last_sector_rs)
 
     def run_calibration(self, calib_offset: int = 60) -> None:
         trades = self._persistence.load_trade_log()
@@ -531,7 +598,7 @@ class ScanService:
         config: SystemConfig = CONFIG,
         train_days: int = 120,
         test_days: int = 20,
-        step_days: int = 10,
+        step_days: int = 20,
         out_csv: str = "backtest_results.csv",
         direction: str = "LONG",
         debug: bool = False,
@@ -540,6 +607,12 @@ class ScanService:
         from .backtest import DEFAULT_COST_MODEL
 
         resolved_cost = cost_model if cost_model is not None else DEFAULT_COST_MODEL
+
+        # Load persisted Platt calibration to match live scan behavior
+        platt_a, platt_b, from_file = self._persistence.load_platt(config)
+        if from_file:
+            log.info("Backtest using persisted Platt parameters: A=%.4f B=%.4f", platt_a, platt_b)
+            config = replace(config, PLATT_A=platt_a, PLATT_B=platt_b)
 
         if debug:
             logging.getLogger("sovereign").setLevel(logging.DEBUG)
@@ -631,6 +704,7 @@ class ScanService:
                     capital_fraction=capital_fraction,
                     debug=debug,
                     force_score=force_score,
+                    allow_watchlist=getattr(config, "ENABLE_WATCHLIST", True),
                 )
                 futures[future] = ticker
 
