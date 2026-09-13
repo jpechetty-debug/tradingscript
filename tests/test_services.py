@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -540,3 +541,195 @@ def test_runtime_components_stop_is_idempotent():
     components = create_runtime_components()
     components.stop()
     components.stop()  # must not raise
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Production Path Unmocked Integration Tests (ThreadPoolExecutor & Hysteresis)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_score_candidates_production_path_unmocked_threads_open_position(tmp_path):
+    """
+    Verify the real ThreadPoolExecutor loop in _score_candidates() (unmocked score_ticker):
+    1. Runs score_candidate_pass1 with is_open_position=True and held_direction for held positions.
+    2. Runs apply_cohort_factor_ranking.
+    3. Runs score_candidate_pass2 with is_open_position=True, allowing a held candidate
+       with prob_win in [PROB_HOLD_FLOOR, MIN_PROB_WIN) to pass with is_held=True,
+       while an identical new candidate is rejected.
+    """
+    assert services.score_ticker is services._DEFAULT_SCORE_TICKER
+
+    n = 120
+    dates = pd.date_range("2024-01-01", periods=n, freq="D")
+    base_df = pd.DataFrame(
+        {
+            "Open": np.linspace(100, 110, n),
+            "High": np.linspace(101, 112, n),
+            "Low": np.linspace(99, 109, n),
+            "Close": np.linspace(100, 110, n),
+            "Volume": np.full(n, 1_000_000.0),
+        },
+        index=dates,
+    )
+
+    config = replace(
+        CONFIG,
+        MAX_WORKERS=2,
+        MIN_EXPECTANCY_R=0.0,
+        PLATT_A=1.0,
+        PLATT_B=-0.55,
+        MIN_PROB_WIN=0.52,
+        PROB_HOLD_FLOOR=0.47,
+        REGIME_LOCK_MINUTES=0,
+        ENABLE_WATCHLIST=False,
+    )
+
+    raw_data = {
+        "HELD.NS": base_df.copy(),
+        "NEW.NS": base_df.copy(),
+        config.BENCHMARK: base_df.copy(),
+    }
+    data_svc = MarketDataService(fetcher=lambda tickers, cfg: raw_data)
+    prepared = data_svc.prepare_scan_data(list(raw_data.keys()), config)
+
+    paths = _paths(tmp_path)
+    persistence = PersistenceService(paths)
+    persistence.save_open_positions([
+        {
+            "ticker": "HELD.NS",
+            "direction": "LONG",
+            "entry": 105.0,
+            "shares": 10,
+            "stop": 90.0,
+            "t1": 130.0,
+            "prob_win": 0.49,
+            "composite": 0.63,
+        }
+    ])
+
+    state = persistence.create_scan_state(config)
+    assert "HELD.NS" in state.open_positions
+    assert "NEW.NS" not in state.open_positions
+
+    regime = MarketRegime(
+        regime=MarketRegimeType.TREND_UP,
+        breadth=0.8,
+        adx_median=25.0,
+        atr_ratio=1.0,
+        confidence=0.8,
+        confirmed=True,
+    )
+
+    service = ScanService(version="test", persistence=persistence, data_service=data_svc)
+
+    all_results, elapsed = service._score_candidates(
+        prepared=prepared,
+        regime=regime,
+        config=config,
+        state=state,
+        session="OPENING_RANGE",
+        debug=True,
+        force_score=False,
+    )
+
+    # Production ThreadPoolExecutor loop must run and return results
+    assert elapsed >= 0.0
+    assert len(all_results) == 1
+    held_res = all_results[0]
+    assert held_res.ticker == "HELD"
+    assert held_res.is_held is True
+    assert "HeldPos" in held_res.reasons
+    assert 0.47 <= held_res.prob_win < 0.52
+
+
+def test_scan_service_scan_production_path_end_to_end_unmocked(tmp_path):
+    """
+    End-to-end integration test of ScanService.scan() on the production path:
+    Exercises data preparation, stop monitoring, regime confirmation, unmocked ThreadPoolExecutor scoring,
+    portfolio optimization, and SQLite open_positions synchronization.
+    """
+    assert services.score_ticker is services._DEFAULT_SCORE_TICKER
+
+    n = 120
+    dates = pd.date_range("2024-01-01", periods=n, freq="D")
+    base_df = pd.DataFrame(
+        {
+            "Open": np.linspace(100, 110, n),
+            "High": np.linspace(101, 112, n),
+            "Low": np.linspace(99, 109, n),
+            "Close": np.linspace(100, 110, n),
+            "Volume": np.full(n, 1_000_000.0),
+        },
+        index=dates,
+    )
+
+    config = replace(
+        CONFIG,
+        MAX_WORKERS=2,
+        MIN_EXPECTANCY_R=0.0,
+        PLATT_A=1.0,
+        PLATT_B=-0.55,
+        MIN_PROB_WIN=0.52,
+        PROB_HOLD_FLOOR=0.47,
+        REGIME_LOCK_MINUTES=0,
+        ENABLE_WATCHLIST=False,
+    )
+
+    raw_data = {
+        "HELD.NS": base_df.copy(),
+        "NEW.NS": base_df.copy(),
+        "STOPPED.NS": base_df.copy(),
+        config.BENCHMARK: base_df.copy(),
+    }
+
+    tracker = RegimeTracker()
+    tracker.push(MarketRegimeType.TREND_UP, 1.0)
+    tracker.push(MarketRegimeType.TREND_UP, 1.0)
+
+    paths = _paths(tmp_path)
+    persistence = PersistenceService(paths)
+    persistence.save_open_positions([
+        {
+            "ticker": "HELD.NS",
+            "direction": "LONG",
+            "entry": 105.0,
+            "shares": 10,
+            "stop": 90.0,
+            "t1": 130.0,
+            "prob_win": 0.49,
+            "composite": 0.63,
+        },
+        {
+            "ticker": "STOPPED.NS",
+            "direction": "LONG",
+            "entry": 105.0,
+            "shares": 10,
+            "stop": 115.0,  # Current candle Low=109.0 <= stop=115.0 -> Breached!
+            "t1": 130.0,
+            "prob_win": 0.49,
+            "composite": 0.63,
+        },
+    ])
+
+    data_service = MarketDataService(fetcher=lambda tickers, cfg: raw_data)
+    service = ScanService(version="test", data_service=data_service, persistence=persistence)
+
+    output = service.scan(config=config, regime_tracker=tracker)
+
+    # 1. Stop monitoring correctly eliminated STOPPED.NS before scoring
+    assert all(r.ticker != "STOPPED" for r in output.candidates)
+
+    # 2. Candidate outputs: only HELD qualified (NEW rejected by MIN_PROB_WIN=0.52)
+    assert len(output.candidates) == 1
+    assert output.candidates[0].ticker == "HELD"
+    assert output.candidates[0].is_held is True
+    assert "HeldPos" in output.candidates[0].reasons
+
+    # 3. Portfolio selection: HELD seated
+    assert len(output.portfolio) == 1
+    assert output.portfolio[0].ticker == "HELD"
+
+    # 4. Open positions persistence synchronization: HELD kept, STOPPED removed
+    persisted = persistence.load_open_positions()
+    assert "HELD" in persisted or "HELD.NS" in persisted
+    assert "STOPPED" not in persisted and "STOPPED.NS" not in persisted
+
