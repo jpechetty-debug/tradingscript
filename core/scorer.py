@@ -16,14 +16,15 @@ from __future__ import annotations
 from datetime import datetime
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 from scipy.special import expit as _sigmoid
+from scipy.stats import rankdata
 
 from .config import SystemConfig, IST
-from .factors import FactorScores, compute_factors, true_volume_profile, get_regime_factor_weights
+from .factors import FactorScores, compute_factors, true_volume_profile, get_regime_factor_weights, DEFAULT_WEIGHTS
 from .portfolio import compute_targets, calculate_kelly_size
 from .regime import MarketRegime, MarketRegimeType, compute_rs
 from .universe import TICKER_TO_SECTOR, N_SECTORS
@@ -279,12 +280,125 @@ _SESSION_MULT = {
     "OPENING_RANGE": 1.00,
 }
 
+FACTOR_NAMES = ("trend", "momentum", "volume", "volatility", "rs", "breakout", "quality")
+
+
+@dataclass
+class CandidateContext:
+    ticker: str
+    sector: str
+    direction: str
+    close: float
+    daily_df: pd.DataFrame
+    bench: pd.Series
+    sector_ranks: dict[str, int]
+    sector_rs: dict[str, float]
+    session: str
+    regime: MarketRegime
+    trade_horizon: str
+    factors: FactorScores
+    capital_fraction: float
+    intraday: dict
+    row: pd.Series
+
+
+def apply_cohort_factor_ranking(
+    candidates: list[Any],
+    cohort_rank_weight: float = 0.40,
+    cohort_min_obs: int = 10,
+) -> list[Any]:
+    """
+    Apply cross-sectional cohort factor ranking to directional cohorts.
+    For each directional cohort (LONG and SHORT) with >= cohort_min_obs candidates,
+    computes average percentile rank for each of the 7 factors using:
+        rank_pct = (rankdata(raw_vals, method='average') - 1.0) / (N - 1.0)
+    Blends:
+        factor_blended = (1.0 - cohort_rank_weight) * factor_raw + cohort_rank_weight * rank_pct
+    Recomputes composite from blended factors and updates each candidate.
+    """
+    if not candidates:
+        return candidates
+
+    cohort_rank_weight = float(np.clip(cohort_rank_weight, 0.0, 1.0))
+    if cohort_rank_weight <= 0.0:
+        return candidates
+
+    def _get_dir(c: Any) -> str:
+        if isinstance(c, dict):
+            return str(c.get("direction", "LONG")).upper()
+        return str(getattr(c, "direction", "LONG")).upper()
+
+    def _get_factors(c: Any) -> Optional[FactorScores]:
+        if isinstance(c, dict):
+            return c.get("factors")
+        return getattr(c, "factors", None)
+
+    cohort_long = [c for c in candidates if _get_dir(c) == "LONG"]
+    cohort_short = [c for c in candidates if _get_dir(c) == "SHORT"]
+
+    for cohort in (cohort_long, cohort_short):
+        n = len(cohort)
+        if n < cohort_min_obs or n <= 1:
+            continue
+
+        factor_vals: dict[str, list[float]] = {f: [] for f in FACTOR_NAMES}
+        for c in cohort:
+            fs = _get_factors(c)
+            for f in FACTOR_NAMES:
+                val = float(getattr(fs, f, 0.5) if fs is not None else 0.5)
+                factor_vals[f].append(val)
+
+        factor_rank_pcts: dict[str, np.ndarray] = {}
+        for f in FACTOR_NAMES:
+            raw_arr = np.array(factor_vals[f], dtype=float)
+            ranks = rankdata(raw_arr, method="average")
+            rank_pcts = (ranks - 1.0) / (n - 1.0)
+            factor_rank_pcts[f] = rank_pcts
+
+        for idx, c in enumerate(cohort):
+            fs = _get_factors(c)
+            weights = fs.ic_weights if (fs is not None and fs.ic_weights) else dict(DEFAULT_WEIGHTS)
+            w_sum = sum(weights.get(f, 1 / 7) for f in FACTOR_NAMES)
+            norm_weights = {f: weights.get(f, 1 / 7) / w_sum for f in FACTOR_NAMES}
+
+            blended_scores: dict[str, float] = {}
+            for f in FACTOR_NAMES:
+                raw_v = factor_vals[f][idx]
+                rank_p = float(factor_rank_pcts[f][idx])
+                b_val = (1.0 - cohort_rank_weight) * raw_v + cohort_rank_weight * rank_p
+                blended_scores[f] = float(np.clip(b_val, 0.0, 1.0))
+
+            new_composite = sum(norm_weights[f] * blended_scores[f] for f in FACTOR_NAMES)
+
+            new_fs = FactorScores(
+                trend=round(blended_scores["trend"], 4),
+                momentum=round(blended_scores["momentum"], 4),
+                volume=round(blended_scores["volume"], 4),
+                volatility=round(blended_scores["volatility"], 4),
+                rs=round(blended_scores["rs"], 4),
+                breakout=round(blended_scores["breakout"], 4),
+                quality=round(blended_scores["quality"], 4),
+                composite=round(new_composite, 4),
+                ic_weights=weights,
+            )
+
+            if isinstance(c, dict):
+                c["factors"] = new_fs
+                if "composite" in c:
+                    c["composite"] = round(new_composite, 4)
+            else:
+                c.factors = new_fs
+                if hasattr(c, "composite"):
+                    c.composite = round(new_composite, 4)
+
+    return candidates
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN SCORER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def score_ticker(
+def score_candidate_pass1(
     ticker:       str,
     daily_df:     pd.DataFrame,
     bench:        pd.Series,
@@ -299,31 +413,12 @@ def score_ticker(
     capital_fraction: float = 1.0,
     debug:        bool = False,
     force_score:  bool = False,
-    allow_watchlist: bool = False,
     now:          Optional[datetime] = None,
-) -> Optional[TickerResult]:
+) -> Optional[CandidateContext]:
     """
-    Full ticker evaluation pipeline. Returns None if the ticker does not
-    pass any gate (liquidity, direction, regime, EMA200, probability, E(R)).
-
-    Args:
-        ticker:         NSE ticker (e.g. "RELIANCE.NS")
-        daily_df:       OHLCV + indicators from add_indicators()
-        bench:          Benchmark Close series (Nifty50)
-        sector_ranks:   {sector: rank_int} best=1
-        sector_rs:      {sector: rs_float}
-        session:        "OPENING_RANGE" | "MIDDAY_CHOP" | "CLOSING_TREND"
-        regime:         MarketRegime dataclass from classify_regime()
-        config:         SystemConfig instance
-        intraday:       Optional dict from fetch_intraday_single()
-        mtf_60m:        Optional dict from fetch_60m_single()
-        factor_weights: IC-calibrated weights — falls back to equal 1/7
-        debug:          Print rejection reason to stdout
-        force_score:    Bypass direction and regime gates
-        allow_watchlist:Return watchlist tier candidates below MIN_PROB_WIN
-
-    Returns:
-        TickerResult or None
+    Pass 1 of ticker scoring pipeline:
+    Evaluates liquidity, data quality, directional bias, regime veto, EMA200 filter,
+    and calculates raw FactorScores. Returns CandidateContext or None.
     """
     if daily_df.empty:
         return None
@@ -466,6 +561,54 @@ def score_ticker(
         rs_lookback=config.RS_LOOKBACK,
     )
 
+    return CandidateContext(
+        ticker=ticker,
+        sector=sector,
+        direction=direction,
+        close=close,
+        daily_df=daily_df,
+        bench=bench,
+        sector_ranks=sector_ranks,
+        sector_rs=sector_rs,
+        session=session,
+        regime=regime,
+        trade_horizon=trade_horizon,
+        factors=factors,
+        capital_fraction=capital_fraction,
+        intraday=intraday,
+        row=row,
+    )
+
+
+def score_candidate_pass2(
+    candidate: CandidateContext,
+    config: SystemConfig,
+    is_open_position: bool = False,
+    allow_watchlist: bool = False,
+    debug: bool = False,
+    now: Optional[datetime] = None,
+) -> Optional[TickerResult]:
+    """
+    Pass 2 of ticker scoring pipeline:
+    Applies session multiplier, Platt probability scaling, targets & expectancy,
+    probability gating (with is_open_position hysteresis), and Kelly position sizing.
+    """
+    ticker = candidate.ticker
+    sector = candidate.sector
+    direction = candidate.direction
+    close = candidate.close
+    daily_df = candidate.daily_df
+    bench = candidate.bench
+    sector_ranks = candidate.sector_ranks
+    sector_rs = candidate.sector_rs
+    session = candidate.session
+    regime = candidate.regime
+    trade_horizon = candidate.trade_horizon
+    factors = candidate.factors
+    capital_fraction = candidate.capital_fraction
+    intraday = candidate.intraday
+    row = candidate.row
+
     # ── 6. Session + regime composite adjustment ──────────────────────────────
     sess_mult = _SESSION_MULT.get(session, 1.0)
     if regime.regime == MarketRegimeType.RANGE:
@@ -510,11 +653,11 @@ def score_ticker(
     exp_r = round(prob_win * targets.rr - (1 - prob_win) * 1.0, 3)
 
     # ── 9. Probability & expectancy gates ────────────────────────────────────
-    min_prob = config.MIN_PROB_WIN
+    min_prob = config.PROB_HOLD_FLOOR if is_open_position else config.MIN_PROB_WIN
 
     # Midday Chop Gate (10:30–13:30): Require higher hurdle (0.55) for directional breakouts
     # to protect against false breakouts, while allowing mean-reversion pullbacks
-    if session == "MIDDAY_CHOP" and not regime.allows_mean_reversion():
+    if session == "MIDDAY_CHOP" and not regime.allows_mean_reversion() and not is_open_position:
         midday_hurdle = getattr(config, "MIDDAY_BREAKOUT_MIN_PROB", 0.55)
         min_prob = max(min_prob, midday_hurdle)
 
@@ -526,7 +669,7 @@ def score_ticker(
             is_watchlist = True
         else:
             if debug:
-                log.debug("%s: prob %.2f < gate %.2f", ticker, prob_win, min_prob)
+                log.debug("%s: prob %.2f < gate %.2f (open_pos=%s)", ticker, prob_win, min_prob, is_open_position)
             return None
     if exp_r < config.MIN_EXPECTANCY_R and not is_watchlist:
         if debug:
@@ -569,7 +712,10 @@ def score_ticker(
 
     h52    = float(daily_df["High"].max())
     dist52 = ((h52 - close) / h52 * 100) if h52 > 0 else 100.0
+    super_up = bool(row["Super_Up"])
+    ema20  = float(row["EMA_20"])
     ema50  = float(row["EMA_50"])
+    ema200 = float(row["EMA_200"])
     mtf_full = (ema20 > ema50 > ema200) if direction == "LONG" else (ema20 < ema50 < ema200)
     ema200_al = (close > ema200) if direction == "LONG" else (close < ema200)
 
@@ -610,6 +756,8 @@ def score_ticker(
         reasons.append("MeanRev✅")
     if is_watchlist:
         reasons.append("Watchlist")
+    if is_open_position:
+        reasons.append("HeldPos")
     reasons.append(f"Regime:{regime.label}")
     reasons.append(f"RR:{targets.rr:.1f}x")
     reasons.append(f"Kurt:k={excess_kurt:.1f}->{kurt_corr:.0%}Kelly")
@@ -667,4 +815,77 @@ def score_ticker(
         action="BUY" if direction == "LONG" else "SELL",
         reasons=reasons,
         is_watchlist=is_watchlist,
+    )
+
+
+def score_ticker(
+    ticker:       str,
+    daily_df:     pd.DataFrame,
+    bench:        pd.Series,
+    sector_ranks: dict[str, int],
+    sector_rs:    dict[str, float],
+    session:      str,
+    regime:       MarketRegime,
+    config:       SystemConfig,
+    intraday:     Optional[dict] = None,
+    mtf_60m:      Optional[dict] = None,
+    factor_weights: Optional[dict[str, float]] = None,
+    capital_fraction: float = 1.0,
+    debug:        bool = False,
+    force_score:  bool = False,
+    allow_watchlist: bool = False,
+    now:          Optional[datetime] = None,
+    is_open_position: bool = False,
+) -> Optional[TickerResult]:
+    """
+    Full ticker evaluation pipeline. Returns None if the ticker does not
+    pass any gate (liquidity, direction, regime, EMA200, probability, E(R)).
+
+    Args:
+        ticker:         NSE ticker (e.g. "RELIANCE.NS")
+        daily_df:       OHLCV + indicators from add_indicators()
+        bench:          Benchmark Close series (Nifty50)
+        sector_ranks:   {sector: rank_int} best=1
+        sector_rs:      {sector: rs_float}
+        session:        "OPENING_RANGE" | "MIDDAY_CHOP" | "CLOSING_TREND"
+        regime:         MarketRegime dataclass from classify_regime()
+        config:         SystemConfig instance
+        intraday:       Optional dict from fetch_intraday_single()
+        mtf_60m:        Optional dict from fetch_60m_single()
+        factor_weights: IC-calibrated weights - falls back to equal 1/7
+        debug:          Print rejection reason to stdout
+        force_score:    Bypass direction and regime gates
+        allow_watchlist:Return watchlist tier candidates below MIN_PROB_WIN
+        now:            Optional evaluation datetime
+        is_open_position:If True, apply PROB_HOLD_FLOOR hysteresis gate
+
+    Returns:
+        TickerResult or None
+    """
+    cand = score_candidate_pass1(
+        ticker=ticker,
+        daily_df=daily_df,
+        bench=bench,
+        sector_ranks=sector_ranks,
+        sector_rs=sector_rs,
+        session=session,
+        regime=regime,
+        config=config,
+        intraday=intraday,
+        mtf_60m=mtf_60m,
+        factor_weights=factor_weights,
+        capital_fraction=capital_fraction,
+        debug=debug,
+        force_score=force_score,
+        now=now,
+    )
+    if cand is None:
+        return None
+    return score_candidate_pass2(
+        candidate=cand,
+        config=config,
+        is_open_position=is_open_position,
+        allow_watchlist=allow_watchlist,
+        debug=debug,
+        now=now,
     )

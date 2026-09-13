@@ -175,8 +175,11 @@ class SignalSettings:
     icir_min_obs: int = 20
     ic_calib_offset: int = 60
     watchlist_min_prob: float = 0.45
+    prob_hold_floor: float = 0.47
     enable_watchlist: bool = True
     short_is_intraday_only: bool = True
+    cohort_min_obs: int = 10
+    cohort_rank_weight: float = 0.40
 
 
 @dataclass(frozen=True)
@@ -244,10 +247,13 @@ class ScoringRuntime:
         "quality":    1 / 7,
     })
     min_prob_win: float = 0.52
+    prob_hold_floor: float = 0.47
     min_prob_watchlist: float = 0.45
     enable_watchlist: bool = True
     min_expectancy_r: float = 0.15
     use_ema200_filter: bool = True
+    cohort_min_obs: int = 10
+    cohort_rank_weight: float = 0.40
 
 
 # ── Monolithic Legacy Config (Compatibility Adapter) ─────────────────────────
@@ -256,9 +262,12 @@ class ScoringRuntime:
 class SystemConfig:
     # ── Probability & expectancy gates ───────────────────────────────────────
     MIN_PROB_WIN:       float = field(default_factory=lambda: float(os.getenv("MIN_PROB_WIN", "0.52")))
+    PROB_HOLD_FLOOR:    float = field(default_factory=lambda: float(os.getenv("PROB_HOLD_FLOOR", "0.47")))
     WATCHLIST_MIN_PROB: float = field(default_factory=lambda: float(os.getenv("WATCHLIST_MIN_PROB", "0.45")))
     ENABLE_WATCHLIST:   bool  = field(default_factory=lambda: os.getenv("ENABLE_WATCHLIST", "true").lower() in ("true", "1", "yes"))
     MIN_EXPECTANCY_R:   float = field(default_factory=lambda: float(os.getenv("MIN_EXPECTANCY_R", "0.15")))
+    COHORT_MIN_OBS:     int   = field(default_factory=lambda: int(os.getenv("COHORT_MIN_OBS", "10")))
+    COHORT_RANK_WEIGHT: float = field(default_factory=lambda: float(os.getenv("COHORT_RANK_WEIGHT", "0.40")))
 
     # ── Kelly position sizing ─────────────────────────────────────────────────
     KELLY_FRACTION:          float = 0.25
@@ -473,7 +482,10 @@ class SystemConfig:
             icir_min_obs=self.ICIR_MIN_OBS,
             ic_calib_offset=self.IC_CALIB_OFFSET,
             watchlist_min_prob=self.WATCHLIST_MIN_PROB,
+            prob_hold_floor=self.PROB_HOLD_FLOOR,
             enable_watchlist=self.ENABLE_WATCHLIST,
+            cohort_min_obs=self.COHORT_MIN_OBS,
+            cohort_rank_weight=self.COHORT_RANK_WEIGHT,
         )
 
     def as_portfolio(self) -> PortfolioSettings:
@@ -520,10 +532,13 @@ class SystemConfig:
             platt_b=self.PLATT_B,
             factor_weights=self.FACTOR_WEIGHTS,
             min_prob_win=self.MIN_PROB_WIN,
+            prob_hold_floor=self.PROB_HOLD_FLOOR,
             min_prob_watchlist=self.WATCHLIST_MIN_PROB,
             enable_watchlist=self.ENABLE_WATCHLIST,
             min_expectancy_r=self.MIN_EXPECTANCY_R,
             use_ema200_filter=self.USE_EMA200_FILTER,
+            cohort_min_obs=self.COHORT_MIN_OBS,
+            cohort_rank_weight=self.COHORT_RANK_WEIGHT,
         )
 
     def as_app_settings(self) -> AppSettings:

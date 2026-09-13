@@ -126,3 +126,47 @@ def test_calibrate_ic_weights_insufficient_history_returns_equal():
     )
     assert abs(sum(weights.values()) - 1.0) < 1e-6
     assert all(abs(v - 1/7) < 0.01 for v in weights.values())
+
+
+def test_calibrate_ic_weights_regime_fallback():
+    from core.factors import get_regime_factor_weights
+    df = _make_ohlcv(n=15)
+    results = [_make_ticker_result(ticker="RELIANCE.NS")]
+    processed = {"RELIANCE.NS": df}
+    weights = calibrate_ic_weights(
+        results=results, processed=processed,
+        bench=_bench(_make_ohlcv(n=15)),
+        sector_ranks={}, n_sectors=10, config=_config(),
+        lookback=20, calib_offset=5, fwd_bars=5,
+        regime_label="RANGE",
+    )
+    expected_prior = get_regime_factor_weights("RANGE")
+    for f, expected_val in expected_prior.items():
+        assert abs(weights[f] - expected_val) < 1e-6
+
+
+def test_calibrate_ic_weights_bayesian_shrinkage_and_floor():
+    # 12 tickers to clear the min-10 ticker hurdle in cross-sectional IC calculation
+    results = [_make_ticker_result(ticker=f"TICK{i}.NS") for i in range(12)]
+    processed = {
+        f"TICK{i}.NS": _make_ohlcv(n=140, base=100.0 + i * 15, trend=0.002 * (i - 5))
+        for i in range(12)
+    }
+    bench = _bench(processed["TICK0.NS"])
+    weights = calibrate_ic_weights(
+        results=results,
+        processed=processed,
+        bench=bench,
+        sector_ranks={},
+        n_sectors=10,
+        config=_config(),
+        lookback=60,
+        calib_offset=5,
+        fwd_bars=5,
+        regime_label="TREND_UP",
+    )
+    assert abs(sum(weights.values()) - 1.0) < 1e-6
+    # 5% floor rule verification
+    for f, w in weights.items():
+        assert w >= 0.0499, f"Factor {f} weight {w} violates 5% minimum floor"
+

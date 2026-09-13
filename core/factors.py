@@ -169,6 +169,103 @@ def factor_trend(
     return float(np.clip(t, 0.0, 1.0))
 
 
+def _smoothstep(edge0: float, edge1: float, x: float) -> float:
+    """Hermite polynomial interpolation between edge0 and edge1, clamped to [0, 1]."""
+    t = float(np.clip((x - edge0) / (edge1 - edge0), 0.0, 1.0))
+    return float(t * t * (3.0 - 2.0 * t))
+
+
+def _rsi_curve_long(rsi: float) -> float:
+    """
+    Continuous C0 RSI scoring for LONG trades.
+    Preserves original plateaus: [48, 73] -> 1.0, [42, 45] -> 0.85, <=38 -> 0.10, >=78 -> 0.20.
+    """
+    if rsi <= 38.0:
+        return 0.10
+    if rsi < 42.0:
+        return float(0.10 + 0.75 * ((rsi - 38.0) / 4.0))
+    if rsi <= 45.0:
+        return 0.85
+    if rsi < 48.0:
+        return float(0.85 + 0.15 * ((rsi - 45.0) / 3.0))
+    if rsi <= 73.0:
+        return 1.00
+    if rsi < 78.0:
+        return float(1.00 - 0.80 * ((rsi - 73.0) / 5.0))
+    return 0.20
+
+
+def _rsi_curve_short(rsi: float) -> float:
+    """
+    Continuous C0 RSI scoring for SHORT trades.
+    Preserves original domain intent: [27, 52] -> 1.0, <=22 -> 0.20, [58, 65] -> 0.0, >=70 -> 0.10.
+    """
+    if rsi <= 22.0:
+        return 0.20
+    if rsi < 27.0:
+        return float(0.20 + 0.80 * ((rsi - 22.0) / 5.0))
+    if rsi <= 52.0:
+        return 1.00
+    if rsi < 58.0:
+        return float(1.00 - 1.00 * ((rsi - 52.0) / 6.0))
+    if rsi <= 65.0:
+        return 0.00
+    if rsi < 70.0:
+        return float(0.00 + 0.10 * ((rsi - 65.0) / 5.0))
+    return 0.10
+
+
+def _rvol_curve(rvol: float, is_vcp: bool = False) -> float:
+    """
+    Continuous RVOL curve with smoothstep takeoff.
+    Strictly preserves non-VCP volume confirmation requirement (rvol <= 0.95 -> 0.0).
+    """
+    if is_vcp:
+        return 0.40
+    if rvol <= 0.95:
+        return 0.00
+    if rvol < 1.10:
+        return float(_smoothstep(0.95, 1.10, rvol) * 0.10)
+    return float(min(1.0, 0.10 + ((rvol - 1.10) / 0.90) * 0.90))
+
+
+def _adx_curve(adx: float) -> float:
+    """Continuous C0 ADX strength curve: ramp [18, 20] -> [0, 0.5], ramp [20, 25] -> [0.5, 1.0], >=25 -> 1.0."""
+    if adx <= 18.0:
+        return 0.00
+    if adx < 20.0:
+        return float(0.50 * ((adx - 18.0) / 2.0))
+    if adx < 25.0:
+        return float(0.50 + 0.50 * ((adx - 20.0) / 5.0))
+    return 1.00
+
+
+def _stochrsi_curve_long(sk: float) -> float:
+    """Continuous C0 StochRSI curve for LONG: safe zone [20, 80] -> 1.0, fade [80, 90] -> -0.30."""
+    if sk <= 15.0:
+        return 0.00
+    if sk < 20.0:
+        return float((sk - 15.0) / 5.0)
+    if sk <= 80.0:
+        return 1.00
+    if sk < 90.0:
+        return float(1.00 - 1.30 * ((sk - 80.0) / 10.0))
+    return -0.30
+
+
+def _stochrsi_curve_short(sk: float) -> float:
+    """Continuous C0 StochRSI curve for SHORT: safe zone [20, 80] -> 1.0, ramp [10, 20] from -0.30 to 1.0."""
+    if sk <= 10.0:
+        return -0.30
+    if sk < 20.0:
+        return float(-0.30 + 1.30 * ((sk - 10.0) / 10.0))
+    if sk <= 80.0:
+        return 1.00
+    if sk < 85.0:
+        return float(1.00 - 1.00 * ((sk - 80.0) / 5.0))
+    return 0.00
+
+
 def factor_momentum(
     row: pd.Series,
     daily_df: pd.DataFrame,
@@ -178,10 +275,10 @@ def factor_momentum(
     Momentum factor [0, 1].
 
     Components:
-      30% — RSI zone (48–73 ideal long, 27–52 ideal short)
+      30% — RSI zone (continuous C0 curve preserving 48–73 ideal long, 27–52 ideal short)
       25% — MACD histogram direction + acceleration
-      15% — StochRSI_K (avoid extremes)
-      20% — ADX strength
+      15% — StochRSI_K (continuous C0 curve avoiding extremes)
+      20% — ADX strength (continuous C0 ramp)
       10% — Consecutive directional days (streak, last 10 bars)
     """
     rsi  = float(row["RSI"])
@@ -200,28 +297,23 @@ def factor_momentum(
         else:
             break
 
+    adx_s = _adx_curve(adx)
+
     if direction == "LONG":
-        # RSI scoring: ideal zone 48-73, bull pullback zone 42-48 scores 0.85
-        if 48 <= rsi <= 73:
-            rsi_score = 1.0
-        elif 42 <= rsi < 48:  # bull pullback dip — high-quality entry zone
-            rsi_score = 0.85
-        elif rsi > 73:
-            rsi_score = 0.2   # overbought
-        elif rsi < 40:
-            rsi_score = 0.1
-        else:
-            rsi_score = 0.0
-        m = (0.30 * rsi_score
-           + 0.25 * (1 if mh > 0 and macc else (0.5 if mh > 0 else 0))
-           + 0.15 * (1 if 20 < sk < 80 else (-0.3 if sk > 90 else 0))
-           + 0.20 * (1 if adx >= 25 else (0.5 if adx >= 20 else 0))
+        rsi_s = _rsi_curve_long(rsi)
+        sk_s  = _stochrsi_curve_long(sk)
+        m = (0.30 * rsi_s
+           + 0.25 * (1.0 if mh > 0 and macc else (0.5 if mh > 0 else 0.0))
+           + 0.15 * sk_s
+           + 0.20 * adx_s
            + 0.10 * min(1.0, streak * 0.25))
     else:
-        m = (0.30 * (1 if 27 <= rsi <= 52 else (0.2 if rsi < 27 else 0.1 if rsi > 65 else 0))
-           + 0.25 * (1 if mh < 0 and macc else (0.5 if mh < 0 else 0))
-           + 0.15 * (1 if 20 < sk < 80 else (-0.3 if sk < 10 else 0))
-           + 0.20 * (1 if adx >= 25 else (0.5 if adx >= 20 else 0))
+        rsi_s = _rsi_curve_short(rsi)
+        sk_s  = _stochrsi_curve_short(sk)
+        m = (0.30 * rsi_s
+           + 0.25 * (1.0 if mh < 0 and macc else (0.5 if mh < 0 else 0.0))
+           + 0.15 * sk_s
+           + 0.20 * adx_s
            + 0.10 * min(1.0, streak * 0.25))
 
     return float(np.clip(m, 0.0, 1.0))
@@ -241,7 +333,7 @@ def factor_volume(
     Volume factor [0, 1].
 
     Components:
-      55% — Relative volume (RVOL vs 20d average)
+      55% — Relative volume (RVOL vs 20d average, smoothstep transition)
       25% — POC proximity (price near volume node)
       15% — Value area positioning
        5% — Turnover premium above floor
@@ -262,16 +354,11 @@ def factor_volume(
     va_ok  = (close > val)              if direction == "LONG" else (close < vah)
     turn_r = float(row["Turnover_Avg_20"]) / adv_turnover_floor
 
-    if is_vcp:
-        # Low-volume coil during ATR contraction: award consolidation score
-        # (0.40 base + location bonus) — better than zeroing out for low RVOL
-        rvol_s = 0.40
-    else:
-        rvol_s = min(1.0, (rvol - 1.0) / 1.0) if rvol >= 1.0 else 0.0
+    rvol_s = _rvol_curve(rvol, is_vcp=is_vcp)
 
     v = (rvol_s * 0.55
-         + (0.25 if poc_ok else 0)
-         + (0.15 if va_ok  else 0)
+         + (0.25 if poc_ok else 0.0)
+         + (0.15 if va_ok  else 0.0)
          + min(0.05, (turn_r - 1) / 4 * 0.05))
 
     return float(np.clip(v, 0.0, 1.0))
@@ -653,9 +740,10 @@ def calibrate_ic_weights(
     sector_ranks: dict[str, int],
     n_sectors: int,
     config: SystemConfig,
-    lookback: int = 60,
+    lookback: int = 120,
     calib_offset: int = 5,
     fwd_bars: int = 5,
+    regime_label: Optional[str] = None,
 ) -> dict[str, float]:
     """
     Optimizes factor weights using Information Coefficient (Spearman)
@@ -688,8 +776,8 @@ def calibrate_ic_weights(
 
     tickers = [r.ticker for r in results]
 
-    # Sample every other bar for efficiency over the lookback window.
-    step = 2
+    # Sample every fwd_bars to eliminate overlapping forward returns in IC estimation.
+    step = max(fwd_bars, 1)
     for offset in range(calib_offset + 1, calib_offset + lookback + 1, step):
         f_vals: dict[str, list[float]] = {factor: [] for factor in factors_list}
         rets: list[float] = []
@@ -767,11 +855,49 @@ def calibrate_ic_weights(
             m, s = ics.mean(), ics.std()
             icir[f] = m / s if s > 1e-6 else 0.0
 
+    # ── Prior weights from market regime ──────────────────────────────────────
+    prior = get_regime_factor_weights(regime_label) if regime_label else DEFAULT_WEIGHTS
+
     # ── Normalise positive ICIR to sum-to-one weights ─────────────────────────
     pos_icir = {f: max(0.0, icir[f]) for f in factors_list}
     total = sum(pos_icir.values())
 
     if total < 1e-6:
-        return {f: 1.0 / len(factors_list) for f in factors_list}
+        return dict(prior)
 
-    return {f: pos_icir[f] / total for f in factors_list}
+    w_raw = {f: pos_icir[f] / total for f in factors_list}
+
+    # ── Bayesian shrinkage: 70% empirical ICIR, 30% regime prior ─────────────
+    w_shrunk = {
+        f: 0.70 * w_raw[f] + 0.30 * prior.get(f, 1.0 / len(factors_list))
+        for f in factors_list
+    }
+
+    # ── Enforce 5% floor per factor to prevent factor starvation ─────────────
+    # Exact simplex projection with floor: iteratively allocate floor to deficient
+    # factors and scale remaining factors so that sum is exactly 1.0 and all w >= 0.05.
+    floor = 0.05
+    w_out = dict(w_shrunk)
+    for _ in range(len(factors_list)):
+        fixed = {f: w for f, w in w_out.items() if w < floor}
+        if not fixed:
+            break
+        for f in fixed:
+            w_out[f] = floor
+        fixed_sum = len(fixed) * floor
+        remaining_budget = 1.0 - fixed_sum
+        free_factors = [f for f in factors_list if f not in fixed]
+        if not free_factors or remaining_budget <= 0:
+            break
+        free_sum = sum(w_shrunk[f] for f in free_factors)
+        if free_sum > 1e-9:
+            for f in free_factors:
+                w_out[f] = w_shrunk[f] * (remaining_budget / free_sum)
+        else:
+            for f in free_factors:
+                w_out[f] = remaining_budget / len(free_factors)
+
+    # Final normalization safeguard
+    tot = sum(w_out.values())
+    return {f: w_out[f] / tot for f in factors_list}
+

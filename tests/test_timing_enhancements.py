@@ -112,8 +112,8 @@ class TestIntradayCutoffGate:
 
     def test_intraday_cutoff_blocks_late_short(self):
         config = SystemConfig()
-        config.MIN_PROB_WIN = 0.30
-        config.MIN_EXPECTANCY_R = 0.0
+        config.MIN_PROB_WIN = 0.25
+        config.MIN_EXPECTANCY_R = -0.10
         config.SHORT_IS_INTRADAY_ONLY = True
         config.INTRADAY_ENTRY_CUTOFF = "14:30"
 

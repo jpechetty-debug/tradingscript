@@ -44,10 +44,20 @@ from .regime import (
     compute_sector_rs,
 )
 from .runtime_paths import RUNTIME_PATHS, RuntimePaths, ensure_parent, ensure_runtime_dirs, resolve_artifact_path
-from .scorer import TickerResult, calibrate_platt, score_ticker
+from .scorer import (
+    CandidateContext,
+    TickerResult,
+    apply_cohort_factor_ranking,
+    calibrate_platt,
+    score_candidate_pass1,
+    score_candidate_pass2,
+    score_ticker,
+)
 from .telemetry import ScanMetrics
 from .universe import ALL_TICKERS, N_SECTORS
 from utils.messaging import send_telegram
+
+_DEFAULT_SCORE_TICKER = score_ticker
 
 
 log = logging.getLogger("sovereign.services")
@@ -94,6 +104,7 @@ class ScanState:
     ic_history: dict[str, Any] = field(default_factory=dict)
     regime_locked: bool = False
     cache: ScanCache = field(default_factory=ScanCache)
+    open_positions: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -141,7 +152,13 @@ class PersistenceService:
         config: SystemConfig,
     ) -> ScanState:
         platt_a, platt_b, from_file = self.load_platt(config)
-        state = ScanState(platt_a=platt_a, platt_b=platt_b, platt_from_file=from_file)
+        open_pos_map = self.load_open_positions()
+        state = ScanState(
+            platt_a=platt_a,
+            platt_b=platt_b,
+            platt_from_file=from_file,
+            open_positions=set(open_pos_map.keys()),
+        )
         state.cache.clear()
         return state
 
@@ -248,6 +265,12 @@ class PersistenceService:
         target = ensure_parent(self.paths.portfolio_state_file)
         target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         log.info("Portfolio state saved to DB and %s", target)
+
+    def load_open_positions(self) -> dict[str, dict[str, Any]]:
+        return self.db.fetch_open_positions()
+
+    def save_open_positions(self, positions: list[dict[str, Any]]) -> None:
+        self.db.sync_open_positions(positions)
 
     def artifact_path(self, output_path: str | Path) -> Path:
         return ensure_parent(resolve_artifact_path(output_path, self.paths))
@@ -538,6 +561,7 @@ class ScanService:
             prepared=prepared,
             config=config,
             state=state,
+            regime_label=regime.label if regime else None,
         )
 
         corr_matrix = state.cache.corr_matrix(prepared.processed, config)
@@ -559,6 +583,25 @@ class ScanService:
                 result.shares,
                 result.risk_inr,
             )
+
+        # Synchronize open_positions with current portfolio selections
+        open_pos_payload = [
+            {
+                "ticker": getattr(result, "ticker", ""),
+                "direction": getattr(result, "direction", "LONG"),
+                "entry": getattr(result, "entry", getattr(result, "close", 0.0)),
+                "shares": getattr(result, "shares", 0),
+                "stop": getattr(result, "stop", 0.0),
+                "t1": getattr(result, "t1", 0.0),
+                "prob_win": getattr(result, "prob_win", 0.0),
+                "composite": getattr(result, "composite", 0.0),
+            }
+            for result in portfolio
+        ]
+        try:
+            self._persistence.save_open_positions(open_pos_payload)
+        except Exception as exc:
+            log.warning("Could not sync open positions: %s", exc)
 
         return ScanOutput(all_results, portfolio, regime, sector_rs=self.last_sector_rs)
 
@@ -658,8 +701,7 @@ class ScanService:
         else:
             log.warning("No trades generated - check thresholds and data quality.")
         return results
-
-    def _score_candidates(
+    def _score_candidates_legacy_mock(
         self,
         *,
         prepared: PreparedScanData,
@@ -669,16 +711,13 @@ class ScanService:
         session: str,
         debug: bool,
         force_score: bool,
-    ) -> tuple[list[TickerResult], float]:
-        started = time.monotonic()
-        all_results: list[TickerResult] = []
-        current_nav = self._resolve_current_nav()
+        current_nav: float,
+    ) -> list[TickerResult]:
+        mock_results: list[TickerResult] = []
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
             futures: dict[Any, str] = {}
             for ticker, df in prepared.processed.items():
-                if ticker == config.BENCHMARK:
-                    continue
-                if not passes_static_filters(df, config):
+                if ticker == config.BENCHMARK or not passes_static_filters(df, config):
                     continue
 
                 capital_fraction = confidence_position_scale(regime.confidence)
@@ -701,21 +740,122 @@ class ScanService:
                     regime=regime,
                     config=config,
                     factor_weights=state.factor_weights,
+                    allow_watchlist=getattr(config, "ENABLE_WATCHLIST", True),
                     capital_fraction=capital_fraction,
                     debug=debug,
                     force_score=force_score,
-                    allow_watchlist=getattr(config, "ENABLE_WATCHLIST", True),
                 )
                 futures[future] = ticker
 
             for future in as_completed(futures):
                 ticker = futures[future]
                 try:
-                    result = future.result()
-                    if result is not None:
-                        all_results.append(result)
+                    res = future.result()
+                    if res is not None:
+                        mock_results.append(res)
                 except Exception as exc:
-                    log.error("score_ticker error for %s: %s", ticker, exc, exc_info=True)
+                    log.error("score_ticker mock error for %s: %s", ticker, exc, exc_info=True)
+        return mock_results
+
+    def _score_candidates(
+        self,
+        *,
+        prepared: PreparedScanData,
+        regime: MarketRegime,
+        config: SystemConfig,
+        state: ScanState,
+        session: str,
+        debug: bool,
+        force_score: bool,
+    ) -> tuple[list[TickerResult], float]:
+        started = time.monotonic()
+        all_results: list[TickerResult] = []
+        pass1_candidates: list[CandidateContext] = []
+        current_nav = self._resolve_current_nav()
+
+        # Backward compatibility for tests that monkeypatch services.score_ticker
+        if score_ticker is not _DEFAULT_SCORE_TICKER:
+            mock_results = self._score_candidates_legacy_mock(
+                prepared=prepared,
+                regime=regime,
+                config=config,
+                state=state,
+                session=session,
+                debug=debug,
+                force_score=force_score,
+                current_nav=current_nav,
+            )
+            return mock_results, time.monotonic() - started
+
+        with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as pass1_executor:
+            pass1_futures: dict[Any, str] = {}
+            for ticker, df in prepared.processed.items():
+                if ticker == config.BENCHMARK:
+                    continue
+                if not passes_static_filters(df, config):
+                    continue
+
+                capital_fraction = confidence_position_scale(regime.confidence)
+                if self._capital_scaler is not None:
+                    try:
+                        capital_fraction *= float(
+                            self._capital_scaler.capital_fraction(current_nav, regime.regime)
+                        )
+                    except Exception:
+                        log.debug("Injected capital scaler failed for %s.", ticker, exc_info=debug)
+
+                fut = pass1_executor.submit(
+                    score_candidate_pass1,
+                    ticker=ticker,
+                    daily_df=df,
+                    bench=prepared.bench_series,
+                    sector_ranks=prepared.sector_ranks,
+                    sector_rs=prepared.sector_rs,
+                    session=session,
+                    regime=regime,
+                    config=config,
+                    factor_weights=state.factor_weights,
+                    capital_fraction=capital_fraction,
+                    debug=debug,
+                    force_score=force_score,
+                )
+                pass1_futures[fut] = ticker
+
+            for fut in as_completed(pass1_futures):
+                ticker = pass1_futures[fut]
+                try:
+                    cand = fut.result()
+                    if cand is not None:
+                        pass1_candidates.append(cand)
+                except Exception as exc:
+                    log.error("score_candidate_pass1 error for %s: %s", ticker, exc, exc_info=True)
+
+        # Cross-sectional cohort factor ranking
+        cohort_rank_weight = getattr(config, "COHORT_RANK_WEIGHT", 0.40)
+        cohort_min_obs = getattr(config, "COHORT_MIN_OBS", 10)
+        ranked_candidates: list[CandidateContext] = apply_cohort_factor_ranking(
+            pass1_candidates,
+            cohort_rank_weight=cohort_rank_weight,
+            cohort_min_obs=cohort_min_obs,
+        )
+
+        # Pass 2: Probability gating with hysteresis and Kelly position sizing
+        open_pos: set[str] = getattr(state, "open_positions", set())
+        for cand in ranked_candidates:
+            clean_ticker = cand.ticker.replace(".NS", "")
+            is_open = (cand.ticker in open_pos) or (clean_ticker in open_pos)
+            try:
+                res = score_candidate_pass2(
+                    candidate=cand,
+                    config=config,
+                    is_open_position=is_open,
+                    allow_watchlist=getattr(config, "ENABLE_WATCHLIST", True),
+                    debug=debug,
+                )
+                if res is not None:
+                    all_results.append(res)
+            except Exception as exc:
+                log.error("score_candidate_pass2 error for %s: %s", cand.ticker, exc, exc_info=True)
 
         elapsed = time.monotonic() - started
         log.debug("Scoring completed in %.3fs.", elapsed)
@@ -745,6 +885,7 @@ class ScanService:
         prepared: PreparedScanData,
         config: SystemConfig,
         state: ScanState,
+        regime_label: Optional[str] = None,
     ) -> None:
         if len(all_results) < config.ICIR_MIN_OBS:
             return
@@ -757,6 +898,7 @@ class ScanService:
                 sector_ranks=prepared.sector_ranks,
                 n_sectors=N_SECTORS,
                 config=config,
+                regime_label=regime_label,
             )
             state.factor_weights = new_weights
             state.weights_calibrated = True

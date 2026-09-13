@@ -91,6 +91,19 @@ class SqliteDatabase:
                     weight REAL NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS open_positions (
+                    ticker TEXT PRIMARY KEY,
+                    direction TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    shares INTEGER NOT NULL,
+                    stop_loss REAL NOT NULL,
+                    target REAL NOT NULL,
+                    prob_win REAL NOT NULL,
+                    composite REAL NOT NULL,
+                    opened_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
             """)
 
             # Migration: ensure trade_id column exists and populate empty legacy records
@@ -292,3 +305,119 @@ class SqliteDatabase:
             if not rows:
                 return None
             return {str(r["factor_name"]): float(r["weight"]) for r in rows}
+
+    # ── Open Positions ─────────────────────────────────────────────────────────
+
+    def upsert_open_position(
+        self,
+        ticker: str,
+        direction: str,
+        entry_price: float,
+        shares: int,
+        stop_loss: float,
+        target: float,
+        prob_win: float,
+        composite: float,
+        opened_at: Optional[str] = None,
+        updated_at: Optional[str] = None,
+    ) -> None:
+        now_ts = datetime.now(timezone.utc).isoformat()
+        opened = opened_at or now_ts
+        updated = updated_at or now_ts
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO open_positions (
+                    ticker, direction, entry_price, shares, stop_loss, target,
+                    prob_win, composite, opened_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ticker) DO UPDATE SET
+                    direction = excluded.direction,
+                    entry_price = excluded.entry_price,
+                    shares = excluded.shares,
+                    stop_loss = excluded.stop_loss,
+                    target = excluded.target,
+                    prob_win = excluded.prob_win,
+                    composite = excluded.composite,
+                    updated_at = excluded.updated_at;
+                """,
+                (
+                    str(ticker), str(direction), float(entry_price), int(shares),
+                    float(stop_loss), float(target), float(prob_win), float(composite),
+                    opened, updated,
+                ),
+            )
+
+    def delete_open_position(self, ticker: str) -> bool:
+        with self.get_connection() as conn:
+            cur = conn.execute("DELETE FROM open_positions WHERE ticker = ?;", (str(ticker),))
+            return cur.rowcount > 0
+
+    def fetch_open_positions(self) -> dict[str, dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute("SELECT * FROM open_positions ORDER BY ticker ASC;").fetchall()
+            return {
+                str(r["ticker"]): {
+                    "ticker": str(r["ticker"]),
+                    "direction": str(r["direction"]),
+                    "entry_price": float(r["entry_price"]),
+                    "shares": int(r["shares"]),
+                    "stop_loss": float(r["stop_loss"]),
+                    "target": float(r["target"]),
+                    "prob_win": float(r["prob_win"]),
+                    "composite": float(r["composite"]),
+                    "opened_at": str(r["opened_at"]),
+                    "updated_at": str(r["updated_at"]),
+                }
+                for r in rows
+            }
+
+    def sync_open_positions(self, positions: list[dict[str, Any]]) -> None:
+        """
+        Synchronize the open_positions table to exactly match the given active positions list.
+        Positions no longer in the list are removed; new/existing positions are upserted.
+        """
+        active_tickers = {str(p["ticker"]) for p in positions if "ticker" in p}
+        now_ts = datetime.now(timezone.utc).isoformat()
+        with self.get_connection() as conn:
+            if active_tickers:
+                placeholders = ",".join("?" * len(active_tickers))
+                conn.execute(
+                    f"DELETE FROM open_positions WHERE ticker NOT IN ({placeholders});",
+                    list(active_tickers),
+                )
+            else:
+                conn.execute("DELETE FROM open_positions;")
+
+            for p in positions:
+                ticker = str(p["ticker"])
+                direction = str(p.get("direction", "LONG"))
+                entry_price = float(p.get("entry", p.get("entry_price", p.get("close", 0.0))))
+                shares = int(p.get("shares", 0))
+                stop_loss = float(p.get("stop", p.get("stop_loss", 0.0)))
+                target = float(p.get("t1", p.get("target", 0.0)))
+                prob_win = float(p.get("prob_win", 0.50))
+                composite = float(p.get("composite", 0.50))
+                opened_at = str(p.get("opened_at") or now_ts)
+                updated_at = str(p.get("updated_at") or now_ts)
+                conn.execute(
+                    """
+                    INSERT INTO open_positions (
+                        ticker, direction, entry_price, shares, stop_loss, target,
+                        prob_win, composite, opened_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(ticker) DO UPDATE SET
+                        direction = excluded.direction,
+                        entry_price = excluded.entry_price,
+                        shares = excluded.shares,
+                        stop_loss = excluded.stop_loss,
+                        target = excluded.target,
+                        prob_win = excluded.prob_win,
+                        composite = excluded.composite,
+                        updated_at = excluded.updated_at;
+                    """,
+                    (
+                        ticker, direction, entry_price, shares, stop_loss, target,
+                        prob_win, composite, opened_at, updated_at,
+                    ),
+                )
