@@ -349,8 +349,12 @@ class SqliteDatabase:
             )
 
     def delete_open_position(self, ticker: str) -> bool:
+        alt_ticker = str(ticker)[:-3] if str(ticker).endswith(".NS") else f"{ticker}.NS"
         with self.get_connection() as conn:
-            cur = conn.execute("DELETE FROM open_positions WHERE ticker = ?;", (str(ticker),))
+            cur = conn.execute(
+                "DELETE FROM open_positions WHERE ticker = ? OR ticker = ?;",
+                (str(ticker), alt_ticker),
+            )
             return cur.rowcount > 0
 
     def fetch_open_positions(self) -> dict[str, dict[str, Any]]:

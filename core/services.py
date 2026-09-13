@@ -504,6 +504,7 @@ class ScanService:
             return ScanOutput([], [], None, sector_rs={})
 
         self.last_sector_rs = dict(prepared.sector_rs)
+        self._monitor_open_position_stops(prepared.processed, state)
 
         breadth = compute_breadth(prepared.processed, config)
         state.regime_locked = config.is_regime_locked()
@@ -585,6 +586,12 @@ class ScanService:
             )
 
         # Synchronize open_positions with current portfolio selections
+        # Retain all selected portfolio items + any surviving held positions from all_results
+        retained_tickers = {getattr(r, "ticker", "") for r in portfolio}
+        for r in all_results:
+            if getattr(r, "is_held", False) or "HeldPos" in getattr(r, "reasons", []):
+                retained_tickers.add(getattr(r, "ticker", ""))
+
         open_pos_payload = [
             {
                 "ticker": getattr(result, "ticker", ""),
@@ -596,12 +603,30 @@ class ScanService:
                 "prob_win": getattr(result, "prob_win", 0.0),
                 "composite": getattr(result, "composite", 0.0),
             }
-            for result in portfolio
+            for result in all_results
+            if getattr(result, "ticker", "") in retained_tickers
         ]
-        try:
-            self._persistence.save_open_positions(open_pos_payload)
-        except Exception as exc:
-            log.warning("Could not sync open positions: %s", exc)
+
+        seen_t: set[str] = set()
+        deduped_payload: list[dict[str, Any]] = []
+        for p in open_pos_payload:
+            t = str(p.get("ticker", ""))
+            if t and t not in seen_t:
+                seen_t.add(t)
+                deduped_payload.append(p)
+
+        # Log any positions that failed holding threshold or structural criteria
+        for old_t in list(state.open_positions):
+            clean_old_t = old_t.replace(".NS", "")
+            if clean_old_t not in seen_t and old_t not in seen_t:
+                log.info("Held position %s EXITED: Below holding threshold or structural criteria.", old_t)
+
+        saver = getattr(self._persistence, "save_open_positions", None)
+        if callable(saver):
+            try:
+                saver(deduped_payload)
+            except Exception as exc:
+                log.warning("Could not sync open positions: %s", exc)
 
         return ScanOutput(all_results, portfolio, regime, sector_rs=self.last_sector_rs)
 
@@ -701,6 +726,79 @@ class ScanService:
         else:
             log.warning("No trades generated - check thresholds and data quality.")
         return results
+    def _monitor_open_position_stops(
+        self,
+        processed: dict[str, pd.DataFrame],
+        state: ScanState,
+    ) -> None:
+        """
+        Deterministic price-vs-level check for active open positions.
+        If current bar breaches stop_loss or reaches target, execute trade exit,
+        remove from DB and state.open_positions.
+        """
+        loader = getattr(self._persistence, "load_open_positions", None)
+        if not callable(loader):
+            return
+        try:
+            open_pos_map = loader()
+        except Exception as exc:
+            log.warning("Could not load open positions for stop monitor: %s", exc)
+            return
+        if not open_pos_map:
+            return
+
+        db = getattr(self._persistence, "db", None)
+        deleter = getattr(db, "delete_open_position", None)
+
+        for ticker, pos in open_pos_map.items():
+            df = processed.get(ticker)
+            if df is None:
+                df = processed.get(f"{ticker}.NS")
+            if df is None or df.empty:
+                continue
+
+            row = df.iloc[-1]
+            close_p = float(row.get("Close", 0.0))
+            low_p = float(row.get("Low", close_p))
+            high_p = float(row.get("High", close_p))
+
+            direction = str(pos.get("direction", "LONG")).upper()
+            stop_loss = float(pos.get("stop_loss", 0.0))
+            target = float(pos.get("target", 0.0))
+
+            stopped_out = False
+            target_hit = False
+
+            if direction == "LONG":
+                if stop_loss > 0 and (low_p <= stop_loss or close_p <= stop_loss):
+                    stopped_out = True
+                elif target > 0 and (high_p >= target or close_p >= target):
+                    target_hit = True
+            elif direction == "SHORT":
+                if stop_loss > 0 and (high_p >= stop_loss or close_p >= stop_loss):
+                    stopped_out = True
+                elif target > 0 and (low_p <= target or close_p <= target):
+                    target_hit = True
+
+            if stopped_out:
+                log.info(
+                    "Held position %s EXITED: Stop-loss triggered (Price Low=%.2f Close=%.2f <= Stop=%.2f)",
+                    ticker, low_p, close_p, stop_loss,
+                )
+                if callable(deleter):
+                    deleter(ticker)
+                state.open_positions.discard(ticker)
+                state.open_positions.discard(ticker.replace(".NS", ""))
+            elif target_hit:
+                log.info(
+                    "Held position %s EXITED: Profit target triggered (Price High=%.2f Close=%.2f >= Target=%.2f)",
+                    ticker, high_p, close_p, target,
+                )
+                if callable(deleter):
+                    deleter(ticker)
+                state.open_positions.discard(ticker)
+                state.open_positions.discard(ticker.replace(".NS", ""))
+
     def _score_candidates_legacy_mock(
         self,
         *,
@@ -714,10 +812,13 @@ class ScanService:
         current_nav: float,
     ) -> list[TickerResult]:
         mock_results: list[TickerResult] = []
+        open_pos: set[str] = getattr(state, "open_positions", set())
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
             futures: dict[Any, str] = {}
             for ticker, df in prepared.processed.items():
-                if ticker == config.BENCHMARK or not passes_static_filters(df, config):
+                clean_ticker = ticker.replace(".NS", "")
+                is_open = (ticker in open_pos) or (clean_ticker in open_pos)
+                if ticker == config.BENCHMARK or (not is_open and not passes_static_filters(df, config)):
                     continue
 
                 capital_fraction = confidence_position_scale(regime.confidence)
@@ -744,6 +845,7 @@ class ScanService:
                     capital_fraction=capital_fraction,
                     debug=debug,
                     force_score=force_score,
+                    is_open_position=is_open,
                 )
                 futures[future] = ticker
 
@@ -789,11 +891,18 @@ class ScanService:
 
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as pass1_executor:
             pass1_futures: dict[Any, str] = {}
+            open_pos: set[str] = getattr(state, "open_positions", set())
+            open_pos_map = self._persistence.load_open_positions()
             for ticker, df in prepared.processed.items():
                 if ticker == config.BENCHMARK:
                     continue
-                if not passes_static_filters(df, config):
+                clean_ticker = ticker.replace(".NS", "")
+                is_open = (ticker in open_pos) or (clean_ticker in open_pos)
+                if not is_open and not passes_static_filters(df, config):
                     continue
+
+                pos_info = open_pos_map.get(ticker) or open_pos_map.get(clean_ticker) or {}
+                held_dir = pos_info.get("direction")
 
                 capital_fraction = confidence_position_scale(regime.confidence)
                 if self._capital_scaler is not None:
@@ -818,6 +927,8 @@ class ScanService:
                     capital_fraction=capital_fraction,
                     debug=debug,
                     force_score=force_score,
+                    is_open_position=is_open,
+                    held_direction=held_dir,
                 )
                 pass1_futures[fut] = ticker
 
@@ -840,7 +951,6 @@ class ScanService:
         )
 
         # Pass 2: Probability gating with hysteresis and Kelly position sizing
-        open_pos: set[str] = getattr(state, "open_positions", set())
         for cand in ranked_candidates:
             clean_ticker = cand.ticker.replace(".NS", "")
             is_open = (cand.ticker in open_pos) or (clean_ticker in open_pos)

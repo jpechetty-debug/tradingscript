@@ -311,8 +311,18 @@ def calculate_kelly_size(
 
 
 # -----------------------------------------------------------------------------
-# PORTFOLIO OPTIMISATION  (with MAX_CORR filter -- previously dead code)
+# PORTFOLIO OPTIMISATION  (with MAX_CORR filter and Hysteresis Priority)
 # -----------------------------------------------------------------------------
+
+def _is_held(cand: object) -> bool:
+    """Return True if candidate is an existing open position."""
+    if getattr(cand, "is_held", False):
+        return True
+    reasons = getattr(cand, "reasons", None)
+    if isinstance(reasons, (list, tuple, set)) and "HeldPos" in reasons:
+        return True
+    return False
+
 
 def optimize_portfolio(
     candidates:  list,
@@ -321,9 +331,12 @@ def optimize_portfolio(
 ) -> list:
     """
     Select up to config.PORTFOLIO_SIZE tickers from candidates, subject to:
-      1. Sector cap  -- max config.MAX_SECTOR_PICKS per sector.
-      2. Correlation -- skip any ticker with |corr| > config.MAX_CORR
-                        vs an already-selected ticker.
+      1. Position Hysteresis Priority:
+         Held positions (is_held=True or tagged "HeldPos") are retained first,
+         exempt from sector caps and mutual correlation (they are already in the live book).
+      2. Sector cap  -- max config.MAX_SECTOR_PICKS per sector for new candidate entries.
+      3. Correlation -- skip new candidates with |corr| > config.MAX_CORR
+                        vs any already-selected ticker (held or new).
 
     Args
     ----
@@ -338,41 +351,62 @@ def optimize_portfolio(
 
     Returns
     -------
-    List of selected TickerResult (length <= PORTFOLIO_SIZE).
+    List of selected TickerResult.
     """
-    sorted_candidates = sorted(candidates, key=lambda r: r.sharpe_rank, reverse=True)
-    selected: list          = []
+    held_candidates = [c for c in candidates if _is_held(c)]
+    new_candidates  = [c for c in candidates if not _is_held(c)]
+
+    selected: list = []
     sector_counts: dict[str, int] = {}
 
-    for c in sorted_candidates:
-        if len(selected) >= config.PORTFOLIO_SIZE:
-            break
+    # 1. Retain held candidates first (sorted by sharpe_rank desc)
+    held_candidates.sort(key=lambda r: getattr(r, "sharpe_rank", 0.0), reverse=True)
+    if len(held_candidates) > config.PORTFOLIO_SIZE:
+        log.warning(
+            "Held positions (%d) exceed PORTFOLIO_SIZE (%d); retaining all active positions, admitting 0 new candidates.",
+            len(held_candidates),
+            config.PORTFOLIO_SIZE,
+        )
 
-        # Sector cap
-        if sector_counts.get(c.sector, 0) >= config.MAX_SECTOR_PICKS:
-            log.debug("Portfolio: %s sector cap hit (%s)", c.ticker, c.sector)
-            continue
-
-        # Correlation filter
-        if corr_matrix is not None and not corr_matrix.empty:
-            c_key    = f"{c.ticker}.NS"
-            too_corr = False
-            if c_key in corr_matrix.columns:
-                for s in selected:
-                    s_key = f"{s.ticker}.NS"
-                    if s_key in corr_matrix.index and c_key in corr_matrix.index:
-                        corr_val = abs(float(corr_matrix.loc[c_key, s_key]))
-                        if corr_val > config.MAX_CORR:
-                            log.debug(
-                                "Portfolio: %s dropped -- corr(%.2f) > MAX_CORR(%.2f) with %s",
-                                c.ticker, corr_val, config.MAX_CORR, s.ticker,
-                            )
-                            too_corr = True
-                            break
-            if too_corr:
-                continue
-
+    for c in held_candidates:
         selected.append(c)
         sector_counts[c.sector] = sector_counts.get(c.sector, 0) + 1
+
+    # 2. Fill remaining capacity with new candidates
+    remaining_slots = max(0, config.PORTFOLIO_SIZE - len(selected))
+    if remaining_slots > 0:
+        new_candidates.sort(key=lambda r: getattr(r, "sharpe_rank", 0.0), reverse=True)
+        for c in new_candidates:
+            if len(selected) >= config.PORTFOLIO_SIZE:
+                break
+
+            # Sector cap for new candidate
+            if sector_counts.get(c.sector, 0) >= config.MAX_SECTOR_PICKS:
+                log.debug("Portfolio: %s sector cap hit (%s)", getattr(c, "ticker", ""), c.sector)
+                continue
+
+            # Correlation filter against all currently selected (both held and new)
+            if corr_matrix is not None and not corr_matrix.empty:
+                c_ticker = getattr(c, "ticker", "")
+                c_key = f"{c_ticker}.NS" if not str(c_ticker).endswith(".NS") else str(c_ticker)
+                too_corr = False
+                if c_key in corr_matrix.columns:
+                    for s in selected:
+                        s_ticker = getattr(s, "ticker", "")
+                        s_key = f"{s_ticker}.NS" if not str(s_ticker).endswith(".NS") else str(s_ticker)
+                        if s_key in corr_matrix.index and c_key in corr_matrix.index:
+                            corr_val = abs(float(corr_matrix.loc[c_key, s_key]))
+                            if corr_val > config.MAX_CORR:
+                                log.debug(
+                                    "Portfolio: %s dropped -- corr(%.2f) > MAX_CORR(%.2f) with %s",
+                                    c_ticker, corr_val, config.MAX_CORR, s_ticker,
+                                )
+                                too_corr = True
+                                break
+                if too_corr:
+                    continue
+
+            selected.append(c)
+            sector_counts[c.sector] = sector_counts.get(c.sector, 0) + 1
 
     return selected

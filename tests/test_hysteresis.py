@@ -8,7 +8,7 @@ from core.config import SystemConfig, MarketRegimeType
 from core.regime import MarketRegime
 from core.runtime_paths import RuntimePaths
 from core.services import PersistenceService
-from core.scorer import score_ticker, score_candidate_pass2, CandidateContext
+from core.scorer import score_ticker, score_candidate_pass2, CandidateContext, TickerResult
 from core.factors import FactorScores, DEFAULT_WEIGHTS
 
 
@@ -255,3 +255,319 @@ class TestHysteresisGating:
             config = SystemConfig()
             state = ps.create_scan_state(config)
             assert "TCS.NS" in state.open_positions
+
+
+def _make_dummy_ticker_result(
+    ticker: str,
+    sector: str = "IT",
+    sharpe_rank: float = 1.0,
+    is_held: bool = False,
+    reasons: list[str] | None = None,
+) -> TickerResult:
+    reasons = reasons or (["HeldPos"] if is_held else [])
+    factors = FactorScores(
+        trend=0.6, momentum=0.6, volume=0.6, volatility=0.6,
+        rs=0.6, breakout=0.6, quality=0.6, composite=0.6,
+        ic_weights=dict(DEFAULT_WEIGHTS),
+    )
+    return TickerResult(
+        ticker=ticker,
+        sector=sector,
+        direction="LONG",
+        close=100.0,
+        change_pct=1.0,
+        factors=factors,
+        composite=0.6,
+        prob_win=0.55 if not is_held else 0.49,
+        expectancy_r=0.3,
+        sharpe_rank=sharpe_rank,
+        entry=100.0,
+        stop=95.0,
+        t1=110.0,
+        t2=115.0,
+        breakeven=101.0,
+        trail_stop=96.0,
+        time_stop_bars=5,
+        shares=10,
+        risk_inr=50.0,
+        rr_t1=2.0,
+        kelly_f=0.05,
+        kurt_correction=1.0,
+        excess_kurtosis=0.0,
+        rsi=55.0,
+        stochrsi_k=60.0,
+        rvol=1.2,
+        adx=25.0,
+        super_up=True,
+        macd_hist=0.5,
+        atr_pctile=50.0,
+        vol_contract=False,
+        rs_vs_nifty=1.0,
+        near_52w=True,
+        ema200_aligned=True,
+        mtf_aligned=True,
+        consec_days=3,
+        poc=100.0,
+        val=98.0,
+        vah=102.0,
+        regime="TREND_UP",
+        session="OPENING_RANGE",
+        reasons=reasons,
+        is_held=is_held,
+    )
+
+
+class TestPass1Hysteresis:
+    def test_intraday_cutoff_blocks_new_candidate_allows_held_position(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from core.scorer import score_candidate_pass1
+
+        IST = ZoneInfo("Asia/Kolkata")
+
+        cand = _make_dummy_candidate(ticker="INTRADAY.NS")
+        df = cand.daily_df.copy()
+        df["EMA_20"] = df["Close"] * 1.05
+        df["EMA_200"] = df["Close"] * 1.15
+        df["Super_Up"] = False
+        df["Dn_Day"] = 1
+        df["Up_Day"] = 0
+
+        regime = MarketRegime(
+            regime=MarketRegimeType.TREND_DOWN,
+            breadth=0.30,
+            adx_median=25.0,
+            atr_ratio=1.0,
+            confidence=0.85,
+            confirmed=True,
+        )
+
+        config = SystemConfig()
+        config.SHORT_IS_INTRADAY_ONLY = True
+        config.INTRADAY_ENTRY_CUTOFF = "14:30"
+
+        # Evaluation at 14:45 IST during CLOSING_TREND
+        eval_dt = datetime(2024, 1, 15, 14, 45, tzinfo=IST)
+
+        # 1. New candidate: blocked by 14:30 entry cutoff
+        res_new = score_candidate_pass1(
+            ticker="INTRADAY.NS",
+            daily_df=df,
+            bench=cand.bench,
+            sector_ranks=cand.sector_ranks,
+            sector_rs=cand.sector_rs,
+            session="CLOSING_TREND",
+            regime=regime,
+            config=config,
+            now=eval_dt,
+            is_open_position=False,
+        )
+        assert res_new is None
+
+        # 2. Held position: exempt from entry cutoff
+        res_held = score_candidate_pass1(
+            ticker="INTRADAY.NS",
+            daily_df=df,
+            bench=cand.bench,
+            sector_ranks=cand.sector_ranks,
+            sector_rs=cand.sector_rs,
+            session="CLOSING_TREND",
+            regime=regime,
+            config=config,
+            now=eval_dt,
+            is_open_position=True,
+            held_direction="SHORT",
+        )
+        assert res_held is not None
+        assert res_held.ticker == "INTRADAY.NS"
+        assert res_held.trade_horizon == "INTRADAY"
+
+    def test_regime_block_exits_held_position(self):
+        from core.scorer import score_candidate_pass1
+
+        cand = _make_dummy_candidate(ticker="HELD_EXIT.NS")
+        config = SystemConfig()
+
+        # Regime that forbids LONG
+        bear_regime = MarketRegime(
+            regime=MarketRegimeType.TREND_DOWN,
+            breadth=0.2,
+            adx_median=30.0,
+            atr_ratio=1.2,
+            confidence=0.9,
+            confirmed=True,
+        )
+
+        res = score_candidate_pass1(
+            ticker="HELD_EXIT.NS",
+            daily_df=cand.daily_df,
+            bench=cand.bench,
+            sector_ranks=cand.sector_ranks,
+            sector_rs=cand.sector_rs,
+            session="OPENING_RANGE",
+            regime=bear_regime,
+            config=config,
+            is_open_position=True,
+            held_direction="LONG",
+        )
+        assert res is None
+
+
+class TestPortfolioHysteresisCoordination:
+    def test_held_position_prioritized_over_higher_sharpe_new_candidate(self):
+        from core.portfolio import optimize_portfolio
+
+        config = SystemConfig()
+        config.PORTFOLIO_SIZE = 1
+
+        held = _make_dummy_ticker_result(ticker="HELD", sharpe_rank=0.8, is_held=True)
+        new_c = _make_dummy_ticker_result(ticker="NEW", sharpe_rank=2.5, is_held=False)
+
+        selected = optimize_portfolio([held, new_c], config)
+        assert len(selected) == 1
+        assert selected[0].ticker == "HELD"
+
+    def test_held_positions_exempt_from_sector_cap(self):
+        from core.portfolio import optimize_portfolio
+
+        config = SystemConfig()
+        config.PORTFOLIO_SIZE = 5
+        config.MAX_SECTOR_PICKS = 2
+
+        # 3 held positions in Energy (already exceeding cap of 2)
+        h1 = _make_dummy_ticker_result(ticker="H1", sector="Energy", sharpe_rank=1.0, is_held=True)
+        h2 = _make_dummy_ticker_result(ticker="H2", sector="Energy", sharpe_rank=1.1, is_held=True)
+        h3 = _make_dummy_ticker_result(ticker="H3", sector="Energy", sharpe_rank=1.2, is_held=True)
+
+        # 1 new candidate in Energy (should be blocked) and 1 new in IT (should be admitted)
+        new_energy = _make_dummy_ticker_result(ticker="NEW_ENG", sector="Energy", sharpe_rank=2.0, is_held=False)
+        new_it = _make_dummy_ticker_result(ticker="NEW_IT", sector="IT", sharpe_rank=1.5, is_held=False)
+
+        selected = optimize_portfolio([h1, h2, h3, new_energy, new_it], config)
+        tickers = [r.ticker for r in selected]
+        assert "H1" in tickers
+        assert "H2" in tickers
+        assert "H3" in tickers
+        assert "NEW_ENG" not in tickers  # blocked by sector cap
+        assert "NEW_IT" in tickers       # admitted
+
+    def test_held_positions_exempt_from_mutual_correlation(self):
+        from core.portfolio import optimize_portfolio
+
+        config = SystemConfig()
+        config.PORTFOLIO_SIZE = 5
+        config.MAX_CORR = 0.70
+
+        h1 = _make_dummy_ticker_result(ticker="AAA", is_held=True)
+        h2 = _make_dummy_ticker_result(ticker="BBB", is_held=True)
+        new_c = _make_dummy_ticker_result(ticker="CCC", is_held=False)
+
+        # AAA and BBB have corr=0.95 (both held). AAA and CCC have corr=0.85 (CCC is new).
+        corr = pd.DataFrame(
+            [
+                [1.00, 0.95, 0.85],
+                [0.95, 1.00, 0.20],
+                [0.85, 0.20, 1.00],
+            ],
+            index=["AAA.NS", "BBB.NS", "CCC.NS"],
+            columns=["AAA.NS", "BBB.NS", "CCC.NS"],
+        )
+
+        selected = optimize_portfolio([h1, h2, new_c], config, corr_matrix=corr)
+        tickers = [r.ticker for r in selected]
+        assert "AAA" in tickers
+        assert "BBB" in tickers          # held positions are exempt from mutual correlation
+        assert "CCC" not in tickers      # new candidate dropped due to correlation with AAA
+
+    def test_held_count_exceeds_portfolio_size_retains_all_held(self):
+        from core.portfolio import optimize_portfolio
+
+        config = SystemConfig()
+        config.PORTFOLIO_SIZE = 2
+
+        h1 = _make_dummy_ticker_result(ticker="H1", sharpe_rank=1.0, is_held=True)
+        h2 = _make_dummy_ticker_result(ticker="H2", sharpe_rank=1.1, is_held=True)
+        h3 = _make_dummy_ticker_result(ticker="H3", sharpe_rank=1.2, is_held=True)
+        new_c = _make_dummy_ticker_result(ticker="NEW", sharpe_rank=2.0, is_held=False)
+
+        selected = optimize_portfolio([h1, h2, h3, new_c], config)
+        assert len(selected) == 3        # all 3 active positions retained
+        assert "NEW" not in [r.ticker for r in selected]  # 0 new admitted
+
+
+class TestStopLossAndTargetMonitoring:
+    def test_stop_loss_trigger_removes_from_db_and_state(self):
+        from core.services import ScanService
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = RuntimePaths.discover(root=Path(tmp_dir))
+            ps = PersistenceService(paths=paths)
+
+            # Insert an open position with stop_loss = 2500.0
+            ps.save_open_positions([
+                {"ticker": "RELIANCE.NS", "direction": "LONG", "entry": 2550.0, "shares": 10, "stop": 2500.0, "t1": 2650.0, "prob_win": 0.55, "composite": 0.60}
+            ])
+
+            config = SystemConfig()
+            state = ps.create_scan_state(config)
+            assert "RELIANCE.NS" in state.open_positions
+
+            # Processed data has Low=2480.0 (breaching 2500 stop)
+            df = pd.DataFrame({"Close": [2490.0], "Low": [2480.0], "High": [2510.0]})
+            processed = {"RELIANCE.NS": df}
+
+            scan_svc = ScanService(version="14.6.0", persistence=ps)
+            scan_svc._monitor_open_position_stops(processed, state)
+
+            # Position must be removed from DB and state
+            assert "RELIANCE.NS" not in state.open_positions
+            assert ps.load_open_positions() == {}
+
+    def test_target_trigger_removes_from_db_and_state(self):
+        from core.services import ScanService
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = RuntimePaths.discover(root=Path(tmp_dir))
+            ps = PersistenceService(paths=paths)
+
+            # Insert an open position with target = 2650.0
+            ps.save_open_positions([
+                {"ticker": "TCS.NS", "direction": "LONG", "entry": 2500.0, "shares": 10, "stop": 2400.0, "t1": 2650.0, "prob_win": 0.55, "composite": 0.60}
+            ])
+
+            config = SystemConfig()
+            state = ps.create_scan_state(config)
+            assert "TCS.NS" in state.open_positions
+
+            # Processed data has High=2680.0 (reaching target)
+            df = pd.DataFrame({"Close": [2660.0], "Low": [2490.0], "High": [2680.0]})
+            processed = {"TCS.NS": df}
+
+            scan_svc = ScanService(version="14.6.0", persistence=ps)
+            scan_svc._monitor_open_position_stops(processed, state)
+
+            assert "TCS.NS" not in state.open_positions
+            assert ps.load_open_positions() == {}
+
+    def test_healthy_position_retained(self):
+        from core.services import ScanService
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            paths = RuntimePaths.discover(root=Path(tmp_dir))
+            ps = PersistenceService(paths=paths)
+
+            ps.save_open_positions([
+                {"ticker": "INFY.NS", "direction": "LONG", "entry": 1500.0, "shares": 10, "stop": 1450.0, "t1": 1600.0, "prob_win": 0.55, "composite": 0.60}
+            ])
+
+            config = SystemConfig()
+            state = ps.create_scan_state(config)
+
+            df = pd.DataFrame({"Close": [1520.0], "Low": [1480.0], "High": [1550.0]})
+            processed = {"INFY.NS": df}
+
+            scan_svc = ScanService(version="14.6.0", persistence=ps)
+            scan_svc._monitor_open_position_stops(processed, state)
+
+            assert "INFY.NS" in state.open_positions
+            assert "INFY.NS" in ps.load_open_positions()

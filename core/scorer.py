@@ -104,6 +104,7 @@ class TickerResult:
     # Human-readable signal reasons
     reasons: list[str] = field(default_factory=list)
     is_watchlist: bool = False
+    is_held: bool = False
 
     def display_score(self) -> int:
         return int(self.composite * 100)
@@ -414,6 +415,8 @@ def score_candidate_pass1(
     debug:        bool = False,
     force_score:  bool = False,
     now:          Optional[datetime] = None,
+    is_open_position: bool = False,
+    held_direction: Optional[str] = None,
 ) -> Optional[CandidateContext]:
     """
     Pass 1 of ticker scoring pipeline:
@@ -428,11 +431,12 @@ def score_candidate_pass1(
     row = daily_df.iloc[-1]
 
     # ── 1. Liquidity gate ────────────────────────────────────────────────────
-    ok, msg = passes_liquidity(row, config)
-    if not ok:
-        if debug:
-            log.debug("%s: LIQUIDITY — %s", ticker, msg)
-        return None
+    if not is_open_position:
+        ok, msg = passes_liquidity(row, config)
+        if not ok:
+            if debug:
+                log.debug("%s: LIQUIDITY — %s", ticker, msg)
+            return None
 
     # ── 1b. Data-quality gate (FIX 4) ────────────────────────────────────────
     # Reject tickers with NaN ATR_Pctile or ATR_50_mean.  These arise when
@@ -466,6 +470,16 @@ def score_candidate_pass1(
 
     if force_score:
         direction = "LONG"
+    elif is_open_position:
+        # For held positions, retain the established direction unless directional bias is strong
+        if held_direction:
+            direction = held_direction
+        elif is_bull:
+            direction = "LONG"
+        elif is_bear:
+            direction = "SHORT"
+        else:
+            direction = "LONG"
     elif not is_bull and not is_bear:
         if debug:
             log.debug("%s: NEUTRAL — no directional bias", ticker)
@@ -482,7 +496,9 @@ def score_candidate_pass1(
                 if regime.allows_mean_reversion() and rsi_val <= 55:
                     pass
                 else:
-                    if debug:
+                    if is_open_position:
+                        log.info("%s: Held position exited via regime structural veto (%s blocks LONG)", ticker, regime.regime)
+                    elif debug:
                         log.debug("%s: regime blocks LONG (%s)", ticker, regime.regime)
                     return None
         if direction == "SHORT":
@@ -492,7 +508,9 @@ def score_candidate_pass1(
                 if regime.allows_mean_reversion() and rsi_val >= 45:
                     pass
                 else:
-                    if debug:
+                    if is_open_position:
+                        log.info("%s: Held position exited via regime structural veto (%s blocks SHORT)", ticker, regime.regime)
+                    elif debug:
                         log.debug("%s: regime blocks SHORT (%s)", ticker, regime.regime)
                     return None
 
@@ -500,11 +518,15 @@ def score_candidate_pass1(
     if config.USE_EMA200_FILTER:
         above200 = close > ema200
         if direction == "LONG"  and not above200:
-            if debug:
+            if is_open_position:
+                log.info("%s: Held position exited via EMA-200 structural breakdown (LONG below 200)", ticker)
+            elif debug:
                 log.debug("%s: EMA-200 VETO (LONG below 200)", ticker)
             return None
         if direction == "SHORT" and above200:
-            if debug:
+            if is_open_position:
+                log.info("%s: Held position exited via EMA-200 structural breakdown (SHORT above 200)", ticker)
+            elif debug:
                 log.debug("%s: EMA-200 VETO (SHORT above 200)", ticker)
             return None
 
@@ -522,8 +544,9 @@ def score_candidate_pass1(
         trade_horizon = "SWING"
 
     # Intraday Hard Entry Freeze: Veto new MIS entries past INTRADAY_ENTRY_CUTOFF (14:30)
-    # because broker auto-square-off occurs at 15:15 (less than 45 min runway)
-    if trade_horizon == "INTRADAY" and not force_score:
+    # because broker auto-square-off occurs at 15:15 (less than 45 min runway).
+    # Existing held positions are exempt since they are already active.
+    if trade_horizon == "INTRADAY" and not force_score and not is_open_position:
         current_dt = now.astimezone(IST) if now is not None else datetime.now(IST)
         current_time = current_dt.time()
         cutoff_time_str = getattr(config, "INTRADAY_ENTRY_CUTOFF", "14:30")
@@ -815,6 +838,7 @@ def score_candidate_pass2(
         action="BUY" if direction == "LONG" else "SELL",
         reasons=reasons,
         is_watchlist=is_watchlist,
+        is_held=is_open_position,
     )
 
 
@@ -878,6 +902,7 @@ def score_ticker(
         debug=debug,
         force_score=force_score,
         now=now,
+        is_open_position=is_open_position,
     )
     if cand is None:
         return None
