@@ -2,8 +2,7 @@
 
 [![Security Scan](https://img.shields.io/badge/Security-Verified-success?style=flat-square)](#)
 [![Lint Compliance](https://img.shields.io/badge/Lint-Ruff%20%7C%20Mypy%20Strict-blue?style=flat-square)](#)
-[![Test Suite](https://img.shields.io/badge/Tests-603%20Passed-brightgreen?style=flat-square)](#)
-[![Checklist Protocol](https://img.shields.io/badge/Master%20Checklist-6%2F6%20Passed-success?style=flat-square)](#)
+[![Test Suite](https://img.shields.io/badge/Tests-602%20Passed-brightgreen?style=flat-square)](#)
 [![Version](https://img.shields.io/badge/Version-14.6--Modular-indigo?style=flat-square)](#)
 
 **Institutional-Grade Quantitative Trading Intelligence & Portfolio Optimization for NSE India.**
@@ -206,10 +205,7 @@ All parameters can be set in `.env` or passed via system environment variables:
 The codebase enforces strict institutional validation standards:
 
 ```bash
-# Run the Master Quality Checklist (6/6 priority checks)
-python .agent/scripts/checklist.py .
-
-# Run the complete test suite (603 unit & integration tests)
+# Run the complete test suite (602 unit & integration tests)
 python -m pytest tests/ -v
 
 # Run strict code quality & lint verification
@@ -219,10 +215,8 @@ python -m ruff check core/ tests/
 python -m mypy core/
 ```
 
-- **Security**: Zero exposed credentials or dangerous patterns (`security_scan.py`).
 - **Static Analysis**: 100% compliant with Ruff and Mypy strict typing.
-- **Schema Integrity**: SQLite state and database migrations fully verified (`schema_validator.py`).
-- **Regression Safety**: 603/603 test suites passing with zero failures.
+- **Regression Safety**: 602/602 test suites passing with zero failures.
 
 ---
 

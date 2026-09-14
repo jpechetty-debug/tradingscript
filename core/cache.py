@@ -33,7 +33,6 @@ Usage
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Any, Optional
 
@@ -237,80 +236,6 @@ def _build_corr_matrix(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TIERED MARKET DATA CACHE (L1 Memory + L2 Redis with Jitter)
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TieredMarketDataCache:
-    """
-    Two-tier cache: L1 in-memory dict with TTL, L2 Redis with TTL jitter.
-    Gracefully degrades to L1 if Redis is unavailable or unconfigured.
-    """
-
-    def __init__(
-        self,
-        default_ttl_sec: int = 60,
-        redis_url: Optional[str] = None,
-    ) -> None:
-        self.default_ttl = default_ttl_sec
-        self._l1: dict[str, tuple[float, Any]] = {}
-        self._redis_client: Optional[Any] = None
-        url = redis_url or os.environ.get("REDIS_URL")
-        if url:
-            try:
-                import redis  # type: ignore[import-untyped]
-                client = redis.Redis.from_url(url, socket_timeout=2.0, decode_responses=False)
-                client.ping()
-                self._redis_client = client
-                log.info("TieredMarketDataCache: Connected to L2 Redis at %s", url)
-            except Exception as exc:
-                log.warning("TieredMarketDataCache: Redis unavailable (%s); using L1 memory only.", exc)
-                self._redis_client = None
-
-    def get(self, key: str) -> Optional[Any]:
-        now = time.monotonic()
-        # 1. Check L1 memory cache
-        if key in self._l1:
-            expiry, val = self._l1[key]
-            if now < expiry:
-                return val
-            else:
-                del self._l1[key]
-
-        # 2. Check L2 Redis cache
-        if self._redis_client is not None:
-            try:
-                import pickle
-                raw = self._redis_client.get(f"sovereign:{key}")
-                if raw is not None:
-                    val = pickle.loads(raw)
-                    self._l1[key] = (now + self.default_ttl, val)
-                    return val
-            except Exception:
-                pass
-
-        return None
-
-    def set(self, key: str, value: Any, ttl_sec: Optional[int] = None) -> None:
-        now = time.monotonic()
-        ttl = ttl_sec or self.default_ttl
-        self._l1[key] = (now + ttl, value)
-
-        if self._redis_client is not None:
-            try:
-                import pickle
-                import random
-                # Add +/- 10% TTL jitter to prevent stampedes (ECC redis-patterns standard)
-                jitter = int(ttl * (0.9 + 0.2 * random.random()))
-                raw = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-                self._redis_client.setex(f"sovereign:{key}", jitter, raw)
-            except Exception:
-                pass
-
-    def clear(self) -> None:
-        self._l1.clear()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # MODULE-LEVEL SINGLETON  (opt-in convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -318,4 +243,3 @@ class TieredMarketDataCache:
 #: calling ``SCAN_CACHE.clear()`` at the start of each run_scan() call and
 #: passing ``SCAN_CACHE`` to score_ticker / _build_corr_matrix wrappers.
 SCAN_CACHE = ScanCache()
-TIERED_CACHE = TieredMarketDataCache()

@@ -1,11 +1,10 @@
 import json
-import time
 import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
 
 from core.config import CONFIG
-from core.cache import _build_corr_matrix, TieredMarketDataCache
+from core.cache import _build_corr_matrix
 from core.indicators import _supertrend_vectorised, _supertrend_inner_loop_py, _true_range, _wilder
 from server import app
 
@@ -65,25 +64,6 @@ def test_correlation_matrix_parity_and_speed():
     # Check valid bounds
     assert (corr_fast.values >= -1.0 - 1e-7).all()
     assert (corr_fast.values <= 1.0 + 1e-7).all()
-
-
-def test_tiered_market_data_cache():
-    """Verify TieredMarketDataCache L1 memory TTL and eviction."""
-    cache = TieredMarketDataCache(default_ttl_sec=1)
-    test_data = {"quote": 1250.5, "symbol": "TCS.NS"}
-
-    # Set and get
-    cache.set("quote:TCS.NS", test_data)
-    assert cache.get("quote:TCS.NS") == test_data
-
-    # Test eviction after TTL
-    time.sleep(1.05)
-    assert cache.get("quote:TCS.NS") is None
-
-    # Test explicit clear
-    cache.set("quote:INFY.NS", {"quote": 1800.0})
-    cache.clear()
-    assert cache.get("quote:INFY.NS") is None
 
 
 def test_sse_events_stream():
