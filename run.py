@@ -76,6 +76,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
     parser.add_argument("--bt-step",       type=int, default=20,  metavar="DAYS", help="Backtest step between folds (default 20)")
     parser.add_argument("--bt-out",        type=str, default="backtest_results.csv", metavar="FILE", help="CSV output path (relative paths go under artifacts/)")
     parser.add_argument("--bt-direction",  type=str, default="LONG", choices=["LONG","SHORT","BOTH"], help="Trade direction")
+    parser.add_argument("--bt-horizon",    type=str, default="SWING", choices=["SWING","INTRADAY","BOTH"], help="Backtest horizon filter (default SWING)")
     parser.add_argument("--regime-override", type=str, default=None, help="Force a specific regime (TREND_UP, RANGE, etc.)")
     parser.add_argument("--no-ema-filter", action="store_true", help="Disable EMA200 structural filter for debugging")
     parser.add_argument("--force-score", action="store_true", help="Force scoring of all tickers (bypass BULL/BEAR directional gates)")
@@ -145,7 +146,9 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
                 is_mean_rev = any("MeanRev" in str(x) for x in d.get("reasons", []))
 
                 engine_horizon = d.get("trade_horizon")
-                if dirn == "SHORT":
+                if not getattr(config, "INTRADAY_ENABLED", False):
+                    horizon = "SWING"
+                elif dirn == "SHORT" and getattr(config, "SHORT_IS_INTRADAY_ONLY", True):
                     horizon = "INTRADAY"
                 elif engine_horizon in ("INTRADAY", "SWING"):
                     horizon = engine_horizon
@@ -198,6 +201,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
             direction=args.bt_direction,
             debug=args.debug,
             services=services,
+            horizon_filter=args.bt_horizon,
         )
         return
     elif args.calibrate:

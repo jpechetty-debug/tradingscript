@@ -101,9 +101,41 @@ class SqliteDatabase:
                     target REAL NOT NULL,
                     prob_win REAL NOT NULL,
                     composite REAL NOT NULL,
+                    raw_payload TEXT NOT NULL DEFAULT '{}',
                     opened_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS executed_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_id TEXT UNIQUE NOT NULL,
+                    ticker TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    trade_horizon TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    exit_price REAL,
+                    entry_ts TEXT NOT NULL,
+                    exit_ts TEXT,
+                    stop_loss REAL NOT NULL,
+                    target REAL NOT NULL,
+                    shares INTEGER NOT NULL,
+                    gross_pnl REAL,
+                    costs REAL,
+                    net_pnl REAL,
+                    realised_r REAL,
+                    composite REAL NOT NULL,
+                    prob_win REAL NOT NULL,
+                    factors TEXT NOT NULL,
+                    outcome TEXT DEFAULT 'OPEN',
+                    regime TEXT,
+                    session TEXT,
+                    created_at TEXT NOT NULL,
+                    closed_at TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_exec_ticker ON executed_trades(ticker);
+                CREATE INDEX IF NOT EXISTS idx_exec_outcome ON executed_trades(outcome);
+                CREATE INDEX IF NOT EXISTS idx_exec_horizon ON executed_trades(trade_horizon);
             """)
 
             # Migration: ensure trade_id column exists and populate empty legacy records
@@ -112,6 +144,9 @@ class SqliteDatabase:
                 conn.execute("ALTER TABLE trade_log ADD COLUMN trade_id TEXT;")
             conn.execute("UPDATE trade_log SET trade_id = 'legacy_' || id WHERE trade_id IS NULL OR trade_id = '';")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_unique_id ON trade_log(trade_id);")
+            position_cols = [c[1] for c in conn.execute("PRAGMA table_info(open_positions);").fetchall()]
+            if "raw_payload" not in position_cols:
+                conn.execute("ALTER TABLE open_positions ADD COLUMN raw_payload TEXT NOT NULL DEFAULT '{}';")
 
     # ── Portfolio State ─────────────────────────────────────────────────────────
 
@@ -278,6 +313,144 @@ class SqliteDatabase:
             row = conn.execute("SELECT COUNT(*) AS cnt FROM trade_log;").fetchone()
             return int(row["cnt"]) if row else 0
 
+    # ── Executed Trades (proper trade lifecycle) ───────────────────────────────
+
+    def insert_executed_trade(self, trade: dict[str, Any]) -> int:
+        """Insert a new executed trade. All required fields must be present."""
+        required = ("trade_id", "ticker", "direction", "trade_horizon",
+                    "entry_price", "entry_ts", "stop_loss", "target",
+                    "shares", "composite", "prob_win", "factors")
+        missing = [k for k in required if k not in trade]
+        if missing:
+            raise ValueError(f"Missing required fields for executed trade: {missing}")
+
+        factors_str = json.dumps(trade["factors"]) if isinstance(trade["factors"], dict) else str(trade["factors"])
+        ts = trade.get("created_at") or datetime.now(timezone.utc).isoformat()
+
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO executed_trades (
+                    trade_id, ticker, direction, trade_horizon,
+                    entry_price, stop_loss, target, shares,
+                    composite, prob_win, factors, outcome,
+                    regime, session, entry_ts, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?)
+                ON CONFLICT(trade_id) DO NOTHING;
+                """,
+                (
+                    str(trade["trade_id"]), str(trade["ticker"]),
+                    str(trade["direction"]), str(trade["trade_horizon"]),
+                    float(trade["entry_price"]), float(trade["stop_loss"]),
+                    float(trade["target"]), int(trade["shares"]),
+                    float(trade["composite"]), float(trade["prob_win"]),
+                    factors_str, trade.get("regime"), trade.get("session"),
+                    str(trade["entry_ts"]), ts,
+                ),
+            )
+            return cursor.lastrowid or 0
+
+    def close_executed_trade(
+        self,
+        trade_id: str,
+        exit_price: float,
+        exit_ts: str,
+        gross_pnl: float,
+        costs: float,
+        net_pnl: float,
+        realised_r: float,
+        outcome: str,
+    ) -> bool:
+        """Close an open executed trade with exit data and outcome."""
+        if outcome not in ("WIN", "LOSS", "BREAKEVEN"):
+            raise ValueError(f"outcome must be WIN/LOSS/BREAKEVEN, got {outcome!r}")
+        with self.get_connection() as conn:
+            cur = conn.execute(
+                """
+                UPDATE executed_trades SET
+                    exit_price = ?, exit_ts = ?,
+                    gross_pnl = ?, costs = ?, net_pnl = ?,
+                    realised_r = ?, outcome = ?, closed_at = ?
+                WHERE trade_id = ? AND outcome = 'OPEN';
+                """,
+                (
+                    float(exit_price), str(exit_ts),
+                    float(gross_pnl), float(costs), float(net_pnl),
+                    float(realised_r), str(outcome),
+                    datetime.now(timezone.utc).isoformat(),
+                    str(trade_id),
+                ),
+            )
+            return cur.rowcount > 0
+
+    def fetch_executed_trades(
+        self,
+        ticker: Optional[str] = None,
+        horizon: Optional[str] = None,
+        outcome: Optional[str] = None,
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]:
+        """Fetch executed trades with optional filters."""
+        query = "SELECT * FROM executed_trades WHERE 1=1"
+        params: list[Any] = []
+        if ticker:
+            query += " AND ticker = ?"
+            params.append(ticker)
+        if horizon:
+            query += " AND trade_horizon = ?"
+            params.append(horizon)
+        if outcome:
+            query += " AND outcome = ?"
+            params.append(outcome)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        with self.get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [
+                {key: row[key] for key in row.keys()}
+                for row in rows
+            ]
+
+    def fetch_calibration_trades(
+        self,
+        min_samples: int = 80,
+    ) -> tuple[list[float], list[int]]:
+        """
+        Return (composites, outcomes) from closed executed trades
+        suitable for Platt calibration.
+
+        Returns empty lists if fewer than min_samples closed trades exist.
+        """
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT composite, outcome FROM executed_trades
+                WHERE outcome IN ('WIN', 'LOSS', 'BREAKEVEN')
+                  AND composite IS NOT NULL
+                ORDER BY id ASC;
+                """
+            ).fetchall()
+
+        if len(rows) < min_samples:
+            return [], []
+
+        composites = [float(r["composite"]) for r in rows]
+        outcomes = [1 if r["outcome"] == "WIN" else 0 for r in rows]
+        return composites, outcomes
+
+    def count_executed_trades(self, outcome: Optional[str] = None) -> int:
+        """Count executed trades, optionally filtered by outcome."""
+        with self.get_connection() as conn:
+            if outcome:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM executed_trades WHERE outcome = ?;",
+                    (outcome,),
+                ).fetchone()
+            else:
+                row = conn.execute("SELECT COUNT(*) AS cnt FROM executed_trades;").fetchone()
+            return int(row["cnt"]) if row else 0
+
     # ── Factor Weights ─────────────────────────────────────────────────────────
 
     def upsert_factor_weights(
@@ -372,6 +545,7 @@ class SqliteDatabase:
                     "composite": float(r["composite"]),
                     "opened_at": str(r["opened_at"]),
                     "updated_at": str(r["updated_at"]),
+                    **(json.loads(r["raw_payload"]) if r["raw_payload"] else {}),
                 }
                 for r in rows
             }
@@ -408,8 +582,8 @@ class SqliteDatabase:
                     """
                     INSERT INTO open_positions (
                         ticker, direction, entry_price, shares, stop_loss, target,
-                        prob_win, composite, opened_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        prob_win, composite, raw_payload, opened_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(ticker) DO UPDATE SET
                         direction = excluded.direction,
                         entry_price = excluded.entry_price,
@@ -418,10 +592,11 @@ class SqliteDatabase:
                         target = excluded.target,
                         prob_win = excluded.prob_win,
                         composite = excluded.composite,
+                        raw_payload = excluded.raw_payload,
                         updated_at = excluded.updated_at;
                     """,
                     (
                         ticker, direction, entry_price, shares, stop_loss, target,
-                        prob_win, composite, opened_at, updated_at,
+                        prob_win, composite, json.dumps(p, default=str), opened_at, updated_at,
                     ),
                 )

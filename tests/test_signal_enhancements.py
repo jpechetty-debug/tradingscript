@@ -238,6 +238,7 @@ class TestScorerIntegration:
 
     def test_scorer_outputs_action_and_horizon(self):
         config = SystemConfig()
+        config.INTRADAY_ENABLED = True
         config.MIN_PROB_WIN = 0.30
         config.MIN_EXPECTANCY_R = 0.0
 
@@ -271,6 +272,7 @@ class TestScorerIntegration:
 
     def test_short_defaults_to_intraday_targets(self):
         config = SystemConfig()
+        config.INTRADAY_ENABLED = True
         config.MIN_PROB_WIN = 0.30
         config.MIDDAY_BREAKOUT_MIN_PROB = 0.30
         config.MIN_EXPECTANCY_R = 0.0

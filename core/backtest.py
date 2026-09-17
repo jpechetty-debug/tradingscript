@@ -55,7 +55,7 @@ from .regime import (
     compute_breadth,
     compute_sector_rs,
 )
-from .scorer import composite_to_prob, passes_liquidity, compute_trade_management
+from .scorer import composite_to_prob, passes_liquidity, compute_trade_management, _classify_trade_horizon
 from .universe import TICKER_TO_SECTOR, N_SECTORS
 # ─────────────────────────────────────────────────────────────────────────────
 # TRANSACTION COST MODEL  (NSE intraday defaults)
@@ -172,6 +172,7 @@ class TradeRecord:
     # and tests remains valid.
     gross_r_multiple:   float = field(default=0.0)  # R before cost deduction
     friction_r_applied: float = field(default=0.0)  # cost drag in R units
+    trade_horizon:      str = field(default="SWING")  # "SWING" | "INTRADAY"
 
 
 @dataclass
@@ -396,6 +397,7 @@ def walk_forward(
     direction:      str = "LONG",
     max_trades_per_fold: int = 10,
     cost_model:     TransactionCostModel = DEFAULT_COST_MODEL,
+    horizon_filter: str = "SWING",
 ) -> WalkForwardResult:
     """
     Run a walk-forward backtest over *raw_data*.
@@ -576,8 +578,18 @@ def walk_forward(
                     prob = composite_to_prob(
                         factors.composite, config.PLATT_A, config.PLATT_B
                     )
+                    adx_val = float(row.get("ADX", 0) or 0)
+                    cand_horizon = _classify_trade_horizon(
+                        config=config,
+                        direction=d,
+                        session="CLOSING_TREND",
+                        adx=adx_val,
+                        intraday={},
+                    )
+                    if horizon_filter.upper() != "BOTH" and cand_horizon != horizon_filter.upper():
+                        continue
                     if prob >= min_prob:
-                        candidates.append((factors.composite, prob, ticker, d, row, df))
+                        candidates.append((factors.composite, prob, ticker, d, cand_horizon, row, df))
                 except Exception:
                     log.debug("Scoring error %s/%s fold %d.", ticker, d, fold_idx, exc_info=True)
 
@@ -588,7 +600,7 @@ def walk_forward(
         # ── Simulate each trade in the test window ────────────────────────────
         fold_trades: list[TradeRecord] = []
 
-        for composite, prob, ticker, d, row, train_df in candidates:
+        for composite, prob, ticker, d, cand_horizon, row, train_df in candidates:
             close = float(row["Close"])
             atr   = float(row.get("ATR", close * 0.015))
 
@@ -630,6 +642,7 @@ def walk_forward(
                 bars_held=bars,
                 gross_r_multiple=gross_r,
                 friction_r_applied=friction,
+                trade_horizon=cand_horizon,
             ))
 
         fold_dates = (train_dates[-1], test_dates[-1])

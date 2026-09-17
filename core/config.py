@@ -102,6 +102,7 @@ class RegimeSettings:
     mis_squareoff_time: str = "15:15"
     market_close_time: str = "15:30"
     midday_breakout_min_prob: float = 0.55
+    intraday_enabled: bool = False  # Disabled until real 1/5-min data pipeline is connected
 
     def session_from_time(self, now: datetime | None = None) -> str:
         current_time = (now.astimezone(IST) if now is not None else datetime.now(IST)).time()
@@ -180,6 +181,7 @@ class SignalSettings:
     short_is_intraday_only: bool = True
     cohort_min_obs: int = 10
     cohort_rank_weight: float = 0.40
+    min_factor_weight: float = 0.03  # Floor per factor to prevent starvation
 
 
 @dataclass(frozen=True)
@@ -323,6 +325,8 @@ class SystemConfig:
     INTRADAY_TARGET1_ATR_MULT: float = 1.20
     INTRADAY_TARGET2_ATR_MULT: float = 1.80
     SHORT_IS_INTRADAY_ONLY:    bool  = True
+    INTRADAY_ENABLED:          bool  = False  # Disabled until real 1/5-min data pipeline
+    MIN_FACTOR_WEIGHT:         float = 0.03   # Floor per factor to prevent starvation
 
     # ── Market regime ─────────────────────────────────────────────────────────
     BREADTH_VETO_BELOW:    float = 0.35
@@ -383,6 +387,10 @@ class SystemConfig:
     TELEGRAM_ALERT_MIN_PROB: float = 0.60
     TELEGRAM_ALERT_TOP_N:  int   = 3
     TELEGRAM_DEDUP_HOURS:  int   = 4
+
+    # ── Duplicate alert suppression ───────────────────────────────────────────
+    DUPLICATE_LOOKBACK_SCANS: int   = 5
+    DUPLICATE_COMPOSITE_DELTA: float = 0.05
 
     # ── Backtest ──────────────────────────────────────────────────────────────
     BACKTEST_DAYS:    int   = 90

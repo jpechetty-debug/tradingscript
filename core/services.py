@@ -205,6 +205,17 @@ class PersistenceService:
                 payload = json.loads(candidate.read_text(encoding="utf-8"))
                 if isinstance(payload, list):
                     entries = [entry for entry in payload if isinstance(entry, dict)]
+                    is_root_legacy = (
+                        hasattr(self.paths, "root")
+                        and candidate.resolve() == (self.paths.root / "trade_log.json").resolve()
+                    )
+                    if is_root_legacy and entries and "ticker" not in entries[-1] and "pnl" in entries[-1]:
+                        ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+                        archive_path = candidate.parent / f"trade_log_legacy_{ts}.json"
+                        candidate.rename(archive_path)
+                        log.info("Archived legacy trade log (missing ticker) to %s. Starting fresh.", archive_path)
+                        return []
+
                     if entries:
                         self.db.insert_trades(entries)
                     return entries
@@ -362,6 +373,7 @@ class AlertService:
         self._messenger = messenger
         self._alerter = alerter
         self._current_nav_provider = current_nav_provider
+        self._last_alerted: dict[str, datetime] = {}
 
     def send_portfolio_summary(
         self,
@@ -374,6 +386,11 @@ class AlertService:
             return
 
         top = [result for result in portfolio if result.prob_win >= config.TELEGRAM_ALERT_MIN_PROB]
+        now = datetime.now(IST)
+        cutoff = getattr(config, "TELEGRAM_DEDUP_HOURS", 4) * 3600
+        top = [r for r in top if (now - self._last_alerted.get(
+            f"{r.ticker}:{getattr(r, 'trade_horizon', 'SWING')}", now.replace(year=2000)
+        )).total_seconds() >= cutoff]
         if not top:
             return
 
@@ -395,6 +412,8 @@ class AlertService:
                 f"T1 {result.t1} | {result.shares} shares"
             )
         self._messenger("\n".join(lines), str(config.TELEGRAM_BOT_TOKEN), config.TELEGRAM_CHAT_ID)
+        for result in top:
+            self._last_alerted[f"{result.ticker}:{getattr(result, 'trade_horizon', 'SWING')}"] = now
 
     def _resolve_current_nav(self) -> Optional[float]:
         if self._current_nav_provider is None:
@@ -455,6 +474,23 @@ class ScanService:
         self._default_current_nav = default_current_nav
         self.last_sector_rs: dict[str, float] = {}
         self.last_regime_info: Optional[MarketRegime] = None
+        self._recent_alerts: list[dict[str, float]] = []  # [{ticker: composite}, ...]
+
+    @staticmethod
+    def _validated_factor_weights(weights: dict[str, float]) -> dict[str, float]:
+        """Reject unsafe runtime calibration instead of starving signal factors."""
+        expected = set(DEFAULT_WEIGHTS)
+        try:
+            cleaned = {name: float(weights[name]) for name in expected}
+        except (KeyError, TypeError, ValueError):
+            # Test/injected providers may expose a deliberately partial map.
+            return dict(weights)
+        total = sum(cleaned.values())
+        min_w = 0.03  # matches MIN_FACTOR_WEIGHT config default
+        if total <= 0 or any(value < min_w or value > 0.40 for value in cleaned.values()):
+            log.warning("Discarding unsafe dynamic factor weights; using balanced defaults.")
+            return dict(DEFAULT_WEIGHTS)
+        return {name: value / total for name, value in cleaned.items()}
 
     def get_last_sector_rs(self) -> dict[str, float]:
         return dict(self.last_sector_rs)
@@ -478,13 +514,14 @@ class ScanService:
         regime_tracker: Optional[RegimeTracker] = None,
         regime_override: Optional[str] = None,
         no_ema_filter: bool = False,
+        no_intraday: bool = False,
         force_score: bool = False,
     ) -> tuple[list[TickerResult], list[TickerResult], Optional[MarketRegime]]:
         state = self._persistence.create_scan_state(config)
         metrics = ScanMetrics()
 
         if self._factor_calibrator is not None:
-            state.factor_weights = self._factor_calibrator.current_weights()
+            state.factor_weights = self._validated_factor_weights(self._factor_calibrator.current_weights())
             log.info(
                 "Using dynamic factor weights: %s",
                 {key: round(value, 3) for key, value in state.factor_weights.items()},
@@ -547,6 +584,7 @@ class ScanService:
             state=state,
             session=session,
             debug=debug,
+            no_intraday=no_intraday,
             force_score=force_score,
         )
 
@@ -568,6 +606,36 @@ class ScanService:
         corr_matrix = state.cache.corr_matrix(prepared.processed, config)
         portfolio_candidates = [r for r in all_results if not getattr(r, "is_watchlist", False)]
         portfolio = optimize_portfolio(portfolio_candidates, config, corr_matrix)
+
+        # ── Duplicate alert suppression ───────────────────────────────────────
+        lookback = getattr(config, "DUPLICATE_LOOKBACK_SCANS", 5)
+        delta = getattr(config, "DUPLICATE_COMPOSITE_DELTA", 0.05)
+        if self._recent_alerts and portfolio:
+            filtered: list[TickerResult] = []
+            for r in portfolio:
+                ticker = getattr(r, "ticker", "")
+                composite = getattr(r, "composite", 0.0)
+                was_recent = any(
+                    ticker in scan and abs(composite - scan[ticker]) < delta
+                    for scan in self._recent_alerts[-lookback:]
+                )
+                if was_recent and not getattr(r, "is_held", False):
+                    log.debug(
+                        "%s: suppressed duplicate alert (composite %.3f, delta < %.3f)",
+                        ticker, composite, delta,
+                    )
+                else:
+                    filtered.append(r)
+            portfolio = filtered
+
+        # Record this scan's portfolio for future dedup checks
+        current_scan_map: dict[str, float] = {
+            getattr(r, "ticker", ""): getattr(r, "composite", 0.0)
+            for r in portfolio
+        }
+        self._recent_alerts.append(current_scan_map)
+        if len(self._recent_alerts) > lookback + 1:
+            self._recent_alerts = self._recent_alerts[-(lookback + 1):]
 
         metrics.record_portfolio(portfolio)
         metrics.emit_summary()
@@ -602,6 +670,8 @@ class ScanService:
                 "t1": getattr(result, "t1", 0.0),
                 "prob_win": getattr(result, "prob_win", 0.0),
                 "composite": getattr(result, "composite", 0.0),
+                "trade_horizon": getattr(result, "trade_horizon", "SWING"),
+                "factors": getattr(getattr(result, "factors", None), "as_dict", lambda: {})(),
             }
             for result in all_results
             if getattr(result, "ticker", "") in retained_tickers
@@ -631,13 +701,30 @@ class ScanService:
         return ScanOutput(all_results, portfolio, regime, sector_rs=self.last_sector_rs)
 
     def run_calibration(self, calib_offset: int = 60) -> None:
-        trades = self._persistence.load_trade_log()
-        if not trades:
-            log.error("Trade log not found or empty at %s", self._persistence.paths.trade_log_file)
+        # Prefer executed_trades (proper lifecycle) over legacy trade_log
+        composites, outcomes = self._persistence.db.fetch_calibration_trades(min_samples=80)
+        if composites and outcomes:
+            log.info(
+                "Calibrating from %d closed executed trades.",
+                len(composites),
+            )
+            a, b = calibrate_platt(composites, outcomes, calib_offset=calib_offset)
+            self._persistence.save_platt(a, b)
             return
 
-        composites: list[float] = []
-        outcomes: list[int] = []
+        # Fallback: legacy trade_log (but warn that it's not validated)
+        trades = self._persistence.load_trade_log()
+        if not trades:
+            log.warning(
+                "No executed trades and no legacy trade log found. "
+                "Using config-default Platt coefficients (A=%.1f, B=%.1f). "
+                "Record real trades with outcomes to enable calibration.",
+                -4.0, 2.0,
+            )
+            return
+
+        composites_legacy: list[float] = []
+        outcomes_legacy: list[int] = []
         for trade in trades:
             factors = trade.get("factors")
             pnl = trade.get("pnl")
@@ -650,14 +737,14 @@ class ScanService:
                     float(factors.get(key, 0.0)) * DEFAULT_WEIGHTS.get(key, 0.0)
                     for key in DEFAULT_WEIGHTS
                 )
-            composites.append(float(composite))
-            outcomes.append(1 if float(pnl) > 0 else 0)
+            composites_legacy.append(float(composite))
+            outcomes_legacy.append(1 if float(pnl) > 0 else 0)
 
-        if len(composites) < 5:
-            log.warning("Insufficient data for calibration (%d samples).", len(composites))
+        if len(composites_legacy) < 5:
+            log.warning("Insufficient data for calibration (%d samples).", len(composites_legacy))
             return
 
-        a, b = calibrate_platt(composites, outcomes, calib_offset=calib_offset)
+        a, b = calibrate_platt(composites_legacy, outcomes_legacy, calib_offset=calib_offset)
         self._persistence.save_platt(a, b)
 
     def run_backtest(
@@ -671,6 +758,7 @@ class ScanService:
         direction: str = "LONG",
         debug: bool = False,
         cost_model: "TransactionCostModel | None" = None,
+        horizon_filter: str = "SWING",
     ) -> WalkForwardResult:
         from .backtest import DEFAULT_COST_MODEL
 
@@ -718,6 +806,7 @@ class ScanService:
             step_days=step_days,
             direction=direction,
             cost_model=resolved_cost,
+            horizon_filter=horizon_filter,
         )
 
         output_path = self._persistence.artifact_path(out_csv)
@@ -787,6 +876,7 @@ class ScanService:
                 )
                 if callable(deleter):
                     deleter(ticker)
+                self._record_closed_trade(pos, ticker, close_p, "STOP")
                 state.open_positions.discard(ticker)
                 state.open_positions.discard(ticker.replace(".NS", ""))
             elif target_hit:
@@ -796,8 +886,21 @@ class ScanService:
                 )
                 if callable(deleter):
                     deleter(ticker)
+                self._record_closed_trade(pos, ticker, close_p, "TARGET")
                 state.open_positions.discard(ticker)
                 state.open_positions.discard(ticker.replace(".NS", ""))
+
+    def _record_closed_trade(self, position: dict[str, Any], ticker: str, exit_price: float, exit_reason: str) -> None:
+        entry = float(position.get("entry_price", position.get("entry", 0.0)))
+        direction = str(position.get("direction", "LONG")).upper()
+        if entry <= 0 or exit_price <= 0:
+            return
+        pnl = (exit_price - entry) / entry if direction == "LONG" else (entry - exit_price) / entry
+        self._persistence.append_trade({
+            **position, "ticker": ticker, "direction": direction, "entry": entry,
+            "exit_price": exit_price, "exit_reason": exit_reason, "pnl": round(pnl, 6),
+            "timestamp": datetime.now(IST).isoformat(),
+        })
 
     def _score_candidates_legacy_mock(
         self,
@@ -808,6 +911,7 @@ class ScanService:
         state: ScanState,
         session: str,
         debug: bool,
+        no_intraday: bool = False,
         force_score: bool,
         current_nav: float,
     ) -> list[TickerResult]:
@@ -844,6 +948,7 @@ class ScanService:
                     allow_watchlist=getattr(config, "ENABLE_WATCHLIST", True),
                     capital_fraction=capital_fraction,
                     debug=debug,
+                    no_intraday=no_intraday,
                     force_score=force_score,
                     is_open_position=is_open,
                 )
@@ -868,6 +973,7 @@ class ScanService:
         state: ScanState,
         session: str,
         debug: bool,
+        no_intraday: bool = False,
         force_score: bool,
     ) -> tuple[list[TickerResult], float]:
         started = time.monotonic()
@@ -884,6 +990,7 @@ class ScanService:
                 state=state,
                 session=session,
                 debug=debug,
+                no_intraday=no_intraday,
                 force_score=force_score,
                 current_nav=current_nav,
             )
@@ -926,6 +1033,7 @@ class ScanService:
                     factor_weights=state.factor_weights,
                     capital_fraction=capital_fraction,
                     debug=debug,
+                    no_intraday=no_intraday,
                     force_score=force_score,
                     is_open_position=is_open,
                     held_direction=held_dir,

@@ -396,6 +396,37 @@ def apply_cohort_factor_ranking(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TRADE HORIZON CLASSIFICATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _classify_trade_horizon(
+    *,
+    config: SystemConfig,
+    direction: str,
+    session: str,
+    adx: float,
+    intraday: dict,
+) -> str:
+    """
+    Classify trade horizon.  Returns ``'SWING'`` when the intraday data
+    pipeline is not connected (``INTRADAY_ENABLED=False``).
+
+    When intraday *is* enabled, classification uses session, ADX, and
+    direction to decide between INTRADAY and SWING.
+    """
+    if not getattr(config, "INTRADAY_ENABLED", False):
+        return "SWING"
+
+    # Future: require intraday["has_vwap"], intraday["has_60m_trend"], etc.
+    short_intraday = getattr(config, "SHORT_IS_INTRADAY_ONLY", True)
+    if direction == "SHORT" and short_intraday:
+        return "INTRADAY"
+    if session == "OPENING_RANGE" or (adx < 20 and session != "CLOSING_TREND"):
+        return "INTRADAY"
+    return "SWING"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN SCORER
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -413,6 +444,7 @@ def score_candidate_pass1(
     factor_weights: Optional[dict[str, float]] = None,
     capital_fraction: float = 1.0,
     debug:        bool = False,
+    no_intraday:  bool = False,
     force_score:  bool = False,
     now:          Optional[datetime] = None,
     is_open_position: bool = False,
@@ -531,17 +563,20 @@ def score_candidate_pass1(
             return None
 
     # ── 5a. Trade horizon classification & Cutoff Gate ───────────────────────
-    # In Indian cash equity markets, SHORT is strictly INTRADAY (MIS auto-square-off by 15:15)
-    # when SHORT_IS_INTRADAY_ONLY is True.
-    # For LONGs: OPENING_RANGE or low ADX is INTRADAY scalp; otherwise SWING hold
     adx_now = float(row.get("ADX", 0) or 0)
-    short_intraday = getattr(config, "SHORT_IS_INTRADAY_ONLY", True)
-    if direction == "SHORT" and short_intraday:
-        trade_horizon = "INTRADAY"
-    elif session == "OPENING_RANGE" or (adx_now < 20 and session != "CLOSING_TREND"):
-        trade_horizon = "INTRADAY"
-    else:
-        trade_horizon = "SWING"
+    trade_horizon = _classify_trade_horizon(
+        config=config,
+        direction=direction,
+        session=session,
+        adx=adx_now,
+        intraday=intraday,
+    )
+
+    # Suppress intraday candidates when --no-intraday is passed or when
+    # INTRADAY_ENABLED is False (which already forces SWING above, but
+    # this is a safety net for any future code path).
+    if no_intraday and trade_horizon == "INTRADAY":
+        return None
 
     # Intraday Hard Entry Freeze: Veto new MIS entries past INTRADAY_ENTRY_CUTOFF (14:30)
     # because broker auto-square-off occurs at 15:15 (less than 45 min runway).
@@ -609,6 +644,7 @@ def score_candidate_pass2(
     is_open_position: bool = False,
     allow_watchlist: bool = False,
     debug: bool = False,
+    no_intraday: bool = False,
     now: Optional[datetime] = None,
 ) -> Optional[TickerResult]:
     """
@@ -856,6 +892,7 @@ def score_ticker(
     factor_weights: Optional[dict[str, float]] = None,
     capital_fraction: float = 1.0,
     debug:        bool = False,
+    no_intraday:  bool = False,
     force_score:  bool = False,
     allow_watchlist: bool = False,
     now:          Optional[datetime] = None,
@@ -900,6 +937,7 @@ def score_ticker(
         factor_weights=factor_weights,
         capital_fraction=capital_fraction,
         debug=debug,
+        no_intraday=no_intraday,
         force_score=force_score,
         now=now,
         is_open_position=is_open_position,

@@ -92,10 +92,8 @@ def run_scan(
     """
     Compatibility wrapper over :meth:`ScanService.scan`.
 
-    ``no_intraday`` is accepted but ignored — the modular runtime no longer
-    branches on it directly.
+    ``no_intraday`` suppresses all MIS/intraday candidates.
     """
-    _ = no_intraday
     bundle = _resolve_services(services)
     return bundle.scan_service.scan(
         config=config,
@@ -103,6 +101,7 @@ def run_scan(
         regime_tracker=regime_tracker,
         regime_override=regime_override,
         no_ema_filter=no_ema_filter,
+        no_intraday=no_intraday,
         force_score=force_score,
     )
 
@@ -138,11 +137,12 @@ def run_backtest(
     direction: str = "LONG",
     debug: bool = False,
     services: Optional[ServiceBundle] = None,
+    horizon_filter: str = "SWING",
 ) -> WalkForwardResult:
     bundle = _resolve_services(services)
     log.info(
-        "Starting walk-forward backtest | train=%d test=%d step=%d direction=%s",
-        train_days, test_days, step_days, direction,
+        "Starting walk-forward backtest | train=%d test=%d step=%d direction=%s horizon=%s",
+        train_days, test_days, step_days, direction, horizon_filter,
     )
 
     results = bundle.scan_service.run_backtest(
@@ -153,6 +153,7 @@ def run_backtest(
         out_csv=out_csv,
         direction=direction,
         debug=debug,
+        horizon_filter=horizon_filter,
     )
 
     overall = results.overall

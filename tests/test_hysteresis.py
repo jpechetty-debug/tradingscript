@@ -343,6 +343,7 @@ class TestPass1Hysteresis:
         )
 
         config = SystemConfig()
+        config.INTRADAY_ENABLED = True
         config.SHORT_IS_INTRADAY_ONLY = True
         config.INTRADAY_ENTRY_CUTOFF = "14:30"
 
