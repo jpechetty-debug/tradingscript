@@ -873,10 +873,10 @@ def calibrate_ic_weights(
         for f in factors_list
     }
 
-    # ── Enforce 5% floor per factor to prevent factor starvation ─────────────
+    # ── Enforce floor per factor to prevent factor starvation ─────────────────
     # Exact simplex projection with floor: iteratively allocate floor to deficient
-    # factors and scale remaining factors so that sum is exactly 1.0 and all w >= 0.05.
-    floor = 0.05
+    # factors and scale remaining factors so that sum is exactly 1.0 and all w >= floor.
+    floor = float(getattr(config, "MIN_FACTOR_WEIGHT", 0.03))
     w_out = dict(w_shrunk)
     for _ in range(len(factors_list)):
         fixed = {f: w for f, w in w_out.items() if w < floor}

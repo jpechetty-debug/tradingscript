@@ -121,7 +121,7 @@ class TickerResult:
 
 def composite_to_prob(composite: float, platt_a: float, platt_b: float) -> float:
     """Sigmoid probability from composite score using Platt A/B params."""
-    return float(_sigmoid(platt_a * composite + platt_b))
+    return float(_sigmoid(-(platt_a * composite + platt_b)))
 
 
 def calibrate_platt(
@@ -199,15 +199,16 @@ def calibrate_platt(
 
     # ── MLE fit on training window ────────────────────────────────────────────
     def nll(ab: np.ndarray) -> float:
-        p = _sigmoid(ab[0] * train_x + ab[1])
+        p = _sigmoid(-(ab[0] * train_x + ab[1]))
         p = np.clip(p, 1e-7, 1 - 1e-7)
         return -float(np.mean(train_y * np.log(p) + (1 - train_y) * np.log(1 - p)))
 
-    res = minimize(nll, [-4.0, 2.0], method="Nelder-Mead")
+    bounds = [(-15.0, 15.0), (-10.0, 10.0)]
+    res = minimize(nll, [-4.0, 2.0], method="L-BFGS-B", bounds=bounds)
     a, b = float(res.x[0]), float(res.x[1])
 
     # ── Validation diagnostics (logged, not used for fitting) ─────────────────
-    val_p       = _sigmoid(a * val_x + b)
+    val_p       = _sigmoid(-(a * val_x + b))
     brier       = float(np.mean((val_p - val_y) ** 2))
     mean_pred   = float(val_p.mean())
     actual_wr   = float(val_y.mean())

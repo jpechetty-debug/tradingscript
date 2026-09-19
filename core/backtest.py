@@ -89,7 +89,7 @@ class TransactionCostModel:
     broker tiers or larger slippage assumptions.
     """
     # Per-side
-    slippage_pct:        float = 0.0005       # 0.05 %
+    slippage_pct:        float = 0.0008       # 8 bps (from SLIPPAGE_BPS=8)
     brokerage_pct:       float = 0.0003       # 0.03 %
     exchange_pct:        float = 0.0000345    # NSE exchange charge
     sebi_pct:            float = 0.000001     # SEBI charge
@@ -98,8 +98,19 @@ class TransactionCostModel:
     stamp_buy_pct:       float = 0.00015      # Stamp duty on buy side only
     # GST applies on brokerage + exchange + SEBI
     gst_rate:            float = 0.18
+    commission_inr:      float = 20.0         # Flat commission in INR per trade (from COMMISSION_INR=20)
 
     # ── derived helpers ───────────────────────────────────────────────────────
+
+    @classmethod
+    def from_config(cls, config: Any) -> "TransactionCostModel":
+        """Construct a TransactionCostModel wired directly to system config."""
+        slippage_bps = getattr(config, "SLIPPAGE_BPS", 8)
+        commission_inr = getattr(config, "COMMISSION_INR", 20)
+        return cls(
+            slippage_pct=float(slippage_bps) / 10_000.0,
+            commission_inr=float(commission_inr),
+        )
 
     def _gst_mult(self) -> float:
         return 1.0 + self.gst_rate
@@ -114,7 +125,7 @@ class TransactionCostModel:
         taxable = (self.brokerage_pct + self.exchange_pct + self.sebi_pct) * self._gst_mult()
         return self.slippage_pct + self.stt_sell_pct + taxable
 
-    def friction_r(self, entry: float, sl_dist: float) -> float:
+    def friction_r(self, entry: float, sl_dist: float, shares: Optional[int] = None) -> float:
         """
         Round-trip cost drag expressed in R-multiples.
 
@@ -124,6 +135,9 @@ class TransactionCostModel:
             Entry price (INR).
         sl_dist:
             Absolute distance from entry to stop-loss (must be > 0).
+        shares:
+            Optional number of shares. When provided along with non-zero commission_inr,
+            incorporates flat commission drag alongside percentage costs.
 
         Returns
         -------
@@ -133,7 +147,9 @@ class TransactionCostModel:
         if sl_dist <= 0:
             return 0.0
         total_pct = self.entry_cost_pct() + self.exit_cost_pct()
-        return round(entry * total_pct / sl_dist, 5)
+        pct_friction = entry * total_pct / sl_dist
+        flat_friction = (self.commission_inr / (sl_dist * shares)) if (shares is not None and shares > 0 and self.commission_inr > 0) else 0.0
+        return round(pct_friction + flat_friction, 5)
 
 
 # Pre-built instances — reference by name instead of constructing inline.
@@ -141,6 +157,7 @@ DEFAULT_COST_MODEL = TransactionCostModel()   # NSE intraday retail defaults
 ZERO_COST_MODEL    = TransactionCostModel(    # frictionless (legacy / tests)
     slippage_pct=0.0, brokerage_pct=0.0, exchange_pct=0.0,
     sebi_pct=0.0, stt_sell_pct=0.0, stamp_buy_pct=0.0, gst_rate=0.0,
+    commission_inr=0.0,
 )
 
 
@@ -533,85 +550,52 @@ def walk_forward(
             sector_rs=sector_rs,
         )
 
-        directions = ["LONG", "SHORT"] if direction == "BOTH" else [direction]
+        # ── Score each ticker on last bar of train window via shared score_universe ─
+        from .services import score_universe
+        results = score_universe(
+            processed=processed,
+            bench=bench_series,
+            sector_rs=sector_rs,
+            regime=regime,
+            config=config,
+            weights=DEFAULT_WEIGHTS,
+            session="CLOSING_TREND",
+            allow_watchlist=False,
+            direction=direction,
+            min_bars=min(50, train_days),
+        )
 
-        # ── Score each ticker on last bar of train window ─────────────────────
-        candidates: list[tuple[float, float, str, str, pd.Series, pd.DataFrame]] = []
-        # (composite, prob_win, ticker, direction, last_row, full_ticker_df)
-
-        sector_ranks = {s: i+1 for i, (s, _) in enumerate(
-            sorted(sector_rs.items(), key=lambda x: x[1], reverse=True)
-        )}
-
-        for ticker in tickers:
-            df = processed.get(ticker)
-            if df is None or df.empty:
-                continue
-
-            row   = df.iloc[-1]
-            close = float(row["Close"])
-
-            liq_ok, _ = passes_liquidity(row, config)
-            if not liq_ok:
-                continue
-
-            sector = TICKER_TO_SECTOR.get(ticker, "")
-
-            for d in directions:
-                if d == "LONG" and not regime.allows_long():
-                    continue
-                if d == "SHORT" and not regime.allows_short():
-                    continue
-                try:
-                    factors = compute_factors(
-                        ticker=ticker,
-                        daily_df=df,
-                        bench=bench_series,
-                        sector=sector,
-                        sector_ranks=sector_ranks,
-                        direction=d,
-                        close=close,
-                        row=row,
-                        n_sectors=N_SECTORS,
-                        weights=DEFAULT_WEIGHTS,
-                    )
-                    prob = composite_to_prob(
-                        factors.composite, config.PLATT_A, config.PLATT_B
-                    )
-                    adx_val = float(row.get("ADX", 0) or 0)
-                    cand_horizon = _classify_trade_horizon(
-                        config=config,
-                        direction=d,
-                        session="CLOSING_TREND",
-                        adx=adx_val,
-                        intraday={},
-                    )
-                    if horizon_filter.upper() != "BOTH" and cand_horizon != horizon_filter.upper():
-                        continue
-                    if prob >= min_prob:
-                        candidates.append((factors.composite, prob, ticker, d, cand_horizon, row, df))
-                except Exception:
-                    log.debug("Scoring error %s/%s fold %d.", ticker, d, fold_idx, exc_info=True)
-
-        # Sort by composite descending and cap per fold
-        candidates.sort(key=lambda x: x[0], reverse=True)
+        candidates = [
+            r for r in results
+            if r.prob_win >= min_prob
+            and (horizon_filter.upper() == "BOTH" or getattr(r, "trade_horizon", "SWING") == horizon_filter.upper())
+            and not getattr(r, "is_watchlist", False)
+        ]
+        candidates.sort(key=lambda x: x.composite, reverse=True)
         candidates = candidates[:max_trades_per_fold]
 
         # ── Simulate each trade in the test window ────────────────────────────
         fold_trades: list[TradeRecord] = []
 
-        for composite, prob, ticker, d, cand_horizon, row, train_df in candidates:
-            close = float(row["Close"])
-            atr   = float(row.get("ATR", close * 0.015))
+        for cand in candidates:
+            d = cand.direction
+            ticker = cand.ticker
+            full_df = raw_data.get(ticker)
+            if full_df is None or full_df.empty:
+                continue
 
-            _, time_stop = compute_trade_management_wrapper(d, close, atr, row)
-
-            # Get forward (test-window) bars for this ticker
-            full_df   = raw_data[ticker]
-            fwd_bars  = full_df.loc[full_df.index.isin(test_dates)].copy()
-
+            fwd_bars = full_df.loc[full_df.index.isin(test_dates)].copy()
             if fwd_bars.empty:
                 continue
+
+            train_df = processed[ticker]
+            row = train_df.iloc[-1]
+            close = float(row["Close"])
+            atr = float(row.get("ATR", close * 0.015))
+
+            time_stop = getattr(cand, "time_stop_bars", None)
+            if time_stop is None:
+                _, time_stop = compute_trade_management_wrapper(d, close, atr, row)
 
             entry_price = float(fwd_bars.iloc[0]["Open"])
             targets = compute_targets(d, entry_price, atr, config)
@@ -635,14 +619,14 @@ def walk_forward(
                 entry=round(entry_price, 2),
                 stop=targets.stop,
                 t1=targets.t1,
-                composite=round(composite, 4),
-                prob_win=round(prob, 4),
+                composite=round(cand.composite, 4),
+                prob_win=round(cand.prob_win, 4),
                 r_multiple=r,
                 hit_t1=hit,
                 bars_held=bars,
                 gross_r_multiple=gross_r,
                 friction_r_applied=friction,
-                trade_horizon=cand_horizon,
+                trade_horizon=getattr(cand, "trade_horizon", "SWING"),
             ))
 
         fold_dates = (train_dates[-1], test_dates[-1])

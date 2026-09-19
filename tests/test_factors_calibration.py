@@ -153,13 +153,14 @@ def test_calibrate_ic_weights_bayesian_shrinkage_and_floor():
         for i in range(12)
     }
     bench = _bench(processed["TICK0.NS"])
+    cfg = _config(MIN_FACTOR_WEIGHT=0.05)
     weights = calibrate_ic_weights(
         results=results,
         processed=processed,
         bench=bench,
         sector_ranks={},
         n_sectors=10,
-        config=_config(),
+        config=cfg,
         lookback=60,
         calib_offset=5,
         fwd_bars=5,

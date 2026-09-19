@@ -45,18 +45,16 @@ from core.universe import SECTORS, TICKER_TO_SECTOR
 
 load_dotenv()
 
+import secrets
+
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
 API_KEY = os.environ.get("API_KEY")
-if not API_KEY:
-    if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
-        API_KEY = "test-api-key"
-    else:
-        API_KEY = None
 
 def verify_api_key(api_key: str = Security(api_key_header)) -> None:
-    if not API_KEY or not api_key or api_key != API_KEY:
+    current_key = os.environ.get("API_KEY") or API_KEY
+    if not current_key or not api_key or not secrets.compare_digest(api_key, current_key):
         raise HTTPException(
             status_code=401,
             detail="Could not validate credentials"
@@ -71,14 +69,16 @@ limiter = Limiter(key_func=get_remote_address)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Validate server security config and trigger initial non-blocking market scan."""
-    is_testing = bool(os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules)
-    if not API_KEY and not is_testing:
+    BROADCASTER.set_loop(asyncio.get_running_loop())
+    current_key = os.environ.get("API_KEY") or API_KEY
+    if not current_key:
         raise RuntimeError(
             "CRITICAL SECURITY CONFIGURATION ERROR: 'API_KEY' environment variable must be set. "
             "Please configure API_KEY in your .env or environment variables."
         )
-    # Re-hydrate state from disk so server immediately has previous scan results ready
+    # Re-hydrate state from disk and sync persistent killswitch flag
     STATE.load_persisted_state(PERSISTENCE)
+    STATE.is_killed = PERSISTENCE.get_killswitch()
 
     # Trigger initial scan in non-blocking background task unless killswitch is active
     scan_task = None
@@ -125,6 +125,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class AsyncEngineLock(asyncio.Lock):
+    """Asyncio lock that also supports synchronous context manager protocol in tests."""
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
 # Global Engine State
 class EngineState:
     def __init__(self) -> None:
@@ -138,7 +147,7 @@ class EngineState:
         self.is_scanning: bool = False
         self.scan_error: Optional[str] = None
         self.is_killed: bool = False
-        self._lock = threading.Lock()
+        self._lock = AsyncEngineLock()
 
     def persist_state(self, persistence: PersistenceService) -> None:
         """Persist current scan results to disk (state/latest_scan.json)."""
@@ -160,67 +169,35 @@ class EngineState:
     def load_persisted_state(self, persistence: PersistenceService) -> bool:
         """Re-hydrate state from state/latest_scan.json if it exists."""
         try:
+            self.is_killed = persistence.get_killswitch()
             target = persistence.paths.state_dir / "latest_scan.json"
             if not target.exists():
                 return False
             data = json.loads(target.read_text(encoding="utf-8"))
-            with self._lock:
-                self.last_scan_time = data.get("scan_time")
-                raw_cands = data.get("candidates") or []
-                raw_port = data.get("portfolio") or []
+            self.last_scan_time = data.get("scan_time")
+            raw_cands = data.get("candidates") or []
+            raw_port = data.get("portfolio") or []
 
-                def _enrich(item: dict) -> dict:
-                    d = item.copy()
-                    dirn = d.get("direction", "LONG")
-                    d["action"] = d.get("action") or ("BUY" if dirn == "LONG" else "SELL")
-                    entry = float(d.get("entry") or 0.0)
-                    stop = float(d.get("stop") or 0.0)
-                    t1 = float(d.get("t1") or 0.0)
-                    sl_dist = abs(entry - stop) if (entry and stop) else 0.0
-                    sl_pct = (sl_dist / entry * 100) if entry > 0 else 5.0
-                    t1_dist = abs(t1 - entry) if (entry and t1) else 0.0
-                    t1_pct = (t1_dist / entry * 100) if entry > 0 else 10.0
-                    is_mean_rev = any("MeanRev" in str(r) for r in d.get("reasons", []))
+            def _clean_item(item: dict) -> dict:
+                d = item.copy()
+                dirn = d.get("direction", "LONG")
+                d["action"] = d.get("action") or ("BUY" if dirn == "LONG" else "SELL")
+                horizon = d.get("trade_horizon") or ("INTRADAY" if dirn == "SHORT" else "SWING")
+                d["trade_horizon"] = horizon
+                d["horizon_label"] = "INTRADAY (MIS)" if horizon == "INTRADAY" else "SWING (CNC)"
+                entry = float(d.get("entry") or 0.0)
+                stop = float(d.get("stop") or 0.0)
+                t1 = float(d.get("t1") or 0.0)
+                if "stop_pct" not in d and entry > 0:
+                    d["stop_pct"] = round(abs(entry - stop) / entry * 100, 2)
+                if "target_pct" not in d and entry > 0:
+                    d["target_pct"] = round(abs(t1 - entry) / entry * 100, 2)
+                return d
 
-                    # Calibrate cash equity shorts to true intraday targets (tight ~1.2% stop, ~2.8% target)
-                    if dirn == "SHORT" and sl_pct > 2.0:
-                        atr_est = sl_dist / 1.50
-                        new_stop = round(entry + 0.50 * atr_est, 2)
-                        new_t1 = round(entry - 1.20 * atr_est, 2)
-                        new_t2 = round(entry - 1.80 * atr_est, 2)
-                        new_sl_dist = abs(entry - new_stop)
-                        d["stop"] = new_stop
-                        d["t1"] = new_t1
-                        d["t2"] = new_t2
-                        d["rr_t1"] = 2.4
-                        alloc_risk = float(d.get("risk_inr") or 0.0)
-                        if alloc_risk > 0 and new_sl_dist > 0:
-                            d["shares"] = int(alloc_risk / new_sl_dist)
-                        sl_dist = new_sl_dist
-                        sl_pct = (sl_dist / entry * 100) if entry > 0 else 1.2
-                        t1_dist = abs(new_t1 - entry)
-                        t1_pct = (t1_dist / entry * 100) if entry > 0 else 2.8
-
-                    engine_horizon = d.get("trade_horizon")
-                    if dirn == "SHORT":
-                        horizon = "INTRADAY"
-                    elif engine_horizon in ("INTRADAY", "SWING"):
-                        horizon = engine_horizon
-                    elif sl_pct < 2.5 or (is_mean_rev and sl_pct < 3.0):
-                        horizon = "INTRADAY"
-                    else:
-                        horizon = "SWING"
-
-                    d["trade_horizon"] = horizon
-                    d["horizon_label"] = "INTRADAY (MIS)" if horizon == "INTRADAY" else "SWING (CNC)"
-                    d["stop_pct"] = round(sl_pct, 2)
-                    d["target_pct"] = round(t1_pct, 2)
-                    return d
-
-                self.last_candidates = [_enrich(c) for c in raw_cands]
-                self.last_portfolio = [_enrich(p) for p in raw_port]
-                self.last_sector_rs = data.get("sector_rs") or {}
-                self.last_regime_info = data.get("regime_info")
+            self.last_candidates = [_clean_item(c) for c in raw_cands]
+            self.last_portfolio = [_clean_item(p) for p in raw_port]
+            self.last_sector_rs = data.get("sector_rs") or {}
+            self.last_regime_info = data.get("regime_info")
             log.info("Re-hydrated EngineState from %s (%d candidates, %d portfolio)",
                      target, len(self.last_candidates), len(self.last_portfolio))
             return True
@@ -240,8 +217,17 @@ class SSEBroadcaster:
     def __init__(self) -> None:
         self._subscribers: set[asyncio.Queue] = set()
         self._lock = asyncio.Lock()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
 
     async def subscribe(self) -> asyncio.Queue:
+        if self._loop is None:
+            try:
+                self._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
         queue: asyncio.Queue = asyncio.Queue(maxsize=100)
         async with self._lock:
             self._subscribers.add(queue)
@@ -251,22 +237,40 @@ class SSEBroadcaster:
         async with self._lock:
             self._subscribers.discard(queue)
 
+    def _push_to_queues(self, message: dict[str, Any]) -> None:
+        for q in list(self._subscribers):
+            try:
+                q.put_nowait(message)
+            except asyncio.QueueFull:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(message)
+                except Exception:
+                    pass
+
     async def broadcast(self, event: str, data: dict[str, Any]) -> None:
         message = {
             "event": event,
             "data": data,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        async with self._lock:
-            for q in list(self._subscribers):
-                try:
-                    q.put_nowait(message)
-                except asyncio.QueueFull:
-                    try:
-                        q.get_nowait()
-                        q.put_nowait(message)
-                    except Exception:
-                        pass
+        current_loop = None
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
+        if (
+            self._loop is not None
+            and not self._loop.is_closed()
+            and current_loop is not None
+            and current_loop != self._loop
+        ):
+            self._loop.call_soon_threadsafe(self._push_to_queues, message)
+        else:
+            if current_loop is not None and (self._loop is None or self._loop.is_closed()):
+                self._loop = current_loop
+            self._push_to_queues(message)
 
 
 BROADCASTER = SSEBroadcaster()
@@ -316,7 +320,7 @@ def _format_ticker_result(res: TickerResult) -> Dict[str, Any]:
 
 
 async def _run_scan_task_async() -> None:
-    with STATE._lock:
+    async with STATE._lock:
         if STATE.is_killed:
             log.warning("Scan aborted: Emergency Killswitch is active.")
             return
@@ -335,7 +339,7 @@ async def _run_scan_task_async() -> None:
         )
         candidates, portfolio, regime = scan_output[0], scan_output[1], scan_output[2]
 
-        with STATE._lock:
+        async with STATE._lock:
             STATE.last_scan_time = datetime.now(timezone.utc).isoformat()
             STATE.last_candidates = [_format_ticker_result(c) for c in candidates]
             STATE.last_portfolio = [_format_ticker_result(p) for p in portfolio]
@@ -356,7 +360,9 @@ async def _run_scan_task_async() -> None:
                     "is_tradeable": regime.is_tradeable(),
                 }
             STATE.is_scanning = False
-            STATE.persist_state(PERSISTENCE)
+
+        # Route disk I/O off the event loop without holding the state lock
+        await asyncio.to_thread(STATE.persist_state, PERSISTENCE)
 
         await BROADCASTER.broadcast("scan_completed", {
             "candidates_count": len(STATE.last_candidates),
@@ -365,7 +371,7 @@ async def _run_scan_task_async() -> None:
         })
     except Exception as exc:
         log.exception("Error executing scan task")
-        with STATE._lock:
+        async with STATE._lock:
             STATE.is_scanning = False
             STATE.scan_error = str(exc)
         await BROADCASTER.broadcast("scan_failed", {"error": str(exc)})
@@ -408,7 +414,7 @@ def read_root() -> FileResponse:
 
 
 @app.get("/api/status")
-def get_status() -> Dict[str, Any]:
+async def get_status() -> Dict[str, Any]:
     rg_settings = CONFIG.as_regime()
     session = rg_settings.session_from_time()
     locked = rg_settings.is_regime_locked()
@@ -416,7 +422,7 @@ def get_status() -> Dict[str, Any]:
     mins_to_sq = rg_settings.minutes_to_squareoff()
     phase_val = phase.value if hasattr(phase, "value") else str(phase)
     cutoff_active = phase_val in ("INTRADAY_FREEZE", "SWING_CLOSING", "POST_MARKET")
-    with STATE._lock:
+    async with STATE._lock:
         return {
             "status": "online",
             "version": svm.VERSION,
@@ -435,13 +441,13 @@ def get_status() -> Dict[str, Any]:
 
 
 @app.get("/api/scan")
-def get_scan_results() -> Dict[str, Any]:
+async def get_scan_results() -> Dict[str, Any]:
     rg_settings = CONFIG.as_regime()
     phase = rg_settings.get_market_phase()
     mins_to_sq = rg_settings.minutes_to_squareoff()
     phase_val = phase.value if hasattr(phase, "value") else str(phase)
     cutoff_active = phase_val in ("INTRADAY_FREEZE", "SWING_CLOSING", "POST_MARKET")
-    with STATE._lock:
+    async with STATE._lock:
         return {
             "last_scan_time": STATE.last_scan_time,
             "is_scanning": STATE.is_scanning,
@@ -459,13 +465,14 @@ def get_scan_results() -> Dict[str, Any]:
 @app.post("/api/scan/trigger", dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
 async def trigger_scan(request: Request, background_tasks: BackgroundTasks) -> Dict[str, Any]:
-    if STATE.is_killed:
-        raise HTTPException(
-            status_code=403,
-            detail="Emergency Killswitch is active. Clear killswitch before initiating scans.",
-        )
-    if STATE.is_scanning:
-        return {"status": "already_running", "message": "Scan execution already in progress"}
+    async with STATE._lock:
+        if STATE.is_killed:
+            raise HTTPException(
+                status_code=403,
+                detail="Emergency Killswitch is active. Clear killswitch before initiating scans.",
+            )
+        if STATE.is_scanning:
+            return {"status": "already_running", "message": "Scan execution already in progress"}
 
     background_tasks.add_task(_run_scan_task_async)
     return {"status": "triggered", "message": "Market scan started in background worker"}
@@ -475,22 +482,24 @@ async def trigger_scan(request: Request, background_tasks: BackgroundTasks) -> D
 @limiter.limit("10/minute")
 async def set_regime_override(request: Request, req: OverrideRequest) -> Dict[str, Any]:
     valid_regimes = {"PANIC", "TREND_UP", "TREND_DOWN", "RANGE", "EXPANSION"}
-    if req.regime is None or req.regime.upper() in ("CLEAR", "NONE", "AUTO"):
-        STATE.regime_override = None
-        msg = "Market regime override cleared (Auto Mode)"
-    elif req.regime.upper() in valid_regimes:
-        STATE.regime_override = req.regime.upper()
-        msg = f"Market regime override set to {STATE.regime_override}"
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid regime. Must be one of: {sorted(valid_regimes)} or null/CLEAR",
-        )
+    async with STATE._lock:
+        if req.regime is None or req.regime.upper() in ("CLEAR", "NONE", "AUTO"):
+            STATE.regime_override = None
+            msg = "Market regime override cleared (Auto Mode)"
+        elif req.regime.upper() in valid_regimes:
+            STATE.regime_override = req.regime.upper()
+            msg = f"Market regime override set to {STATE.regime_override}"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid regime. Must be one of: {sorted(valid_regimes)} or null/CLEAR",
+            )
+        current_override = STATE.regime_override
 
     return {
         "status": "ok",
         "message": msg,
-        "regime_override": STATE.regime_override,
+        "regime_override": current_override,
     }
 
 
@@ -499,10 +508,11 @@ async def set_regime_override(request: Request, req: OverrideRequest) -> Dict[st
 @app.post("/api/killswitch", dependencies=[Depends(verify_api_key)])
 async def activate_killswitch() -> Dict[str, Any]:
     """Emergency Kill-Switch: aborts active scans and halts execution."""
-    with STATE._lock:
+    async with STATE._lock:
         STATE.is_killed = True
         STATE.is_scanning = False
         STATE.scan_error = "Emergency Killswitch Activated"
+        PERSISTENCE.set_killswitch(True)
 
     scan_task = getattr(app.state, "scan_task", None)
     if scan_task and not scan_task.done():
@@ -520,9 +530,10 @@ async def activate_killswitch() -> Dict[str, Any]:
 @app.post("/api/killswitch/reset", dependencies=[Depends(verify_api_key)])
 async def reset_killswitch() -> Dict[str, Any]:
     """Reset Emergency Kill-Switch to resume normal operations."""
-    with STATE._lock:
+    async with STATE._lock:
         STATE.is_killed = False
         STATE.scan_error = None
+        PERSISTENCE.set_killswitch(False)
 
     log.info("Emergency killswitch cleared. Normal operations resumed.")
     await BROADCASTER.broadcast("killswitch_reset", {"status": "reset"})
@@ -534,9 +545,9 @@ async def reset_killswitch() -> Dict[str, Any]:
 
 
 @app.get("/api/killswitch/status")
-def get_killswitch_status() -> Dict[str, Any]:
+async def get_killswitch_status() -> Dict[str, Any]:
     """Check current emergency kill-switch status."""
-    with STATE._lock:
+    async with STATE._lock:
         return {
             "killswitch_active": STATE.is_killed,
             "is_scanning": STATE.is_scanning,
@@ -613,15 +624,17 @@ async def sse_events(
 
 
 @app.get("/api/sectors")
-def get_sectors() -> Dict[str, Any]:
+async def get_sectors() -> Dict[str, Any]:
     sector_summary: Dict[str, List[str]] = {
         sec: tickers for sec, tickers in SECTORS.items()
     }
+    async with STATE._lock:
+        rs = dict(STATE.last_sector_rs)
     return {
         "total_sectors": len(SECTORS),
         "total_tickers": len(TICKER_TO_SECTOR),
         "sectors": sector_summary,
-        "last_sector_rs": STATE.last_sector_rs,
+        "last_sector_rs": rs,
     }
 
 

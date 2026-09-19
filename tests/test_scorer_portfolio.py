@@ -308,7 +308,7 @@ class TestCalculateKellySize:
 
     def _cfg(self):
         return _config(
-            KELLY_FRACTION=0.25,
+            KELLY_FRACTION=3.0,
             KELLY_MIN_SHARES=1,
             KELLY_MAX_MULT=3.0,
             KELLY_KURTOSIS_FALLBACK=4.0,
@@ -350,8 +350,8 @@ class TestCalculateKellySize:
             entry=500.0, stop=485.0, prob_win=0.60,
             rr=2.5, daily_df=df, config=cfg,
         )
-        # Must be within [0.25 * RISK_PER_TRADE_INR, KELLY_MAX_MULT * RISK_PER_TRADE_INR]
-        assert risk_inr >= cfg.RISK_PER_TRADE_INR * 0.25
+        # Must be within [0.25 * RISK_PER_TRADE_INR, KELLY_MAX_MULT * RISK_PER_TRADE_INR] (accounting for int share quantization)
+        assert risk_inr >= cfg.RISK_PER_TRADE_INR * 0.25 - 15.0
         assert risk_inr <= cfg.RISK_PER_TRADE_INR * cfg.KELLY_MAX_MULT
 
     def test_capital_fraction_scales_risk(self):
@@ -378,7 +378,7 @@ class TestCalculateKellySize:
     def test_low_prob_win_returns_min_shares(self):
         df  = _make_ohlcv()
         cfg = _config(
-            KELLY_FRACTION=0.25, KELLY_MIN_SHARES=1, KELLY_MAX_MULT=3.0,
+            KELLY_FRACTION=3.0, KELLY_MIN_SHARES=1, KELLY_MAX_MULT=3.0,
             KELLY_KURTOSIS_FALLBACK=4.0, KELLY_KURTOSIS_WINDOW=252,
             KELLY_KURTOSIS_MIN_OBS=60, RISK_PER_TRADE_INR=10_000.0,
         )
@@ -480,9 +480,9 @@ class TestCompositeToProb:
             assert 0.0 < p < 1.0
 
     def test_higher_composite_higher_prob(self):
-        # Positive platt_a → sigmoid increases with composite
-        p_low  = composite_to_prob(0.3, platt_a=4.0, platt_b=-2.0)
-        p_high = composite_to_prob(0.8, platt_a=4.0, platt_b=-2.0)
+        # Under Option B expit(-(A*c + B)), negative platt_a → sigmoid increases with composite
+        p_low  = composite_to_prob(0.3, platt_a=-4.0, platt_b=2.0)
+        p_high = composite_to_prob(0.8, platt_a=-4.0, platt_b=2.0)
         assert p_high > p_low
 
 

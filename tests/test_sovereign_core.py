@@ -319,12 +319,12 @@ class TestPlattCalibration:
         """v14 sigmoid convention: prob is monotone across composites."""
         probs = [composite_to_prob(c, CONFIG.PLATT_A, CONFIG.PLATT_B)
                  for c in [-1.0, -0.5, 0.0, 0.5, 1.0]]
-        # With default A=-4, B=2 the sigmoid is decreasing
-        assert probs == sorted(probs, reverse=True), f"Probabilities not monotone-decreasing: {probs}"
+        # With Option B (expit(-(A*c + B))) where A=-4, B=2, the sigmoid is increasing with composite score
+        assert probs == sorted(probs), f"Probabilities not monotone-increasing: {probs}"
 
     def test_composite_zero_gives_probability_near_half(self):
         """With default params (A=-4, B=2), composite=0.5 → sigmoid(0)=0.5."""
-        mid = CONFIG.PLATT_B / (-CONFIG.PLATT_A)
+        mid = -CONFIG.PLATT_B / CONFIG.PLATT_A
         p = composite_to_prob(mid, CONFIG.PLATT_A, CONFIG.PLATT_B)
         assert abs(p - 0.5) < 0.01, f"Expected ~0.5, got {p}"
 

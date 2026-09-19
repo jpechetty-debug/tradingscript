@@ -2,7 +2,7 @@
 
 [![Security Scan](https://img.shields.io/badge/Security-Verified-success?style=flat-square)](#)
 [![Lint Compliance](https://img.shields.io/badge/Lint-Ruff%20%7C%20Mypy%20Strict-blue?style=flat-square)](#)
-[![Test Suite](https://img.shields.io/badge/Tests-602%20Passed-brightgreen?style=flat-square)](#)
+[![Test Suite](https://img.shields.io/badge/Tests-604%20Passed-brightgreen?style=flat-square)](#)
 [![Version](https://img.shields.io/badge/Version-14.6--Modular-indigo?style=flat-square)](#)
 
 **Institutional-Grade Quantitative Trading Intelligence & Portfolio Optimization for NSE India.**
@@ -122,14 +122,14 @@ Positions are sized via NAV-aware, kurtosis-corrected fractional Kelly criterion
 - **Dynamic Allocation**: $\text{Risk (INR)} = \text{Target Risk} \times f^* \times \text{kurt\_corr} \times \text{capital\_fraction}$
 
 ### Out-of-Sample Platt Probability Calibration
-Composite factor scores are mapped to true empirical win probabilities using a logistic sigmoid:
-$$P(\text{win}) = \frac{1}{1 + \exp(A \cdot \text{score} + B)}$$
+Composite factor scores are mapped to true empirical win probabilities using a logistic sigmoid (Option B convention):
+$$P(\text{win}) = \frac{1}{1 + \exp(-(A \cdot \text{score} + B))}$$
 Parameters $A$ and $B$ are calibrated via MLE on an **out-of-sample validation window** (`IC_CALIB_OFFSET = 60`), preventing in-sample overfitting and overconfident sizing.
 
 ### Realistic Transaction Cost Friction
 The **TransactionCostModel** (`core/backtest.py`) incorporates real-world execution drag into all backtests:
-- Slippage: 8 bps per side
-- Brokerage: ₹20 per trade
+- Slippage: 8 bps per side (`SLIPPAGE_BPS = 8`)
+- Brokerage: ₹20 flat per trade (`COMMISSION_INR = 20`)
 - Regulatory STT, GST, and exchange fees
 Net realized return $R_{\text{net}}$ accounts for total round-trip friction, preventing over-trading illusions.
 
@@ -139,16 +139,19 @@ Net realized return $R_{\text{net}}$ accounts for total round-trip friction, pre
 
 Walk-forward backtest evaluated across the 504 NSE cash equity universe across 6 rolling out-of-sample folds:
 
-| Metric | Pre-Overhaul Baseline | Overhauled Engine (Phase 1 & Phase 2) | Improvement |
+| Metric | Pre-Overhaul Baseline | Overhauled Engine (Phases 1–5) | Statistical Note ($n=10$) |
 | :--- | :--- | :--- | :--- |
-| **Total Out-of-Sample Trades** | 10 | 10 | High selectivity preserved |
-| **Hit Rate** | 0.0% | **10.0%** | Baseline was 0% |
-| **Mean Net Realized R** | -0.595 R | **+0.064 R** | **+0.659 R / trade** |
-| **Total Realized Return** | -5.95 R | **+0.64 R** | **+6.59 R (Net Profitable)** |
-| **Sharpe Ratio (Annualized)** | -17.65 | **+0.91** | **+18.56 (Positive Sharpe)** |
-| **Profit Factor** | 0.07 | **1.16** | **+1.09 (> 1.0 threshold cleared)** |
-| **Max Drawdown** | -5.95 R | **-1.87 R** | **-68.6% Drawdown Reduction** |
+| **Total Out-of-Sample Trades** | 10 | 10 | Selective high-conviction signals |
+| **Hit Rate** | 0.0% | **10.0%** | 95% Wilson CI: [1.8%, 40.4%] |
+| **Mean Net Realized R** | -0.595 R | **+0.064 R** | 95% t-CI: [-0.45 R, +0.58 R] |
+| **Total Realized Return** | -5.95 R | **+0.64 R** | Friction-adjusted net positive |
+| **Sharpe Ratio (Annualized)** | -17.65 | **+0.91** | Positive risk-adjusted return |
+| **Profit Factor** | 0.07 | **1.16** | > 1.0 hurdle cleared |
+| **Max Drawdown** | -5.95 R | **-1.87 R** | -68.6% drawdown reduction |
 | **Edge Churn Protection** | None (whipsaws) | **Hysteresis Protected ($P \ge 0.47$)** | Eliminates marginal noise exits |
+
+> **Methodological Note on Small-Sample Confidence Intervals ($n=10$)**:
+> With 10 out-of-sample trades in this verification fold window, the estimated mean return of $+0.064\text{ R}$ reflects proper friction-inclusive execution and asymmetric hysteresis benefits, but exhibits a wide 95% confidence interval ($[-0.45\text{ R}, +0.58\text{ R}]$). In institutional deployment, Platt calibration dynamically transitions from default coefficients to MLE once $\ge 80$ verified executed trades accumulate (`fetch_calibration_trades(min_samples=80)`).
 
 ---
 

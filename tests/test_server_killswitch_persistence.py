@@ -24,11 +24,13 @@ def reset_killswitch_state():
         STATE.is_killed = False
         STATE.is_scanning = False
         STATE.scan_error = None
+    server.PERSISTENCE.set_killswitch(False)
     yield
     with STATE._lock:
         STATE.is_killed = False
         STATE.is_scanning = False
         STATE.scan_error = None
+    server.PERSISTENCE.set_killswitch(False)
 
 
 def test_killswitch_status_public():
@@ -122,3 +124,24 @@ def test_pct_change_warning_eliminated():
         assert len(future_warnings) == 0, f"Unexpected FutureWarning: {future_warnings}"
         assert not corr.empty
         assert isinstance(kurt, float)
+
+
+def test_killswitch_survives_restart_and_blocks_scan(tmp_path):
+    paths = RuntimePaths.discover(root=tmp_path)
+    persistence = PersistenceService(paths=paths)
+
+    # 1. Engage killswitch in persistence
+    persistence.set_killswitch(True)
+    assert persistence.get_killswitch() is True
+
+    # 2. Fresh EngineState re-hydration
+    fresh_state = EngineState()
+    assert fresh_state.is_killed is False
+    fresh_state.load_persisted_state(persistence)
+    assert fresh_state.is_killed is True
+
+    # 3. Disengage killswitch in persistence
+    persistence.set_killswitch(False)
+    assert persistence.get_killswitch() is False
+    fresh_state.load_persisted_state(persistence)
+    assert fresh_state.is_killed is False

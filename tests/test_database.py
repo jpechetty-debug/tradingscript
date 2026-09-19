@@ -64,10 +64,11 @@ def test_platt_calibration_crud(db: SqliteDatabase) -> None:
     db.upsert_platt(a=-1.85, b=0.42)
     platt = db.fetch_latest_platt()
     assert platt is not None
-    a, b, fitted_at = platt
+    a, b, fitted_at, version = platt
     assert pytest.approx(a, 0.001) == -1.85
     assert pytest.approx(b, 0.001) == 0.42
     assert len(fitted_at) > 0
+    assert version == 2
 
 
 def test_trade_log_insert_and_fetch(db: SqliteDatabase) -> None:
@@ -127,7 +128,7 @@ def test_persistence_service_sqlite_migration(tmp_path: Path) -> None:
         json.dumps({"current_nav": 950000.0, "peak_nav": 1000000.0}), encoding="utf-8"
     )
     paths.platt_calibration_file.write_text(
-        json.dumps({"A": -2.1, "B": 0.35, "fitted_at": "2026-09-01"}), encoding="utf-8"
+        json.dumps({"A": -2.1, "B": 0.35, "fitted_at": "2026-09-01", "version": 2}), encoding="utf-8"
     )
     paths.trade_log_file.write_text(
         json.dumps([{"ticker": "INFY.NS", "pnl": 500.0}]), encoding="utf-8"

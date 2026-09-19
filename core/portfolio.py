@@ -290,7 +290,7 @@ def calculate_kelly_size(
     f = f_star * config.KELLY_FRACTION * kurt_corr
 
     # 3. NAV-scaled risk in Rs.
-    risk_inr = config.RISK_PER_TRADE_INR * max(f, 0.01) * 100 * capital_fraction
+    risk_inr = config.RISK_PER_TRADE_INR * max(f, 0.01) * capital_fraction
     risk_inr = min(
         risk_inr,
         config.RISK_PER_TRADE_INR * config.KELLY_MAX_MULT * capital_fraction,
@@ -363,10 +363,12 @@ def optimize_portfolio(
     held_candidates.sort(key=lambda r: getattr(r, "sharpe_rank", 0.0), reverse=True)
     if len(held_candidates) > config.PORTFOLIO_SIZE:
         log.warning(
-            "Held positions (%d) exceed PORTFOLIO_SIZE (%d); retaining all active positions, admitting 0 new candidates.",
+            "Held positions (%d) exceed PORTFOLIO_SIZE (%d); capping to top %d by sharpe_rank.",
             len(held_candidates),
             config.PORTFOLIO_SIZE,
+            config.PORTFOLIO_SIZE,
         )
+        held_candidates = held_candidates[:config.PORTFOLIO_SIZE]
 
     for c in held_candidates:
         selected.append(c)
@@ -408,5 +410,24 @@ def optimize_portfolio(
 
             selected.append(c)
             sector_counts[c.sector] = sector_counts.get(c.sector, 0) + 1
+
+    # 3. Post-selection portfolio budget and capital invariant checks
+    total_exposure = sum(getattr(c, "shares", 0) * getattr(c, "entry", 0.0) for c in selected)
+    total_risk = sum(getattr(c, "risk_inr", 0.0) for c in selected)
+    capital_limit = float(getattr(config, "CAPITAL_INR", 1_000_000.0))
+    max_risk_limit = float(getattr(config, "MAX_PORTFOLIO_RISK_INR", getattr(config, "RISK_PER_TRADE_INR", 10_000.0) * getattr(config, "PORTFOLIO_SIZE", 6)))
+
+    if total_exposure > capital_limit:
+        log.error(
+            "PORTFOLIO CAPITAL INVARIANT BREACH: Total exposure Rs.%.2f exceeds capital Rs.%.2f!",
+            total_exposure,
+            capital_limit,
+        )
+    if total_risk > max_risk_limit:
+        log.error(
+            "PORTFOLIO RISK INVARIANT BREACH: Total risk Rs.%.2f exceeds budget Rs.%.2f!",
+            total_risk,
+            max_risk_limit,
+        )
 
     return selected

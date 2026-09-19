@@ -31,7 +31,7 @@ from .backtest import OverallStats, WalkForwardResult, walk_forward
 from .cache import ScanCache
 from .config import CONFIG, IST, MarketRegimeType, SystemConfig
 from .database import SqliteDatabase
-from .async_data import fetch_daily_batch_async
+from .data_provider import fetch_daily_batch
 from .factors import DEFAULT_WEIGHTS, calibrate_ic_weights
 from .indicators import add_indicators
 from .portfolio import optimize_portfolio
@@ -127,9 +127,9 @@ def _rank_sectors(sector_rs: dict[str, float]) -> dict[str, int]:
     return {sector: rank + 1 for rank, (sector, _) in enumerate(sorted_sectors)}
 
 
-def passes_static_filters(df: pd.DataFrame, config: SystemConfig) -> bool:
+def passes_static_filters(df: pd.DataFrame, config: SystemConfig, min_bars: int = 50) -> bool:
     """Check ADV and minimum length before spending scorer time."""
-    if len(df) < 200:
+    if len(df) < min_bars:
         return False
 
     close = df["Close"]
@@ -165,17 +165,23 @@ class PersistenceService:
     def load_platt(self, config: SystemConfig) -> tuple[float, float, bool]:
         latest = self.db.fetch_latest_platt()
         if latest is not None:
-            a, b, _ = latest
-            return a, b, True
+            a, b, _, version = latest
+            if version >= 2:
+                return a, b, True
+            log.warning("Discarding legacy Platt calibration (version %s < 2); falling back to config defaults.", version)
 
         for candidate in self._candidate_paths(self.paths.platt_calibration_file, "platt_calibration.json"):
             if not candidate.exists():
                 continue
             try:
                 payload = json.loads(candidate.read_text(encoding="utf-8"))
+                version = int(payload.get("version", 1))
+                if version < 2:
+                    log.warning("Discarding legacy Platt calibration JSON (version %s < 2): %s", version, candidate)
+                    continue
                 a, b = float(payload["A"]), float(payload["B"])
                 ts = str(payload.get("fitted_at") or datetime.now(IST).isoformat())
-                self.db.upsert_platt(a, b, fitted_at=ts)
+                self.db.upsert_platt(a, b, fitted_at=ts, version=version)
                 return a, b, True
             except Exception as exc:
                 log.warning("Could not load %s: %s; using config defaults.", candidate, exc)
@@ -183,15 +189,16 @@ class PersistenceService:
 
     def save_platt(self, a: float, b: float) -> None:
         ts = datetime.now(IST).isoformat()
-        self.db.upsert_platt(a, b, fitted_at=ts)
+        self.db.upsert_platt(a, b, fitted_at=ts, version=2)
         payload = {
             "A": a,
             "B": b,
             "fitted_at": ts,
+            "version": 2,
         }
         target = ensure_parent(self.paths.platt_calibration_file)
         target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        log.info("Platt params saved to DB and %s: A=%.4f B=%.4f", target, a, b)
+        log.info("Platt params saved to DB and %s: A=%.4f B=%.4f (v2)", target, a, b)
 
     def load_trade_log(self) -> list[dict[str, Any]]:
         trades = self.db.fetch_trades()
@@ -234,6 +241,12 @@ class PersistenceService:
         existing = self.load_trade_log()
         target = ensure_parent(self.paths.trade_log_file)
         target.write_text(json.dumps(existing[-2000:], indent=2, default=str), encoding="utf-8")
+
+    def set_killswitch(self, is_killed: bool) -> None:
+        self.db.set_killswitch(is_killed)
+
+    def get_killswitch(self) -> bool:
+        return self.db.get_killswitch()
 
     def load_portfolio_state(self) -> Optional[PortfolioStateSnapshot]:
         latest = self.db.fetch_latest_portfolio_state()
@@ -296,7 +309,7 @@ class PersistenceService:
 class MarketDataService:
     def __init__(
         self,
-        fetcher: Callable[[list[str], SystemConfig], dict[str, pd.DataFrame]] = fetch_daily_batch_async,
+        fetcher: Callable[[list[str], SystemConfig], dict[str, pd.DataFrame]] = fetch_daily_batch,
     ) -> None:
         self._fetcher = fetcher
 
@@ -447,6 +460,133 @@ class ScanOutput(tuple):
         instance.regime = regime
         instance.sector_rs = dict(sector_rs) if sector_rs is not None else {}
         return instance
+
+
+def score_universe(
+    processed: dict[str, pd.DataFrame],
+    bench: pd.Series,
+    sector_rs: dict[str, float],
+    regime: MarketRegime,
+    config: SystemConfig,
+    weights: Optional[dict[str, float]] = None,
+    *,
+    open_positions: Optional[set[str]] = None,
+    open_pos_map: Optional[dict[str, dict[str, Any]]] = None,
+    session: str = "CLOSING_TREND",
+    capital_fraction: float = 1.0,
+    debug: bool = False,
+    no_intraday: bool = False,
+    force_score: bool = False,
+    allow_watchlist: bool = True,
+    capital_scaler: Any = None,
+    current_nav: float = 1_000_000.0,
+    sector_ranks: Optional[dict[str, int]] = None,
+    direction: str = "BOTH",
+    min_bars: int = 50,
+) -> list[TickerResult]:
+    """
+    Pure, shared candidate scoring pipeline across live scan and walk-forward backtest.
+
+    Applies:
+      1. Static filters (ADV turnover and minimum bar count)
+      2. Pass 1: Multi-factor scoring, trend/regime veto, ATR target calculation
+      3. Cross-sectional cohort factor ranking
+      4. Pass 2: Probability gating with hysteresis and Kelly position sizing
+    """
+    if sector_ranks is None:
+        sector_ranks = _rank_sectors(sector_rs)
+
+    open_pos: set[str] = set(open_positions or ())
+    pos_map: dict[str, dict[str, Any]] = open_pos_map or {}
+    factor_weights = weights if weights is not None else DEFAULT_WEIGHTS
+
+    base_cap_frac = confidence_position_scale(regime.confidence) * capital_fraction
+    if capital_scaler is not None:
+        try:
+            base_cap_frac *= float(capital_scaler.capital_fraction(current_nav, regime.regime))
+        except Exception:
+            log.debug("Injected capital scaler failed.", exc_info=debug)
+
+    pass1_candidates: list[CandidateContext] = []
+
+    candidate_items: list[tuple[str, pd.DataFrame]] = []
+    for ticker, df in processed.items():
+        if ticker == config.BENCHMARK:
+            continue
+        clean_ticker = ticker.replace(".NS", "")
+        is_open = (ticker in open_pos) or (clean_ticker in open_pos)
+        if not is_open and not passes_static_filters(df, config, min_bars=min_bars):
+            continue
+        candidate_items.append((ticker, df))
+
+    max_workers = config.MAX_WORKERS if len(candidate_items) > 2 else 1
+    with ThreadPoolExecutor(max_workers=max_workers) as pass1_executor:
+        pass1_futures: dict[Any, str] = {}
+        for ticker, df in candidate_items:
+            clean_ticker = ticker.replace(".NS", "")
+            is_open = (ticker in open_pos) or (clean_ticker in open_pos)
+            pos_info = pos_map.get(ticker) or pos_map.get(clean_ticker) or {}
+            held_dir = pos_info.get("direction")
+
+            fut = pass1_executor.submit(
+                score_candidate_pass1,
+                ticker=ticker,
+                daily_df=df,
+                bench=bench,
+                sector_ranks=sector_ranks,
+                sector_rs=sector_rs,
+                session=session,
+                regime=regime,
+                config=config,
+                factor_weights=factor_weights,
+                capital_fraction=base_cap_frac,
+                debug=debug,
+                no_intraday=no_intraday,
+                force_score=force_score,
+                is_open_position=is_open,
+                held_direction=held_dir,
+            )
+            pass1_futures[fut] = ticker
+
+        for fut in as_completed(pass1_futures):
+            ticker = pass1_futures[fut]
+            try:
+                cand = fut.result()
+                if cand is not None:
+                    if direction == "BOTH" or cand.direction == direction:
+                        pass1_candidates.append(cand)
+            except Exception as exc:
+                log.error("score_candidate_pass1 error for %s: %s", ticker, exc, exc_info=True)
+
+    # Cross-sectional cohort factor ranking
+    cohort_rank_weight = getattr(config, "COHORT_RANK_WEIGHT", 0.40)
+    cohort_min_obs = getattr(config, "COHORT_MIN_OBS", 10)
+    ranked_candidates: list[CandidateContext] = apply_cohort_factor_ranking(
+        pass1_candidates,
+        cohort_rank_weight=cohort_rank_weight,
+        cohort_min_obs=cohort_min_obs,
+    )
+
+    # Pass 2: Probability gating with hysteresis and Kelly position sizing
+    all_results: list[TickerResult] = []
+    for cand in ranked_candidates:
+        clean_ticker = cand.ticker.replace(".NS", "")
+        is_open = (cand.ticker in open_pos) or (clean_ticker in open_pos)
+        try:
+            res = score_candidate_pass2(
+                candidate=cand,
+                config=config,
+                is_open_position=is_open,
+                allow_watchlist=allow_watchlist,
+                debug=debug,
+            )
+            if res is not None:
+                if direction == "BOTH" or res.direction == direction:
+                    all_results.append(res)
+        except Exception as exc:
+            log.error("score_candidate_pass2 error for %s: %s", cand.ticker, exc, exc_info=True)
+
+    return all_results
 
 
 class ScanService:
@@ -847,9 +987,12 @@ class ScanService:
                 continue
 
             row = df.iloc[-1]
+            open_p = float(row.get("Open", 0.0))
             close_p = float(row.get("Close", 0.0))
             low_p = float(row.get("Low", close_p))
             high_p = float(row.get("High", close_p))
+            if open_p <= 0.0:
+                open_p = close_p
 
             direction = str(pos.get("direction", "LONG")).upper()
             stop_loss = float(pos.get("stop_loss", 0.0))
@@ -870,27 +1013,36 @@ class ScanService:
                     target_hit = True
 
             if stopped_out:
+                exit_fill = min(open_p, stop_loss) if direction == "LONG" else max(open_p, stop_loss)
                 log.info(
-                    "Held position %s EXITED: Stop-loss triggered (Price Low=%.2f Close=%.2f <= Stop=%.2f)",
-                    ticker, low_p, close_p, stop_loss,
+                    "Held position %s EXITED: Stop-loss triggered (Fill=%.2f Low=%.2f Close=%.2f <= Stop=%.2f)",
+                    ticker, exit_fill, low_p, close_p, stop_loss,
                 )
                 if callable(deleter):
                     deleter(ticker)
-                self._record_closed_trade(pos, ticker, close_p, "STOP")
+                self._record_closed_trade(pos, ticker, exit_fill, "STOP", source="SIMULATED")
                 state.open_positions.discard(ticker)
                 state.open_positions.discard(ticker.replace(".NS", ""))
             elif target_hit:
+                exit_fill = max(open_p, target) if direction == "LONG" else min(open_p, target)
                 log.info(
-                    "Held position %s EXITED: Profit target triggered (Price High=%.2f Close=%.2f >= Target=%.2f)",
-                    ticker, high_p, close_p, target,
+                    "Held position %s EXITED: Profit target triggered (Fill=%.2f High=%.2f Close=%.2f >= Target=%.2f)",
+                    ticker, exit_fill, high_p, close_p, target,
                 )
                 if callable(deleter):
                     deleter(ticker)
-                self._record_closed_trade(pos, ticker, close_p, "TARGET")
+                self._record_closed_trade(pos, ticker, exit_fill, "TARGET", source="SIMULATED")
                 state.open_positions.discard(ticker)
                 state.open_positions.discard(ticker.replace(".NS", ""))
 
-    def _record_closed_trade(self, position: dict[str, Any], ticker: str, exit_price: float, exit_reason: str) -> None:
+    def _record_closed_trade(
+        self,
+        position: dict[str, Any],
+        ticker: str,
+        exit_price: float,
+        exit_reason: str,
+        source: str = "SIMULATED",
+    ) -> None:
         entry = float(position.get("entry_price", position.get("entry", 0.0)))
         direction = str(position.get("direction", "LONG")).upper()
         if entry <= 0 or exit_price <= 0:
@@ -900,6 +1052,7 @@ class ScanService:
             **position, "ticker": ticker, "direction": direction, "entry": entry,
             "exit_price": exit_price, "exit_reason": exit_reason, "pnl": round(pnl, 6),
             "timestamp": datetime.now(IST).isoformat(),
+            "source": source,
         })
 
     def _score_candidates_legacy_mock(
@@ -977,8 +1130,6 @@ class ScanService:
         force_score: bool,
     ) -> tuple[list[TickerResult], float]:
         started = time.monotonic()
-        all_results: list[TickerResult] = []
-        pass1_candidates: list[CandidateContext] = []
         current_nav = self._resolve_current_nav()
 
         # Backward compatibility for tests that monkeypatch services.score_ticker
@@ -996,85 +1147,25 @@ class ScanService:
             )
             return mock_results, time.monotonic() - started
 
-        with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as pass1_executor:
-            pass1_futures: dict[Any, str] = {}
-            open_pos: set[str] = getattr(state, "open_positions", set())
-            open_pos_map = self._persistence.load_open_positions()
-            for ticker, df in prepared.processed.items():
-                if ticker == config.BENCHMARK:
-                    continue
-                clean_ticker = ticker.replace(".NS", "")
-                is_open = (ticker in open_pos) or (clean_ticker in open_pos)
-                if not is_open and not passes_static_filters(df, config):
-                    continue
-
-                pos_info = open_pos_map.get(ticker) or open_pos_map.get(clean_ticker) or {}
-                held_dir = pos_info.get("direction")
-
-                capital_fraction = confidence_position_scale(regime.confidence)
-                if self._capital_scaler is not None:
-                    try:
-                        capital_fraction *= float(
-                            self._capital_scaler.capital_fraction(current_nav, regime.regime)
-                        )
-                    except Exception:
-                        log.debug("Injected capital scaler failed for %s.", ticker, exc_info=debug)
-
-                fut = pass1_executor.submit(
-                    score_candidate_pass1,
-                    ticker=ticker,
-                    daily_df=df,
-                    bench=prepared.bench_series,
-                    sector_ranks=prepared.sector_ranks,
-                    sector_rs=prepared.sector_rs,
-                    session=session,
-                    regime=regime,
-                    config=config,
-                    factor_weights=state.factor_weights,
-                    capital_fraction=capital_fraction,
-                    debug=debug,
-                    no_intraday=no_intraday,
-                    force_score=force_score,
-                    is_open_position=is_open,
-                    held_direction=held_dir,
-                )
-                pass1_futures[fut] = ticker
-
-            for fut in as_completed(pass1_futures):
-                ticker = pass1_futures[fut]
-                try:
-                    cand = fut.result()
-                    if cand is not None:
-                        pass1_candidates.append(cand)
-                except Exception as exc:
-                    log.error("score_candidate_pass1 error for %s: %s", ticker, exc, exc_info=True)
-
-        # Cross-sectional cohort factor ranking
-        cohort_rank_weight = getattr(config, "COHORT_RANK_WEIGHT", 0.40)
-        cohort_min_obs = getattr(config, "COHORT_MIN_OBS", 10)
-        ranked_candidates: list[CandidateContext] = apply_cohort_factor_ranking(
-            pass1_candidates,
-            cohort_rank_weight=cohort_rank_weight,
-            cohort_min_obs=cohort_min_obs,
+        all_results = score_universe(
+            processed=prepared.processed,
+            bench=prepared.bench_series,
+            sector_rs=prepared.sector_rs,
+            regime=regime,
+            config=config,
+            weights=state.factor_weights,
+            open_positions=state.open_positions,
+            open_pos_map=self._persistence.load_open_positions(),
+            session=session,
+            debug=debug,
+            no_intraday=no_intraday,
+            force_score=force_score,
+            allow_watchlist=getattr(config, "ENABLE_WATCHLIST", True),
+            capital_scaler=self._capital_scaler,
+            current_nav=current_nav,
+            sector_ranks=prepared.sector_ranks,
+            min_bars=50,
         )
-
-        # Pass 2: Probability gating with hysteresis and Kelly position sizing
-        for cand in ranked_candidates:
-            clean_ticker = cand.ticker.replace(".NS", "")
-            is_open = (cand.ticker in open_pos) or (clean_ticker in open_pos)
-            try:
-                res = score_candidate_pass2(
-                    candidate=cand,
-                    config=config,
-                    is_open_position=is_open,
-                    allow_watchlist=getattr(config, "ENABLE_WATCHLIST", True),
-                    debug=debug,
-                )
-                if res is not None:
-                    all_results.append(res)
-            except Exception as exc:
-                log.error("score_candidate_pass2 error for %s: %s", cand.ticker, exc, exc_info=True)
-
         elapsed = time.monotonic() - started
         log.debug("Scoring completed in %.3fs.", elapsed)
         return all_results, elapsed

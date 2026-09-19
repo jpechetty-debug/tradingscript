@@ -188,8 +188,8 @@ class TestHysteresisGating:
 
     def test_score_ticker_passes_is_open_position(self):
         config = SystemConfig()
-        config.PLATT_A = 4.0
-        config.PLATT_B = -2.0
+        config.PLATT_A = -4.0
+        config.PLATT_B = 2.0
         config.MIN_EXPECTANCY_R = 0.0
 
         cand = _make_dummy_candidate(ticker="INFY.NS", composite=0.510)
@@ -492,7 +492,8 @@ class TestPortfolioHysteresisCoordination:
         new_c = _make_dummy_ticker_result(ticker="NEW", sharpe_rank=2.0, is_held=False)
 
         selected = optimize_portfolio([h1, h2, h3, new_c], config)
-        assert len(selected) == 3        # all 3 active positions retained
+        assert len(selected) == 2        # capped to PORTFOLIO_SIZE = 2
+        assert [r.ticker for r in selected] == ["H3", "H2"]
         assert "NEW" not in [r.ticker for r in selected]  # 0 new admitted
 
 

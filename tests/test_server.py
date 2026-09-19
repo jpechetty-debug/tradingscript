@@ -11,12 +11,39 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+import server
 from server import app, STATE, API_KEY
+
+
+@pytest.fixture(autouse=True)
+def reset_server_state():
+    with STATE._lock:
+        STATE.is_killed = False
+        STATE.is_scanning = False
+        STATE.scan_error = None
+    server.PERSISTENCE.set_killswitch(False)
+    yield
+    with STATE._lock:
+        STATE.is_killed = False
+        STATE.is_scanning = False
+        STATE.scan_error = None
+    server.PERSISTENCE.set_killswitch(False)
 
 
 @pytest.fixture
 def client() -> TestClient:
     return TestClient(app)
+
+
+def test_server_startup_fails_without_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("API_KEY", raising=False)
+    with patch.object(server, "API_KEY", None):
+        with pytest.raises(RuntimeError, match="CRITICAL SECURITY CONFIGURATION ERROR"):
+            import asyncio
+            async def run_startup():
+                async with server.lifespan(server.app):
+                    pass
+            asyncio.run(run_startup())
 
 
 def test_read_root(client: TestClient) -> None:

@@ -68,7 +68,14 @@ class SqliteDatabase:
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     a REAL NOT NULL,
                     b REAL NOT NULL,
-                    fitted_at TEXT NOT NULL
+                    fitted_at TEXT NOT NULL,
+                    version INTEGER DEFAULT 2
+                );
+
+                CREATE TABLE IF NOT EXISTS system_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS trade_log (
@@ -80,7 +87,8 @@ class SqliteDatabase:
                     factors TEXT,
                     composite REAL,
                     raw_payload TEXT NOT NULL,
-                    timestamp TEXT NOT NULL
+                    timestamp TEXT NOT NULL,
+                    source TEXT DEFAULT 'EXECUTED'
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_trade_ticker ON trade_log(ticker);
@@ -138,10 +146,12 @@ class SqliteDatabase:
                 CREATE INDEX IF NOT EXISTS idx_exec_horizon ON executed_trades(trade_horizon);
             """)
 
-            # Migration: ensure trade_id column exists and populate empty legacy records
+            # Migration: ensure trade_id and source columns exist and populate empty legacy records
             cols = [col[1] for col in conn.execute("PRAGMA table_info(trade_log);").fetchall()]
             if "trade_id" not in cols:
                 conn.execute("ALTER TABLE trade_log ADD COLUMN trade_id TEXT;")
+            if "source" not in cols:
+                conn.execute("ALTER TABLE trade_log ADD COLUMN source TEXT DEFAULT 'EXECUTED';")
             conn.execute("UPDATE trade_log SET trade_id = 'legacy_' || id WHERE trade_id IS NULL OR trade_id = '';")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_unique_id ON trade_log(trade_id);")
             position_cols = [c[1] for c in conn.execute("PRAGMA table_info(open_positions);").fetchall()]
@@ -183,6 +193,36 @@ class SqliteDatabase:
                 }
             return None
 
+    # ── System State / Persistent Flags ───────────────────────────────────────
+
+    def set_system_flag(self, key: str, value: str) -> None:
+        ts = datetime.now(timezone.utc).isoformat()
+        with self.get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO system_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at;
+                """,
+                (str(key), str(value), ts),
+            )
+
+    def get_system_flag(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT value FROM system_state WHERE key = ?;", (str(key),)).fetchone()
+            if row:
+                return str(row["value"])
+            return default
+
+    def set_killswitch(self, is_killed: bool) -> None:
+        self.set_system_flag("is_killed", "1" if is_killed else "0")
+
+    def get_killswitch(self) -> bool:
+        val = self.get_system_flag("is_killed", default="0")
+        return val in ("1", "true", "True")
+
     # ── Platt Calibration ───────────────────────────────────────────────────────
 
     def upsert_platt(
@@ -190,28 +230,31 @@ class SqliteDatabase:
         a: float,
         b: float,
         fitted_at: Optional[str] = None,
+        version: int = 2,
     ) -> None:
         ts = fitted_at or datetime.now(timezone.utc).isoformat()
         with self.get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO platt_calibration (id, a, b, fitted_at)
-                VALUES (1, ?, ?, ?)
+                INSERT INTO platt_calibration (id, a, b, fitted_at, version)
+                VALUES (1, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     a = excluded.a,
                     b = excluded.b,
-                    fitted_at = excluded.fitted_at;
+                    fitted_at = excluded.fitted_at,
+                    version = excluded.version;
                 """,
-                (float(a), float(b), ts),
+                (float(a), float(b), ts, int(version)),
             )
 
-    def fetch_latest_platt(self) -> Optional[tuple[float, float, str]]:
+    def fetch_latest_platt(self) -> Optional[tuple[float, float, str, int]]:
         with self.get_connection() as conn:
             row = conn.execute(
-                "SELECT a, b, fitted_at FROM platt_calibration WHERE id = 1;"
+                "SELECT a, b, fitted_at, version FROM platt_calibration WHERE id = 1;"
             ).fetchone()
             if row:
-                return float(row["a"]), float(row["b"]), str(row["fitted_at"])
+                version = int(row["version"]) if row["version"] is not None else 1
+                return float(row["a"]), float(row["b"]), str(row["fitted_at"]), version
             return None
 
     # ── Trade Log ──────────────────────────────────────────────────────────────
@@ -232,14 +275,15 @@ class SqliteDatabase:
         factors_str = json.dumps(factors_raw) if factors_raw is not None else None
         composite = float(trade["composite"]) if trade.get("composite") is not None else None
         ts = str(trade.get("timestamp") or trade.get("ts") or datetime.now(timezone.utc).isoformat())
+        source = str(trade.get("source", "EXECUTED"))
         trade_id = self._resolve_trade_id(trade, ticker, direction, ts, pnl)
         raw_json = json.dumps(trade, default=str)
 
         with self.get_connection() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO trade_log (trade_id, ticker, direction, pnl, factors, composite, raw_payload, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO trade_log (trade_id, ticker, direction, pnl, factors, composite, raw_payload, timestamp, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(trade_id) DO UPDATE SET
                     ticker = excluded.ticker,
                     direction = excluded.direction,
@@ -247,9 +291,10 @@ class SqliteDatabase:
                     factors = excluded.factors,
                     composite = excluded.composite,
                     raw_payload = excluded.raw_payload,
-                    timestamp = excluded.timestamp;
+                    timestamp = excluded.timestamp,
+                    source = excluded.source;
                 """,
-                (trade_id, ticker, direction, pnl, factors_str, composite, raw_json, ts),
+                (trade_id, ticker, direction, pnl, factors_str, composite, raw_json, ts, source),
             )
             return cursor.lastrowid or 0
 
@@ -263,13 +308,14 @@ class SqliteDatabase:
                 factors_str = json.dumps(factors_raw) if factors_raw is not None else None
                 composite = float(trade["composite"]) if trade.get("composite") is not None else None
                 ts = str(trade.get("timestamp") or trade.get("ts") or datetime.now(timezone.utc).isoformat())
+                source = str(trade.get("source", "EXECUTED"))
                 trade_id = self._resolve_trade_id(trade, ticker, direction, ts, pnl)
                 raw_json = json.dumps(trade, default=str)
 
                 conn.execute(
                     """
-                    INSERT INTO trade_log (trade_id, ticker, direction, pnl, factors, composite, raw_payload, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO trade_log (trade_id, ticker, direction, pnl, factors, composite, raw_payload, timestamp, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(trade_id) DO UPDATE SET
                         ticker = excluded.ticker,
                         direction = excluded.direction,
@@ -277,9 +323,10 @@ class SqliteDatabase:
                         factors = excluded.factors,
                         composite = excluded.composite,
                         raw_payload = excluded.raw_payload,
-                        timestamp = excluded.timestamp;
+                        timestamp = excluded.timestamp,
+                        source = excluded.source;
                     """,
-                    (trade_id, ticker, direction, pnl, factors_str, composite, raw_json, ts),
+                    (trade_id, ticker, direction, pnl, factors_str, composite, raw_json, ts, source),
                 )
 
     def fetch_trades(

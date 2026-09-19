@@ -10,6 +10,7 @@ aggregated into AppSettings composition root, plus ScoringRuntime for dynamic pa
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta
@@ -18,10 +19,35 @@ from pathlib import Path
 from typing import Mapping, Optional
 from zoneinfo import ZoneInfo
 
+log = logging.getLogger("sovereign.config")
+
+
+def _safe_int_env(key: str, default: int) -> int:
+    val = os.getenv(key)
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        log.warning("Invalid integer for env var %s=%r; using default %d", key, val, default)
+        return default
+
+
+def _safe_float_env(key: str, default: float) -> float:
+    val = os.getenv(key)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        log.warning("Invalid float for env var %s=%r; using default %f", key, val, default)
+        return default
+
 
 class SecretStr(str):
     """
-    A ``str`` subclass whose ``__repr__`` never exposes the secret value.
+    A ``str`` subclass whose ``__repr__`` and ``__str__`` never expose the secret value.
+    Call ``get_secret_value()`` to retrieve the raw string.
     """
 
     _SECRET_FIELDS = frozenset({
@@ -32,9 +58,16 @@ class SecretStr(str):
     })
 
     def __repr__(self) -> str:
-        if len(self) >= 12:
-            return f"SecretStr('{self[:4]}...{self[-4:]}')"
+        raw = super().__str__()
+        if len(raw) >= 12:
+            return f"SecretStr('{raw[:4]}...{raw[-4:]}')"
         return "SecretStr('****')"
+
+    def __str__(self) -> str:
+        return "SecretStr('****')" if super().__str__() else ""
+
+    def get_secret_value(self) -> str:
+        return super().__str__()
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -171,8 +204,8 @@ class SignalSettings:
     va_min_rr: float = 1.5
     adv_share_floor: int = 750_000
     adv_turnover_floor: int = 35_000_000
-    ic_lookback_days: int = 60
-    ic_forward_bars: int = 1
+    ic_lookback_days: int = 120
+    ic_forward_bars: int = 5
     icir_min_obs: int = 20
     ic_calib_offset: int = 60
     watchlist_min_prob: float = 0.45
@@ -186,7 +219,7 @@ class SignalSettings:
 
 @dataclass(frozen=True)
 class PortfolioSettings:
-    kelly_fraction: float = 0.25
+    kelly_fraction: float = 3.0
     kelly_min_shares: int = 1
     kelly_max_mult: float = 3.0
     kelly_kurtosis_fallback: float = 4.0
@@ -199,6 +232,8 @@ class PortfolioSettings:
     max_sector_picks: int = 2
     portfolio_size: int = 6
     candidates_max: int = 20
+    capital_inr: float = 1_000_000.0
+    max_portfolio_risk_inr: float = 60_000.0
 
 
 @dataclass(frozen=True)
@@ -272,7 +307,7 @@ class SystemConfig:
     COHORT_RANK_WEIGHT: float = field(default_factory=lambda: float(os.getenv("COHORT_RANK_WEIGHT", "0.40")))
 
     # ── Kelly position sizing ─────────────────────────────────────────────────
-    KELLY_FRACTION:          float = 0.25
+    KELLY_FRACTION:          float = 3.0
     KELLY_MIN_SHARES:        int   = 1
     KELLY_MAX_MULT:          float = 3.0
     KELLY_KURTOSIS_FALLBACK: float = 4.0
@@ -284,8 +319,8 @@ class SystemConfig:
     PLATT_B: float =  2.0
 
     # ── IC/ICIR weighting ────────────────────────────────────────────────────
-    IC_LOOKBACK_DAYS:  int   = 60
-    IC_FORWARD_BARS:   int   = 1
+    IC_LOOKBACK_DAYS:  int   = 120
+    IC_FORWARD_BARS:   int   = 5
     ICIR_MIN_OBS:      int   = 20
     IC_CALIB_OFFSET:   int   = 60   # held-out window offset (Fix D)
 
@@ -353,6 +388,8 @@ class SystemConfig:
     MAX_SECTOR_PICKS: int = 2
     PORTFOLIO_SIZE:   int = field(default_factory=lambda: int(os.getenv("PORTFOLIO_SIZE", "6")))
     CANDIDATES_MAX:   int = field(default_factory=lambda: int(os.getenv("CANDIDATES_MAX", "20")))
+    CAPITAL_INR:      float = field(default_factory=lambda: float(os.getenv("CAPITAL_INR", "1000000.0")))
+    MAX_PORTFOLIO_RISK_INR: float = field(default_factory=lambda: float(os.getenv("MAX_PORTFOLIO_RISK_INR", "60000.0")))
 
     # ── Execution costs ───────────────────────────────────────────────────────
     SLIPPAGE_BPS:   int = field(default_factory=lambda: int(os.getenv("SLIPPAGE_BPS", "8")))
@@ -383,7 +420,7 @@ class SystemConfig:
     TELEGRAM_BOT_TOKEN:    SecretStr = field(
         default_factory=lambda: SecretStr(os.getenv("TELEGRAM_BOT_TOKEN", ""))
     )
-    TELEGRAM_CHAT_ID:      str   = os.getenv("TELEGRAM_CHAT_ID", "")
+    TELEGRAM_CHAT_ID:      str   = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
     TELEGRAM_ALERT_MIN_PROB: float = 0.60
     TELEGRAM_ALERT_TOP_N:  int   = 3
     TELEGRAM_DEDUP_HOURS:  int   = 4
@@ -403,7 +440,7 @@ class SystemConfig:
     FYERS_SECRET_KEY:   SecretStr = field(
         default_factory=lambda: SecretStr(os.getenv("FYERS_SECRET_KEY", ""))
     )
-    FYERS_REDIRECT_URI: str  = os.getenv("FYERS_REDIRECT_URI", "")
+    FYERS_REDIRECT_URI: str  = field(default_factory=lambda: os.getenv("FYERS_REDIRECT_URI", ""))
     FYERS_ACCESS_TOKEN: SecretStr = field(
         default_factory=lambda: SecretStr(os.getenv("FYERS_ACCESS_TOKEN", ""))
     )
@@ -460,6 +497,7 @@ class SystemConfig:
             mis_squareoff_time=self.MIS_SQUAREOFF_TIME,
             market_close_time=self.MARKET_CLOSE_TIME,
             midday_breakout_min_prob=self.MIDDAY_BREAKOUT_MIN_PROB,
+            intraday_enabled=self.INTRADAY_ENABLED,
         )
 
     def get_market_phase(self, now: datetime | None = None) -> MarketPhase:
@@ -494,6 +532,8 @@ class SystemConfig:
             enable_watchlist=self.ENABLE_WATCHLIST,
             cohort_min_obs=self.COHORT_MIN_OBS,
             cohort_rank_weight=self.COHORT_RANK_WEIGHT,
+            short_is_intraday_only=self.SHORT_IS_INTRADAY_ONLY,
+            min_factor_weight=self.MIN_FACTOR_WEIGHT,
         )
 
     def as_portfolio(self) -> PortfolioSettings:
@@ -511,6 +551,8 @@ class SystemConfig:
             max_sector_picks=self.MAX_SECTOR_PICKS,
             portfolio_size=self.PORTFOLIO_SIZE,
             candidates_max=self.CANDIDATES_MAX,
+            capital_inr=self.CAPITAL_INR,
+            max_portfolio_risk_inr=self.MAX_PORTFOLIO_RISK_INR,
         )
 
     def as_execution_cost(self) -> ExecutionCostSettings:
@@ -559,6 +601,23 @@ class SystemConfig:
             alerts=self.as_alerts(),
             backtest=self.as_backtest(),
         )
+
+    def __post_init__(self) -> None:
+        if self.PROB_HOLD_FLOOR >= self.MIN_PROB_WIN:
+            adjusted = max(0.0, self.MIN_PROB_WIN - 0.05)
+            log.warning(
+                "PROB_HOLD_FLOOR (%.2f) >= MIN_PROB_WIN (%.2f); adjusting floor to %.2f",
+                self.PROB_HOLD_FLOOR,
+                self.MIN_PROB_WIN,
+                adjusted,
+            )
+            self.PROB_HOLD_FLOOR = adjusted
+        if self.PORTFOLIO_SIZE <= 0:
+            log.warning("Invalid PORTFOLIO_SIZE (%d); falling back to 6", self.PORTFOLIO_SIZE)
+            self.PORTFOLIO_SIZE = 6
+        if self.CAPITAL_INR <= 0:
+            log.warning("Invalid CAPITAL_INR (%.2f); falling back to 1,000,000.0", self.CAPITAL_INR)
+            self.CAPITAL_INR = 1_000_000.0
 
 
 def load_system_config(env_file: Optional[str | Path] = None) -> SystemConfig:
