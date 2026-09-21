@@ -213,15 +213,16 @@ class SignalSettings:
     enable_watchlist: bool = True
     short_is_intraday_only: bool = True
     cohort_min_obs: int = 10
+    cohort_full_obs: int = 30
     cohort_rank_weight: float = 0.40
     min_factor_weight: float = 0.03  # Floor per factor to prevent starvation
 
 
 @dataclass(frozen=True)
 class PortfolioSettings:
-    kelly_fraction: float = 3.0
+    kelly_fraction: float = 0.5
     kelly_min_shares: int = 1
-    kelly_max_mult: float = 3.0
+    kelly_max_mult: float = 1.5
     kelly_kurtosis_fallback: float = 4.0
     kelly_kurtosis_window: int = 252
     kelly_kurtosis_min_obs: int = 60
@@ -290,6 +291,7 @@ class ScoringRuntime:
     min_expectancy_r: float = 0.15
     use_ema200_filter: bool = True
     cohort_min_obs: int = 10
+    cohort_full_obs: int = 30
     cohort_rank_weight: float = 0.40
 
 
@@ -304,12 +306,13 @@ class SystemConfig:
     ENABLE_WATCHLIST:   bool  = field(default_factory=lambda: os.getenv("ENABLE_WATCHLIST", "true").lower() in ("true", "1", "yes"))
     MIN_EXPECTANCY_R:   float = field(default_factory=lambda: float(os.getenv("MIN_EXPECTANCY_R", "0.15")))
     COHORT_MIN_OBS:     int   = field(default_factory=lambda: int(os.getenv("COHORT_MIN_OBS", "10")))
+    COHORT_FULL_OBS:    int   = field(default_factory=lambda: int(os.getenv("COHORT_FULL_OBS", "30")))
     COHORT_RANK_WEIGHT: float = field(default_factory=lambda: float(os.getenv("COHORT_RANK_WEIGHT", "0.40")))
 
     # ── Kelly position sizing ─────────────────────────────────────────────────
-    KELLY_FRACTION:          float = 3.0
+    KELLY_FRACTION:          float = 0.5
     KELLY_MIN_SHARES:        int   = 1
-    KELLY_MAX_MULT:          float = 3.0
+    KELLY_MAX_MULT:          float = 1.5
     KELLY_KURTOSIS_FALLBACK: float = 4.0
     KELLY_KURTOSIS_WINDOW:   int   = 252
     KELLY_KURTOSIS_MIN_OBS:  int   = 60

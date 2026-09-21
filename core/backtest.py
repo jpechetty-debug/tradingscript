@@ -40,13 +40,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
 from .config import SystemConfig
-from .factors import compute_factors, DEFAULT_WEIGHTS
+from .factors import DEFAULT_WEIGHTS
 from .indicators import add_indicators
 from .portfolio import compute_targets
 from .regime import (
@@ -55,8 +55,7 @@ from .regime import (
     compute_breadth,
     compute_sector_rs,
 )
-from .scorer import composite_to_prob, passes_liquidity, compute_trade_management, _classify_trade_horizon
-from .universe import TICKER_TO_SECTOR, N_SECTORS
+from .scorer import compute_trade_management
 # ─────────────────────────────────────────────────────────────────────────────
 # TRANSACTION COST MODEL  (NSE intraday defaults)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -154,6 +153,10 @@ class TransactionCostModel:
 
 # Pre-built instances — reference by name instead of constructing inline.
 DEFAULT_COST_MODEL = TransactionCostModel()   # NSE intraday retail defaults
+SWING_COST_MODEL   = TransactionCostModel(    # NSE delivery defaults (0.1% STT on both legs)
+    stt_sell_pct=0.001,
+    stamp_buy_pct=0.001,
+)
 ZERO_COST_MODEL    = TransactionCostModel(    # frictionless (legacy / tests)
     slippage_pct=0.0, brokerage_pct=0.0, exchange_pct=0.0,
     sebi_pct=0.0, stt_sell_pct=0.0, stamp_buy_pct=0.0, gst_rate=0.0,
@@ -250,6 +253,7 @@ def _realised_r(
     fwd_bars:  pd.DataFrame,
     time_stop: int,
     cost_model: TransactionCostModel = ZERO_COST_MODEL,
+    shares:    Optional[int] = None,
 ) -> tuple[float, bool, int, Optional[pd.Timestamp], float, float]:
     """
     Simulate a single trade against forward OHLCV bars.
@@ -272,7 +276,7 @@ def _realised_r(
         return 0.0, False, 0, None, 0.0, 0.0
 
     rr      = abs(t1 - entry) / sl_dist
-    friction = cost_model.friction_r(entry, sl_dist)
+    friction = cost_model.friction_r(entry, sl_dist, shares=shares)
 
     for i, (ts, bar) in enumerate(fwd_bars.iterrows()):
         if i >= time_stop:
@@ -335,17 +339,24 @@ def _fold_stats(fold: int, trades: list[TradeRecord], dates: tuple) -> FoldStats
                          n_trades=0, hit_rate=0.0, mean_r=0.0,
                          sharpe=0.0, max_dd=0.0, total_r=0.0)
 
-    rs    = [t.r_multiple for t in trades]
-    hits  = [t.hit_t1 for t in trades]
+    sorted_trades = sorted(trades, key=lambda t: t.entry_date)
+    rs    = [t.r_multiple for t in sorted_trades]
+    hits  = [t.hit_t1 for t in sorted_trades]
     total = sum(rs)
     mean  = total / len(rs)
     hit_r = sum(hits) / len(hits)
 
-    # Annualised Sharpe of trade R-multiples (assume ~252 trades/year avg rate)
+    # Annualised Sharpe of trade R-multiples using actual fold trade rate
     std = float(np.std(rs)) if len(rs) > 1 else 0.0
-    sharpe = round((mean / std) * np.sqrt(252), 3) if std > 0 else 0.0
+    days = 20
+    try:
+        days = max(1, (end - start).days)
+    except Exception:
+        pass
+    trades_per_year = max(1.0, (len(trades) / days) * 252.0)
+    sharpe = round((mean / std) * np.sqrt(trades_per_year), 3) if std > 0 else 0.0
 
-    # Max drawdown of cumulative R curve
+    # Max drawdown of cumulative R curve (in chronological order)
     cum  = np.cumsum([0.0] + rs)
     peak = np.maximum.accumulate(cum)
     dd   = float(np.min(cum - peak))
@@ -366,13 +377,21 @@ def _overall_stats(all_trades: list[TradeRecord], fold_stats: list[FoldStats]) -
                             max_dd=0.0, total_r=0.0, profit_factor=0.0,
                             expectancy_r=0.0, fold_stats=fold_stats)
 
-    rs    = [t.r_multiple for t in all_trades]
+    sorted_trades = sorted(all_trades, key=lambda t: t.entry_date)
+    rs    = [t.r_multiple for t in sorted_trades]
     total = sum(rs)
     mean  = total / len(rs)
-    hits  = sum(1 for t in all_trades if t.hit_t1)
+    hits  = sum(1 for t in sorted_trades if t.hit_t1)
 
     std = float(np.std(rs)) if len(rs) > 1 else 0.0
-    sharpe = round((mean / std) * np.sqrt(252), 3) if std > 0 else 0.0
+    if sorted_trades and std > 0:
+        start_d = sorted_trades[0].entry_date
+        end_d = sorted_trades[-1].entry_date
+        days = max(1, getattr(end_d - start_d, "days", 1))
+        trades_per_year = max(1.0, (len(sorted_trades) / days) * 252.0)
+        sharpe = round((mean / std) * np.sqrt(trades_per_year), 3)
+    else:
+        sharpe = 0.0
 
     cum  = np.cumsum([0.0] + rs)
     peak = np.maximum.accumulate(cum)
@@ -382,9 +401,8 @@ def _overall_stats(all_trades: list[TradeRecord], fold_stats: list[FoldStats]) -
     losses = [r for r in rs if r < 0]
     pf     = (sum(wins) / abs(sum(losses))) if losses else float("inf")
 
-    exp_r  = round(
-        sum(t.r_multiple * t.prob_win for t in all_trades) / len(all_trades), 4
-    )
+    # Expectancy is mean_r
+    exp_r  = round(mean, 4)
 
     return OverallStats(
         n_folds=len(fold_stats),
@@ -457,8 +475,14 @@ def walk_forward(
     **Next-Day Open Assumption**: The simulation enters trades at the exact
     opening price of the day following the signal. This removes the optimistic
     assumption of filling at the exact MOC (Market on Close) price of the signal day.
+
+    **Survivorship Bias Warning**: The universe is evaluated on the current list of
+    ALL_TICKERS. Tickers that were delisted, halted, or dropped out of the index during
+    historical periods are not represented, which introduces potential survivorship bias.
     """
     min_prob  = min_prob if min_prob is not None else config.BACKTEST_MIN_PROB
+    if cost_model is DEFAULT_COST_MODEL and horizon_filter.upper() == "SWING":
+        cost_model = SWING_COST_MODEL
     all_trades: list[TradeRecord] = []
     all_folds:  list[FoldStats]   = []
 
@@ -552,13 +576,18 @@ def walk_forward(
 
         # ── Score each ticker on last bar of train window via shared score_universe ─
         from .services import score_universe
+        from .factors import get_regime_factor_weights
+        from .portfolio import optimize_portfolio
+        from .cache import ScanCache
+
+        fold_weights = get_regime_factor_weights(regime.label) if hasattr(regime, "label") else DEFAULT_WEIGHTS
         results = score_universe(
             processed=processed,
             bench=bench_series,
             sector_rs=sector_rs,
             regime=regime,
             config=config,
-            weights=DEFAULT_WEIGHTS,
+            weights=fold_weights,
             session="CLOSING_TREND",
             allow_watchlist=False,
             direction=direction,
@@ -571,8 +600,10 @@ def walk_forward(
             and (horizon_filter.upper() == "BOTH" or getattr(r, "trade_horizon", "SWING") == horizon_filter.upper())
             and not getattr(r, "is_watchlist", False)
         ]
-        candidates.sort(key=lambda x: x.composite, reverse=True)
-        candidates = candidates[:max_trades_per_fold]
+        # Optimise portfolio with sector caps and correlation filter
+        corr_matrix = ScanCache().corr_matrix(processed, config)
+        portfolio_candidates = optimize_portfolio(candidates, config, corr_matrix)
+        candidates = portfolio_candidates[:max_trades_per_fold]
 
         # ── Simulate each trade in the test window ────────────────────────────
         fold_trades: list[TradeRecord] = []
@@ -595,10 +626,16 @@ def walk_forward(
 
             time_stop = getattr(cand, "time_stop_bars", None)
             if time_stop is None:
-                _, time_stop = compute_trade_management_wrapper(d, close, atr, row)
+                _, time_stop = compute_trade_management(d, close, atr, row)
 
             entry_price = float(fwd_bars.iloc[0]["Open"])
-            targets = compute_targets(d, entry_price, atr, config)
+            targets = compute_targets(
+                d,
+                entry_price,
+                atr,
+                config,
+                trade_horizon=getattr(cand, "trade_horizon", "SWING"),
+            )
 
             r, hit, bars, exit_date, gross_r, friction = _realised_r(
                 direction=d,
@@ -608,6 +645,7 @@ def walk_forward(
                 fwd_bars=fwd_bars,
                 time_stop=time_stop,
                 cost_model=cost_model,
+                shares=getattr(cand, "shares", None),
             )
 
             fold_trades.append(TradeRecord(

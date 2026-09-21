@@ -11,9 +11,7 @@ Telegram alert delivery with:
 import logging
 import time
 
-# Note: types-requests is not declared in requirements-dev.txt, so import-untyped is ignored here.
-# If types-requests is ever added, remove this ignore to prevent --warn-unused-ignores from failing.
-import requests  # type: ignore[import-untyped]
+import requests
 
 log = logging.getLogger("sovereign.utils")
 

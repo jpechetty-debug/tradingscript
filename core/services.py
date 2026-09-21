@@ -561,10 +561,12 @@ def score_universe(
     # Cross-sectional cohort factor ranking
     cohort_rank_weight = getattr(config, "COHORT_RANK_WEIGHT", 0.40)
     cohort_min_obs = getattr(config, "COHORT_MIN_OBS", 10)
+    cohort_full_obs = getattr(config, "COHORT_FULL_OBS", 30)
     ranked_candidates: list[CandidateContext] = apply_cohort_factor_ranking(
         pass1_candidates,
         cohort_rank_weight=cohort_rank_weight,
         cohort_min_obs=cohort_min_obs,
+        cohort_full_obs=cohort_full_obs,
     )
 
     # Pass 2: Probability gating with hysteresis and Kelly position sizing
@@ -800,7 +802,7 @@ class ScanService:
             if getattr(r, "is_held", False) or "HeldPos" in getattr(r, "reasons", []):
                 retained_tickers.add(getattr(r, "ticker", ""))
 
-        open_pos_payload = [
+        open_pos_payload: list[dict[str, Any]] = [
             {
                 "ticker": getattr(result, "ticker", ""),
                 "direction": getattr(result, "direction", "LONG"),
@@ -823,13 +825,30 @@ class ScanService:
             t = str(p.get("ticker", ""))
             if t and t not in seen_t:
                 seen_t.add(t)
+                seen_t.add(t.replace(".NS", ""))
                 deduped_payload.append(p)
 
-        # Log any positions that failed holding threshold or structural criteria
+        # Distinguish between evaluated held positions and those not evaluated due to data/fetch issues
+        evaluated_tickers = {t.replace(".NS", "") for t in prepared.processed}.union(set(prepared.processed.keys()))
+        loader = getattr(self._persistence, "load_open_positions", None)
+        open_pos_map: dict[str, dict[str, Any]] = loader() if callable(loader) else {}
+
         for old_t in list(state.open_positions):
             clean_old_t = old_t.replace(".NS", "")
             if clean_old_t not in seen_t and old_t not in seen_t:
-                log.info("Held position %s EXITED: Below holding threshold or structural criteria.", old_t)
+                was_evaluated = (old_t in evaluated_tickers) or (clean_old_t in evaluated_tickers)
+                if not was_evaluated:
+                    prior_record = open_pos_map.get(old_t) or open_pos_map.get(clean_old_t)
+                    if prior_record:
+                        deduped_payload.append(prior_record)
+                        seen_t.add(old_t)
+                        seen_t.add(clean_old_t)
+                        log.warning(
+                            "Held position %s was NOT evaluated this scan (data unavailable/fetch error); preserving open position.",
+                            old_t,
+                        )
+                else:
+                    log.info("Held position %s EXITED: Evaluated and fell below holding threshold or structural criteria.", old_t)
 
         saver = getattr(self._persistence, "save_open_positions", None)
         if callable(saver):

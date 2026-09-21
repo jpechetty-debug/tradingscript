@@ -29,15 +29,16 @@ from .config import SystemConfig
 
 @dataclass
 class FactorScores:
-    trend:      float
-    momentum:   float
-    volume:     float
-    volatility: float
-    rs:         float
-    breakout:   float
-    quality:    float   # price_momentum_quality (Fix C)
-    composite:  float
-    ic_weights: dict[str, float]
+    trend:          float
+    momentum:       float
+    volume:         float
+    volatility:     float
+    rs:             float
+    breakout:       float
+    quality:        float   # price_momentum_quality (Fix C)
+    composite:      float
+    ic_weights:     dict[str, float]
+    volume_profile: Optional[tuple[float, float, float]] = None
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -91,9 +92,10 @@ def true_volume_profile(
     li_arr = np.clip(np.searchsorted(levels, lows,  "left")  - 1, 0, bins - 1)
     hi_arr = np.clip(np.searchsorted(levels, highs, "right"),     0, bins - 1)
 
-    # Only bars with positive volume and valid range contribute.
-    valid = (highs > lows) & (vols > 0)
-    spans = (hi_arr - li_arr + 1).astype(float)
+    # Bars with positive volume contribute. Circuit-locked bars (highs == lows)
+    # touch a single price level, deposited in their corresponding single bin (span = 1).
+    valid = (highs >= lows) & (vols > 0)
+    spans = np.maximum(1.0, (hi_arr - li_arr + 1).astype(float))
     spans[~valid] = 0.0
 
     for i in np.where(valid)[0]:
@@ -328,7 +330,8 @@ def factor_volume(
     vprofile_lookback: int = 30,
     vprofile_bins: int = 100,
     adv_turnover_floor: float = 35_000_000,
-) -> float:
+    return_profile: bool = False,
+) -> float | tuple[float, tuple[float, float, float]]:
     """
     Volume factor [0, 1].
 
@@ -361,7 +364,10 @@ def factor_volume(
          + (0.15 if va_ok  else 0.0)
          + min(0.05, (turn_r - 1) / 4 * 0.05))
 
-    return float(np.clip(v, 0.0, 1.0))
+    v_score = float(np.clip(v, 0.0, 1.0))
+    if return_profile:
+        return v_score, (poc, val, vah)
+    return v_score
 
 
 def factor_volatility(
@@ -477,16 +483,22 @@ def factor_breakout(
     narrow = (bw < bwavg * 0.85) if bwavg > 0 else False
 
     if direction == "LONG":
-        h52  = float(daily_df["High"].max())
+        h52 = (
+            float(daily_df["High"].tail(252).max())
+            if ("High" in daily_df.columns and len(daily_df) > 0)
+            else float(close)
+        )
         dist = ((h52 - close) / h52 * 100) if h52 > 0 else 100.0
         ds = max(0.0, 1.0 - dist / near_52w_max_dist_pct)
     else:
         # SHORT: measure distance FROM 52-week low — near lows = high breakdown score
-        l52 = float(daily_df["Low"].min())
-        lo20 = float(daily_df["Low"].tail(20).min())
-        low_ref = max(l52, lo20)  # use the nearer of the two breakdown levels
-        dist_from_low = ((close - low_ref) / close * 100) if close > 0 else 100.0
-        # Score 1.0 when within near_52w_max_dist_pct of the breakdown level
+        l52 = (
+            float(daily_df["Low"].tail(252).min())
+            if ("Low" in daily_df.columns and len(daily_df) > 0)
+            else float(close)
+        )
+        dist_from_low = ((close - l52) / close * 100) if close > 0 else 100.0
+        # Score 1.0 when within near_52w_max_dist_pct of the 52-week low
         ds = max(0.0, 1.0 - dist_from_low / near_52w_max_dist_pct)
 
     bo = ds * 0.65 + (0.35 if narrow else 0.0)
@@ -682,7 +694,7 @@ def compute_factors(
         mtf_60m_trend_aligned=mtf_60m.get("trend_aligned"),
     )
     m  = factor_momentum(row=row, daily_df=daily_df, direction=direction)
-    v  = factor_volume(
+    v_out = factor_volume(
         row=row,
         daily_df=daily_df,
         direction=direction,
@@ -691,7 +703,12 @@ def compute_factors(
         vprofile_lookback=vprofile_lookback,
         vprofile_bins=vprofile_bins,
         adv_turnover_floor=adv_turnover_floor,
+        return_profile=True,
     )
+    if isinstance(v_out, tuple):
+        v, vp = v_out
+    else:
+        v, vp = float(v_out), None
     vl = factor_volatility(row=row, vol_contract_ratio=vol_contract_ratio)
     rs = factor_relative_strength(
         ticker=ticker,
@@ -721,15 +738,16 @@ def compute_factors(
     )
 
     return FactorScores(
-        trend      = round(t,  3),
-        momentum   = round(m,  3),
-        volume     = round(v,  3),
-        volatility = round(vl, 3),
-        rs         = round(rs, 3),
-        breakout   = round(bo, 3),
-        quality    = round(q,  3),
-        composite  = round(float(composite), 4),
-        ic_weights = {k: round(w.get(k, 1 / 7), 4) for k in raw},
+        trend          = round(t,  3),
+        momentum       = round(m,  3),
+        volume         = round(v,  3),
+        volatility     = round(vl, 3),
+        rs             = round(rs, 3),
+        breakout       = round(bo, 3),
+        quality        = round(q,  3),
+        composite      = round(float(composite), 4),
+        ic_weights     = {k: round(w.get(k, 1 / 7), 4) for k in raw},
+        volume_profile = vp,
     )
 
 
@@ -823,7 +841,8 @@ def calibrate_ic_weights(
             hist_df = df.iloc[:idx]
             f_vals["trend"].append(factor_trend(row, close, direction))
             f_vals["momentum"].append(factor_momentum(row, hist_df, direction))
-            f_vals["volume"].append(factor_volume(row, hist_df, direction, close))
+            v_val = factor_volume(row, hist_df, direction, close)
+            f_vals["volume"].append(v_val[0] if isinstance(v_val, tuple) else float(v_val))
             f_vals["volatility"].append(factor_volatility(row))
             f_vals["rs"].append(factor_relative_strength(
                 ticker, hist_df, bench.iloc[:idx],

@@ -218,10 +218,14 @@ class TestCapitalScaler:
             CapitalScaler(par_nav=0)
 
     def test_from_config(self):
-        cfg = _config(RISK_PER_TRADE_INR=10_000)
+        cfg = _config(CAPITAL_INR=1_000_000, RISK_PER_TRADE_INR=10_000)
         s   = CapitalScaler.from_config(cfg)
-        assert s.par_nav == pytest.approx(500_000)
+        assert s.par_nav == pytest.approx(1_000_000)
         assert s.capital_fraction() == pytest.approx(1.0)
+
+        cfg_fallback = _config(CAPITAL_INR=0, RISK_PER_TRADE_INR=10_000)
+        s_fallback   = CapitalScaler.from_config(cfg_fallback)
+        assert s_fallback.par_nav == pytest.approx(500_000)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -466,6 +470,30 @@ class TestOptimizePortfolio:
         result = optimize_portfolio(candidates, self._cfg(size=5, max_sector=2),
                                     corr_matrix=pd.DataFrame())
         assert len(result) == 1
+
+    def test_binding_capital_and_risk_invariants(self):
+        # 3 candidates, each with entry=1000, stop=950, shares=400 (exp=400k, risk=20k each)
+        # Total exposure = 12L (exceeds 10L), total risk = 60k
+        c1 = _make_ticker_result(ticker="A", sector="IT", sharpe_rank=3.0)
+        c1.entry, c1.stop, c1.shares, c1.risk_inr = 1000.0, 950.0, 400, 20_000.0
+        c2 = _make_ticker_result(ticker="B", sector="BANK", sharpe_rank=2.0)
+        c2.entry, c2.stop, c2.shares, c2.risk_inr = 1000.0, 950.0, 400, 20_000.0
+        c3 = _make_ticker_result(ticker="C", sector="AUTO", sharpe_rank=1.0)
+        c3.entry, c3.stop, c3.shares, c3.risk_inr = 1000.0, 950.0, 400, 20_000.0
+
+        cfg = self._cfg(size=5, max_sector=2)
+        cfg.CAPITAL_INR = 700_000.0
+        cfg.MAX_PORTFOLIO_RISK_INR = 50_000.0
+
+        result = optimize_portfolio([c1, c2, c3], cfg)
+        # Lowest rank C3 should have been trimmed first, leaving c1 and c2 (800k exp > 700k limit)
+        # Then remaining scaled down so total_exposure <= 700k and total_risk <= 50k
+        total_exp = sum(c.shares * c.entry for c in result)
+        total_risk = sum(c.risk_inr for c in result)
+        assert total_exp <= cfg.CAPITAL_INR
+        assert total_risk <= cfg.MAX_PORTFOLIO_RISK_INR
+        assert any(c.ticker == "A" for c in result)
+        assert not any(c.ticker == "C" for c in result)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

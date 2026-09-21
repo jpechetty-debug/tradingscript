@@ -20,10 +20,9 @@ import json
 import logging
 import os
 from pathlib import Path
-import sys
-import threading
 from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Optional
 
+import secrets
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,8 +43,6 @@ from core.services import PersistenceService
 from core.universe import SECTORS, TICKER_TO_SECTOR
 
 load_dotenv()
-
-import secrets
 
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
@@ -127,10 +124,10 @@ app.add_middleware(
 
 class AsyncEngineLock(asyncio.Lock):
     """Asyncio lock that also supports synchronous context manager protocol in tests."""
-    def __enter__(self):
+    def __enter__(self) -> "AsyncEngineLock":
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         pass
 
 

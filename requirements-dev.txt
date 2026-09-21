@@ -8,3 +8,4 @@ pytest-asyncio==0.23.7
 # ── Dev / linting (not needed in production) ─────────────────────────────────
 ruff==0.4.7
 mypy==1.10.0
+types-requests

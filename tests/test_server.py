@@ -12,7 +12,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 import server
-from server import app, STATE, API_KEY
+from server import app, STATE
+
+TEST_API_KEY = "test-secret-key-12345"
+
+
+@pytest.fixture(autouse=True)
+def ensure_api_key(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("API_KEY", TEST_API_KEY)
+    monkeypatch.setattr(server, "API_KEY", TEST_API_KEY)
+    yield TEST_API_KEY
 
 
 @pytest.fixture(autouse=True)
@@ -73,20 +82,20 @@ def test_get_scan_results_empty_initially(client: TestClient) -> None:
 
 def test_set_regime_override(client: TestClient) -> None:
     # Set PANIC
-    res = client.post("/api/regime/override", json={"regime": "PANIC"}, headers={"X-API-Key": API_KEY or ""})
+    res = client.post("/api/regime/override", json={"regime": "PANIC"}, headers={"X-API-Key": TEST_API_KEY})
     assert res.status_code == 200
     assert res.json()["regime_override"] == "PANIC"
     assert STATE.regime_override == "PANIC"
 
     # Clear override
-    res_clear = client.post("/api/regime/override", json={"regime": "CLEAR"}, headers={"X-API-Key": API_KEY or ""})
+    res_clear = client.post("/api/regime/override", json={"regime": "CLEAR"}, headers={"X-API-Key": TEST_API_KEY})
     assert res_clear.status_code == 200
     assert res_clear.json()["regime_override"] is None
     assert STATE.regime_override is None
 
 
 def test_set_invalid_regime_override(client: TestClient) -> None:
-    res = client.post("/api/regime/override", json={"regime": "INVALID_REGIME"}, headers={"X-API-Key": API_KEY or ""})
+    res = client.post("/api/regime/override", json={"regime": "INVALID_REGIME"}, headers={"X-API-Key": TEST_API_KEY})
     assert res.status_code == 400
 
 
@@ -123,7 +132,7 @@ def test_trigger_scan_already_running(client: TestClient) -> None:
         STATE.is_scanning = True
 
     try:
-        res = client.post("/api/scan/trigger", headers={"X-API-Key": API_KEY or ""})
+        res = client.post("/api/scan/trigger", headers={"X-API-Key": TEST_API_KEY})
         assert res.status_code == 200
         data = res.json()
         assert data["status"] == "already_running"
@@ -137,7 +146,7 @@ def test_trigger_scan_authorized(client: TestClient) -> None:
         STATE.is_scanning = False
 
     with patch("server.svm.run_scan", return_value=([], [], None)):
-        res = client.post("/api/scan/trigger", headers={"X-API-Key": API_KEY or ""})
+        res = client.post("/api/scan/trigger", headers={"X-API-Key": TEST_API_KEY})
         assert res.status_code == 200
         data = res.json()
         assert data["status"] == "triggered"

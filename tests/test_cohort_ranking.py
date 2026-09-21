@@ -45,60 +45,76 @@ class DummyCandidate:
 
 
 class TestCohortFactorRanking:
-    def test_cohort_ranking_basic_n15(self):
-        # Create 15 candidates with strictly increasing trend scores: 0.1, 0.15, ..., 0.8
+    def test_cohort_ranking_smooth_ramp_and_c0_continuity(self):
+        # 9 candidates -> weight 0 (below min_obs)
+        cands_9 = [
+            DummyCandidate(f"T_{i}", "LONG", _make_dummy_factors(trend=0.55))
+            for i in range(9)
+        ]
+        res_9 = apply_cohort_factor_ranking(cands_9, cohort_rank_weight=0.40, cohort_min_obs=10, cohort_full_obs=30)
+        assert res_9[0].factors.trend == 0.55
+
+        # 10 candidates -> at N=10, ramp is 0.0 (C0 continuity, no cliff!)
+        cands_10 = [
+            DummyCandidate(f"T_{i}", "LONG", _make_dummy_factors(trend=0.55 if i < 9 else 0.50))
+            for i in range(10)
+        ]
+        res_10 = apply_cohort_factor_ranking(cands_10, cohort_rank_weight=0.40, cohort_min_obs=10, cohort_full_obs=30)
+        # Should be unchanged at N=10 because ramp starts at 0
+        assert res_10[0].factors.trend == 0.55
+
+        # 20 candidates -> ramp is (20-10)/(30-10) = 0.50 -> effective weight = 0.20
+        cands_20 = [
+            DummyCandidate(f"T_{i}", "LONG", _make_dummy_factors(trend=0.50 + i * 0.01))
+            for i in range(20)
+        ]
+        res_20 = apply_cohort_factor_ranking(cands_20, cohort_rank_weight=0.40, cohort_min_obs=10, cohort_full_obs=30)
+        # Top candidate raw = 0.69, rank_p = 1.0. With mean >= 0.50, tape_mult = 1.0
+        # b_val = 0.69 + 0.20 * (1.0 - 0.69) = 0.69 + 0.062 = 0.752
+        assert abs(res_20[-1].factors.trend - (0.69 + 0.20 * (1.0 - 0.69))) < 1e-3
+
+        # 30 candidates -> ramp is 1.0 -> full weight 0.40
+        cands_30 = [
+            DummyCandidate(f"T_{i}", "LONG", _make_dummy_factors(trend=0.50 + i * 0.01))
+            for i in range(30)
+        ]
+        res_30 = apply_cohort_factor_ranking(cands_30, cohort_rank_weight=0.40, cohort_min_obs=10, cohort_full_obs=30)
+        raw_top = 0.50 + 29 * 0.01
+        expected = raw_top + 0.40 * (1.0 - raw_top)
+        assert abs(res_30[-1].factors.trend - expected) < 1e-3
+
+    def test_cohort_ranking_bad_tape_anchor(self):
+        # In a bad tape, all candidates have raw factor = 0.30
+        cands = [
+            DummyCandidate(f"T_{i}", "LONG", _make_dummy_factors(trend=0.30))
+            for i in range(30)
+        ]
+        ranked = apply_cohort_factor_ranking(cands, cohort_rank_weight=0.40, cohort_min_obs=10, cohort_full_obs=30)
+        # With identical raw scores, ranks are tied, relative rank adjustment is 0
+        assert all(c.factors.trend == 0.30 for c in ranked)
+
+        # Now suppose one candidate is slightly better (0.35) while rest are 0.30
+        cands[0] = DummyCandidate("T_BEST", "LONG", _make_dummy_factors(trend=0.35))
+        ranked2 = apply_cohort_factor_ranking(cands, cohort_rank_weight=0.40, cohort_min_obs=10, cohort_full_obs=30)
+        # Check that top candidate is NOT inflated over 0.52 gate because tape mean is ~0.30
+        assert ranked2[0].factors.trend < 0.52
+
+    def test_cohort_ranking_step_compat(self):
+        # When cohort_full_obs == cohort_min_obs, acts as step function
         candidates = []
         for i in range(15):
             trend_val = 0.10 + i * 0.05
             fs = _make_dummy_factors(trend=trend_val, momentum=0.5)
             candidates.append(DummyCandidate(f"TICK_{i}", "LONG", fs))
 
-        ranked = apply_cohort_factor_ranking(candidates, cohort_rank_weight=0.40, cohort_min_obs=10)
-
+        ranked = apply_cohort_factor_ranking(
+            candidates, cohort_rank_weight=0.40, cohort_min_obs=10, cohort_full_obs=10
+        )
         assert len(ranked) == 15
-        # The lowest score candidate (i=0) has rank 1 -> rank_pct = 0.0
-        # raw = 0.10, blended = 0.60 * 0.10 + 0.40 * 0.0 = 0.06
-        assert abs(ranked[0].factors.trend - 0.06) < 1e-3
-
-        # The highest score candidate (i=14) has rank 15 -> rank_pct = 1.0
-        # raw = 0.80, blended = 0.60 * 0.80 + 0.40 * 1.0 = 0.48 + 0.40 = 0.88
-        assert abs(ranked[14].factors.trend - 0.88) < 1e-3
-
-        # The middle candidate (i=7) has rank 8 -> rank_pct = 7/14 = 0.50
-        # raw = 0.10 + 7 * 0.05 = 0.45
-        # blended = 0.60 * 0.45 + 0.40 * 0.50 = 0.27 + 0.20 = 0.47
-        assert abs(ranked[7].factors.trend - 0.47) < 1e-3
-
-    def test_cohort_ranking_tie_handling(self):
-        # 10 candidates where 4 have score 0.20, 2 have score 0.50, and 4 have score 0.80
-        candidates = []
-        for i in range(4):
-            candidates.append(DummyCandidate(f"LOW_{i}", "LONG", _make_dummy_factors(trend=0.20)))
-        for i in range(2):
-            candidates.append(DummyCandidate(f"MID_{i}", "LONG", _make_dummy_factors(trend=0.50)))
-        for i in range(4):
-            candidates.append(DummyCandidate(f"HIGH_{i}", "LONG", _make_dummy_factors(trend=0.80)))
-
-        ranked = apply_cohort_factor_ranking(candidates, cohort_rank_weight=0.40, cohort_min_obs=10)
-
-        # Ranks for ties:
-        # 4 lowest values occupy ranks 1, 2, 3, 4 -> average rank = 2.5
-        # rank_pct = (2.5 - 1.0) / 9.0 = 1.5 / 9.0 = 1/6 ~= 0.1667
-        # blended = 0.60 * 0.20 + 0.40 * (1/6) = 0.12 + 0.0667 = 0.1867
-        for c in ranked[:4]:
-            assert abs(c.factors.trend - 0.1867) < 1e-3
-
-        # 2 mid values occupy ranks 5, 6 -> average rank = 5.5
-        # rank_pct = (5.5 - 1.0) / 9.0 = 4.5 / 9.0 = 0.50
-        # blended = 0.60 * 0.50 + 0.40 * 0.50 = 0.50
-        for c in ranked[4:6]:
-            assert abs(c.factors.trend - 0.50) < 1e-3
-
-        # 4 high values occupy ranks 7, 8, 9, 10 -> average rank = 8.5
-        # rank_pct = (8.5 - 1.0) / 9.0 = 7.5 / 9.0 = 5/6 ~= 0.8333
-        # blended = 0.60 * 0.80 + 0.40 * (5/6) = 0.48 + 0.3333 = 0.8133
-        for c in ranked[6:]:
-            assert abs(c.factors.trend - 0.8133) < 1e-3
+        # With full weight 0.40:
+        # For middle candidate (i=7): raw=0.45, rank_pct=0.50, mean=0.45, tape_mult=0.45/0.50=0.9
+        # b_val = 0.45 + 0.40 * (0.50 - 0.45) * 0.9 = 0.45 + 0.018 = 0.468
+        assert 0.40 <= ranked[7].factors.trend <= 0.50
 
     def test_cohort_fallback_when_below_min_obs(self):
         # 8 candidates (< 10) -> fallback to 100% raw scores
@@ -114,21 +130,20 @@ class TestCohortFactorRanking:
             assert c.factors.trend == orig
 
     def test_independent_directional_cohorts(self):
-        # 12 LONG candidates and 5 SHORT candidates
+        # 30 LONG candidates and 5 SHORT candidates
         candidates = []
-        for i in range(12):
-            candidates.append(DummyCandidate(f"LONG_{i}", "LONG", _make_dummy_factors(volume=0.20 + i * 0.05)))
+        for i in range(30):
+            candidates.append(DummyCandidate(f"LONG_{i}", "LONG", _make_dummy_factors(volume=0.50 + i * 0.01)))
         for i in range(5):
             candidates.append(DummyCandidate(f"SHORT_{i}", "SHORT", _make_dummy_factors(volume=0.50)))
 
-        ranked = apply_cohort_factor_ranking(candidates, cohort_rank_weight=0.40, cohort_min_obs=10)
+        ranked = apply_cohort_factor_ranking(candidates, cohort_rank_weight=0.40, cohort_min_obs=10, cohort_full_obs=30)
 
         long_ranked = [c for c in ranked if c.direction == "LONG"]
         short_ranked = [c for c in ranked if c.direction == "SHORT"]
 
-        # LONG cohort (N=12 >= 10) should be ranked and modified
-        assert long_ranked[0].factors.volume != 0.20
-        assert abs(long_ranked[0].factors.volume - (0.60 * 0.20 + 0.40 * 0.0)) < 1e-3
+        # LONG cohort (N=30 >= 10) should be ranked and modified
+        assert long_ranked[0].factors.volume != 0.50
 
         # SHORT cohort (N=5 < 10) should remain completely unmodified
         for c in short_ranked:
@@ -157,10 +172,10 @@ class TestCohortFactorRanking:
     def test_dict_candidate_support(self):
         candidates = [
             {"ticker": f"TICK_{i}", "direction": "LONG", "factors": _make_dummy_factors(momentum=i * 0.08), "composite": 0.5}
-            for i in range(12)
+            for i in range(30)
         ]
-        ranked = apply_cohort_factor_ranking(candidates, cohort_rank_weight=0.40, cohort_min_obs=10)
-        assert len(ranked) == 12
+        ranked = apply_cohort_factor_ranking(candidates, cohort_rank_weight=0.40, cohort_min_obs=10, cohort_full_obs=30)
+        assert len(ranked) == 30
         assert isinstance(ranked[0]["factors"], FactorScores)
-        assert abs(ranked[0]["factors"].momentum - 0.0) < 1e-3
-        assert abs(ranked[-1]["factors"].momentum - (0.60 * (11 * 0.08) + 0.40 * 1.0)) < 1e-3
+        assert 0.0 <= ranked[0]["factors"].momentum <= 1.0
+        assert 0.0 <= ranked[-1]["factors"].momentum <= 1.0

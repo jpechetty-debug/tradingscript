@@ -308,15 +308,14 @@ def apply_cohort_factor_ranking(
     candidates: list[Any],
     cohort_rank_weight: float = 0.40,
     cohort_min_obs: int = 10,
+    cohort_full_obs: int = 30,
 ) -> list[Any]:
     """
     Apply cross-sectional cohort factor ranking to directional cohorts.
-    For each directional cohort (LONG and SHORT) with >= cohort_min_obs candidates,
-    computes average percentile rank for each of the 7 factors using:
-        rank_pct = (rankdata(raw_vals, method='average') - 1.0) / (N - 1.0)
-    Blends:
-        factor_blended = (1.0 - cohort_rank_weight) * factor_raw + cohort_rank_weight * rank_pct
-    Recomputes composite from blended factors and updates each candidate.
+    Smoothly ramps the cohort weight from 0 at cohort_min_obs to cohort_rank_weight
+    at cohort_full_obs, eliminating cliff discontinuities (C0 continuity).
+    Dampens relative rank adjustments in weak market regimes where the cohort's
+    mean raw factor score < 0.50 to preserve absolute quality gates and stationarity.
     """
     if not candidates:
         return candidates
@@ -343,6 +342,15 @@ def apply_cohort_factor_ranking(
         if n < cohort_min_obs or n <= 1:
             continue
 
+        ramp = (
+            min(1.0, max(0.0, (n - cohort_min_obs) / float(cohort_full_obs - cohort_min_obs)))
+            if cohort_full_obs > cohort_min_obs
+            else 1.0
+        )
+        effective_weight = cohort_rank_weight * ramp
+        if effective_weight <= 0.0:
+            continue
+
         factor_vals: dict[str, list[float]] = {f: [] for f in FACTOR_NAMES}
         for c in cohort:
             fs = _get_factors(c)
@@ -351,11 +359,19 @@ def apply_cohort_factor_ranking(
                 factor_vals[f].append(val)
 
         factor_rank_pcts: dict[str, np.ndarray] = {}
+        tape_multipliers: dict[str, float] = {}
         for f in FACTOR_NAMES:
             raw_arr = np.array(factor_vals[f], dtype=float)
-            ranks = rankdata(raw_arr, method="average")
-            rank_pcts = (ranks - 1.0) / (n - 1.0)
-            factor_rank_pcts[f] = rank_pcts
+            r_min = float(np.min(raw_arr))
+            r_max = float(np.max(raw_arr))
+            if r_max - r_min <= 1e-6:
+                factor_rank_pcts[f] = raw_arr.copy()
+            else:
+                ranks = rankdata(raw_arr, method="average")
+                rank_pcts = (ranks - 1.0) / (n - 1.0)
+                factor_rank_pcts[f] = rank_pcts
+            cohort_mean = float(np.mean(raw_arr))
+            tape_multipliers[f] = min(1.0, max(0.0, cohort_mean / 0.50))
 
         for idx, c in enumerate(cohort):
             fs = _get_factors(c)
@@ -367,7 +383,7 @@ def apply_cohort_factor_ranking(
             for f in FACTOR_NAMES:
                 raw_v = factor_vals[f][idx]
                 rank_p = float(factor_rank_pcts[f][idx])
-                b_val = (1.0 - cohort_rank_weight) * raw_v + cohort_rank_weight * rank_p
+                b_val = raw_v + effective_weight * (rank_p - raw_v) * tape_multipliers[f]
                 blended_scores[f] = float(np.clip(b_val, 0.0, 1.0))
 
             new_composite = sum(norm_weights[f] * blended_scores[f] for f in FACTOR_NAMES)
@@ -382,6 +398,7 @@ def apply_cohort_factor_ranking(
                 quality=round(blended_scores["quality"], 4),
                 composite=round(new_composite, 4),
                 ic_weights=weights,
+                volume_profile=getattr(fs, "volume_profile", None),
             )
 
             if isinstance(c, dict):
@@ -680,11 +697,15 @@ def score_candidate_pass2(
 
     # ── 8. Targets & expectancy ───────────────────────────────────────────────
     atr = float(row["ATR"])
-    poc, val, vah = true_volume_profile(
-        daily_df,
-        lookback=config.VPROFILE_LOOKBACK,
-        bins=config.VPROFILE_BINS,
-    )
+    cached_vp = getattr(factors, "volume_profile", None)
+    if cached_vp is not None:
+        poc, val, vah = cached_vp
+    else:
+        poc, val, vah = true_volume_profile(
+            daily_df,
+            lookback=config.VPROFILE_LOOKBACK,
+            bins=config.VPROFILE_BINS,
+        )
 
     targets = compute_targets(direction, close, atr, config, trade_horizon=trade_horizon)
 

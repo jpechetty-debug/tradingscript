@@ -129,15 +129,19 @@ class CapitalScaler:
         """
         Construct a CapitalScaler whose par NAV is implied by the config.
 
-        Uses ``RISK_PER_TRADE_INR * 50`` as the reference capital, i.e. the
-        configured per-trade risk already implies ~2% risk at that NAV.
+        Uses ``CAPITAL_INR`` as the single source of truth for portfolio capital,
+        falling back to ``RISK_PER_TRADE_INR * 50`` only if CAPITAL_INR is missing/zero.
         Call ``update_nav()`` with the actual portfolio value to override.
         """
-        par = config.RISK_PER_TRADE_INR * 50
+        configured_cap = getattr(config, "CAPITAL_INR", None)
+        if configured_cap is not None and configured_cap > 0:
+            par = float(configured_cap)
+        else:
+            par = float(config.RISK_PER_TRADE_INR * 50)
         log.info(
-            "CapitalScaler: par_nav=Rs.%.0f (RISK_PER_TRADE_INR=Rs.%.0f x 50). "
+            "CapitalScaler: par_nav=Rs.%.0f (CAPITAL_INR). "
             "Call update_nav() with the actual live portfolio value.",
-            par, config.RISK_PER_TRADE_INR,
+            par,
         )
         return cls(par_nav=par)
 
@@ -411,23 +415,60 @@ def optimize_portfolio(
             selected.append(c)
             sector_counts[c.sector] = sector_counts.get(c.sector, 0) + 1
 
-    # 3. Post-selection portfolio budget and capital invariant checks
-    total_exposure = sum(getattr(c, "shares", 0) * getattr(c, "entry", 0.0) for c in selected)
-    total_risk = sum(getattr(c, "risk_inr", 0.0) for c in selected)
+    # 3. Post-selection portfolio budget and capital invariant enforcement
     capital_limit = float(getattr(config, "CAPITAL_INR", 1_000_000.0))
-    max_risk_limit = float(getattr(config, "MAX_PORTFOLIO_RISK_INR", getattr(config, "RISK_PER_TRADE_INR", 10_000.0) * getattr(config, "PORTFOLIO_SIZE", 6)))
+    max_risk_limit = float(
+        getattr(
+            config,
+            "MAX_PORTFOLIO_RISK_INR",
+            getattr(config, "RISK_PER_TRADE_INR", 10_000.0) * getattr(config, "PORTFOLIO_SIZE", 6),
+        )
+    )
 
-    if total_exposure > capital_limit:
-        log.error(
-            "PORTFOLIO CAPITAL INVARIANT BREACH: Total exposure Rs.%.2f exceeds capital Rs.%.2f!",
-            total_exposure,
-            capital_limit,
+    def _calc_totals(cands: list) -> tuple[float, float]:
+        exp = sum(getattr(c, "shares", 0) * getattr(c, "entry", 0.0) for c in cands)
+        rsk = sum(getattr(c, "risk_inr", 0.0) for c in cands)
+        return exp, rsk
+
+    total_exposure, total_risk = _calc_totals(selected)
+
+    # 3a. Trim lowest-sharpe_rank new candidates until within budget or only held remain
+    while (total_exposure > capital_limit or total_risk > max_risk_limit) and any(not _is_held(c) for c in selected):
+        new_indices = [i for i, c in enumerate(selected) if not _is_held(c)]
+        lowest_idx = min(new_indices, key=lambda i: getattr(selected[i], "sharpe_rank", 0.0))
+        dropped = selected.pop(lowest_idx)
+        log.warning(
+            "Portfolio: trimmed new candidate %s (sharpe_rank=%.2f) to enforce capital/risk invariant.",
+            getattr(dropped, "ticker", ""),
+            getattr(dropped, "sharpe_rank", 0.0),
         )
-    if total_risk > max_risk_limit:
-        log.error(
-            "PORTFOLIO RISK INVARIANT BREACH: Total risk Rs.%.2f exceeds budget Rs.%.2f!",
-            total_risk,
-            max_risk_limit,
+        total_exposure, total_risk = _calc_totals(selected)
+
+    # 3b. If still exceeding limits (e.g. held positions or remaining entries), scale down shares pro-rata
+    if (total_exposure > capital_limit or total_risk > max_risk_limit) and selected:
+        scale_exp = (capital_limit / total_exposure) if total_exposure > capital_limit else 1.0
+        scale_rsk = (max_risk_limit / total_risk) if total_risk > max_risk_limit else 1.0
+        scale = min(scale_exp, scale_rsk)
+        log.warning(
+            "Portfolio: scaling down position sizes by factor %.3f to satisfy capital (Rs.%.0f) and risk (Rs.%.0f) limits.",
+            scale, capital_limit, max_risk_limit,
         )
+        scaled_selected = []
+        for c in selected:
+            old_shares = getattr(c, "shares", 0)
+            rps = abs(getattr(c, "entry", 0.0) - getattr(c, "stop", 0.0))
+            new_shares = int(old_shares * scale)
+            if new_shares == 0 and not _is_held(c):
+                continue
+            new_shares = max(1 if _is_held(c) else 0, new_shares)
+            if new_shares > 0:
+                if hasattr(c, "__dict__"):
+                    c.shares = new_shares
+                    c.risk_inr = round(new_shares * rps, 2)
+                elif isinstance(c, dict):
+                    c["shares"] = new_shares
+                    c["risk_inr"] = round(new_shares * rps, 2)
+                scaled_selected.append(c)
+        selected = scaled_selected
 
     return selected
