@@ -274,8 +274,8 @@ def calculate_kelly_size(
     1. Kelly fraction  f* = (p*(rr+1) - 1) / rr
     2. Fat-tail corr   kurt_corr = 3 / (3 + excess_kurtosis)
     3. Fractional K    f = f* x KELLY_FRACTION x kurt_corr
-    4. Raw risk (Rs.)  risk = RISK_PER_TRADE_INR x max(f, 0.01) x 100 x cf
-    5. Clamp           risk in [RISK_PER_TRADE_INR x 0.05 x cf,
+    4. Raw risk (Rs.)  risk = RISK_PER_TRADE_INR x max(f, 0.01) x cf
+    5. Clamp           risk in [RISK_PER_TRADE_INR x 0.25 x cf,
                                 RISK_PER_TRADE_INR x KELLY_MAX_MULT x cf]
     6. Shares          floor(risk / rps), min KELLY_MIN_SHARES.
     """
@@ -301,7 +301,7 @@ def calculate_kelly_size(
     )
     risk_inr = max(
         risk_inr,
-        config.RISK_PER_TRADE_INR * 0.05 * capital_fraction,
+        config.RISK_PER_TRADE_INR * 0.25 * capital_fraction,
     )
 
     if np.isnan(risk_inr) or np.isnan(rps) or rps <= 0:

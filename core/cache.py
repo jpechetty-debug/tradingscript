@@ -33,6 +33,7 @@ Usage
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any, Optional
 
@@ -46,7 +47,7 @@ log = logging.getLogger("sovereign.cache")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
+# STABLE CACHE KEY BUILDERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _df_cache_key(df: pd.DataFrame, extra: str = "") -> str:
@@ -71,9 +72,8 @@ class ScanCache:
     In-memory cache scoped to one scan cycle.
 
     Designed to be created fresh at the start of ``run_scan`` and
-    discarded (or ``.clear()``-ed) afterwards.  Thread-safe for reads
-    once populated; writes should happen from a single thread (the
-    scan loop).
+    discarded (or ``.clear()``-ed) afterwards.  Fully thread-safe for
+    concurrent reads, writes, and evictions across ThreadPoolExecutor workers.
 
     Attributes
     ----------
@@ -83,6 +83,7 @@ class ScanCache:
     """
 
     def __init__(self, max_vprofile_entries: int = 500) -> None:
+        self._lock = threading.Lock()
         self._vprofile:  dict[str, tuple[float, float, float]] = {}
         self._corr:      Optional[pd.DataFrame] = None
         self._corr_key:  str = ""
@@ -112,24 +113,27 @@ class ScanCache:
         """
         key = f"{ticker}|" + _df_cache_key(df, f"{lookback}|{bins}")
 
-        if key in self._vprofile:
-            self._hits += 1
-            return self._vprofile[key]
+        with self._lock:
+            if key in self._vprofile:
+                self._hits += 1
+                return self._vprofile[key]
+            self._misses += 1
 
-        self._misses += 1
         t0  = time.monotonic()
         val = true_volume_profile(df, lookback=lookback, bins=bins)
         elapsed = time.monotonic() - t0
-        self._vp_time_saved += elapsed   # will subtract from missed entries
 
-        if len(self._vprofile) >= self._max:
-            # Evict oldest quarter of entries (simple FIFO approximation)
-            evict_n  = max(1, self._max // 4)
-            for k in list(self._vprofile.keys())[:evict_n]:
-                del self._vprofile[k]
-            log.debug("VProfile cache: evicted %d entries (size cap=%d).", evict_n, self._max)
+        with self._lock:
+            self._vp_time_saved += elapsed   # will subtract from missed entries
 
-        self._vprofile[key] = val
+            if len(self._vprofile) >= self._max:
+                # Evict oldest quarter of entries (simple FIFO approximation)
+                evict_n  = max(1, self._max // 4)
+                for k in list(self._vprofile.keys())[:evict_n]:
+                    self._vprofile.pop(k, None)
+                log.debug("VProfile cache: evicted %d entries (size cap=%d).", evict_n, self._max)
+
+            self._vprofile[key] = val
         return val
 
     # ── Correlation matrix ────────────────────────────────────────────────────
@@ -152,11 +156,12 @@ class ScanCache:
         n_tickers = len(processed)
         new_key   = f"{last_date}|{n_tickers}"
 
-        if self._corr is not None and new_key == self._corr_key:
-            self._hits += 1
-            return self._corr
+        with self._lock:
+            if self._corr is not None and new_key == self._corr_key:
+                self._hits += 1
+                return self._corr
+            self._misses += 1
 
-        self._misses += 1
         t0 = time.monotonic()
         matrix = _build_corr_matrix(processed, config)
         log.debug(
@@ -164,29 +169,32 @@ class ScanCache:
             time.monotonic() - t0,
             matrix.shape,
         )
-        self._corr     = matrix
-        self._corr_key = new_key
+        with self._lock:
+            self._corr     = matrix
+            self._corr_key = new_key
         return matrix
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def clear(self) -> None:
         """Drop all cached values — call between scan cycles if reusing."""
-        self._vprofile.clear()
-        self._corr     = None
-        self._corr_key = ""
+        with self._lock:
+            self._vprofile.clear()
+            self._corr     = None
+            self._corr_key = ""
         log.debug("ScanCache cleared.")
 
     def stats(self) -> dict[str, Any]:
         """Return a snapshot of cache effectiveness."""
-        total = self._hits + self._misses
-        return {
-            "hits":         self._hits,
-            "misses":       self._misses,
-            "hit_rate":     round(self._hits / total, 4) if total else 0.0,
-            "vprofile_size": len(self._vprofile),
-            "corr_cached":  self._corr is not None,
-        }
+        with self._lock:
+            total = self._hits + self._misses
+            return {
+                "hits":         self._hits,
+                "misses":       self._misses,
+                "hit_rate":     round(self._hits / total, 4) if total else 0.0,
+                "vprofile_size": len(self._vprofile),
+                "corr_cached":  self._corr is not None,
+            }
 
     def log_stats(self) -> None:
         """Emit cache stats at DEBUG level."""

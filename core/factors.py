@@ -331,6 +331,7 @@ def factor_volume(
     vprofile_bins: int = 100,
     adv_turnover_floor: float = 35_000_000,
     return_profile: bool = False,
+    ticker: str = "",
 ) -> float | tuple[float, tuple[float, float, float]]:
     """
     Volume factor [0, 1].
@@ -352,12 +353,12 @@ def factor_volume(
     atr_contracting = (atr < 0.85 * atr50m) if atr50m > 0 else False
     is_vcp = (rvol < 0.80) and atr_contracting
 
-    ticker = str(row.get("Ticker", "") or "")
-    if ticker:
+    ticker_name = ticker or str(row.get("Ticker", "") or "")
+    if ticker_name:
         try:
             from .cache import SCAN_CACHE
             poc, val, vah = SCAN_CACHE.volume_profile(
-                daily_df, ticker=ticker, lookback=vprofile_lookback, bins=vprofile_bins
+                daily_df, ticker=ticker_name, lookback=vprofile_lookback, bins=vprofile_bins
             )
         except Exception:
             poc, val, vah = true_volume_profile(daily_df, lookback=vprofile_lookback, bins=vprofile_bins)
@@ -713,6 +714,7 @@ def compute_factors(
         vprofile_bins=vprofile_bins,
         adv_turnover_floor=adv_turnover_floor,
         return_profile=True,
+        ticker=ticker,
     )
     if isinstance(v_out, tuple):
         v, vp = v_out
@@ -850,7 +852,7 @@ def calibrate_ic_weights(
             hist_df = df.iloc[:idx]
             f_vals["trend"].append(factor_trend(row, close, direction))
             f_vals["momentum"].append(factor_momentum(row, hist_df, direction))
-            v_val = factor_volume(row, hist_df, direction, close)
+            v_val = factor_volume(row, hist_df, direction, close, ticker=ticker)
             f_vals["volume"].append(v_val[0] if isinstance(v_val, tuple) else float(v_val))
             f_vals["volatility"].append(factor_volatility(row))
             f_vals["rs"].append(factor_relative_strength(

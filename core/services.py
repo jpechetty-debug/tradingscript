@@ -500,6 +500,9 @@ def score_universe(
     pos_map: dict[str, dict[str, Any]] = open_pos_map or {}
     factor_weights = weights if weights is not None else DEFAULT_WEIGHTS
 
+    from .cache import SCAN_CACHE
+    SCAN_CACHE.clear()
+
     base_cap_frac = confidence_position_scale(regime.confidence) * capital_fraction
     if capital_scaler is not None:
         try:

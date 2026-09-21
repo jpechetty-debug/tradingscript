@@ -112,9 +112,6 @@ class TransactionCostModel:
             commission_inr=float(commission_inr),
         )
 
-    def _gst_mult(self) -> float:
-        return 1.0 + self.gst_rate
-
     def entry_cost_pct(self) -> float:
         """Total buy-side friction as a fraction of entry price."""
         taxable = (self.brokerage_pct + self.exchange_pct + self.sebi_pct) * (1.0 + self.gst_rate)
@@ -199,6 +196,7 @@ class TradeRecord:
     trade_horizon:      str = field(default="SWING")  # "SWING" | "INTRADAY"
     shares:             int = field(default=0)
     risk_inr:           float = field(default=0.0)
+    daily_pnl:          dict[Any, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -337,6 +335,76 @@ def _realised_r(
     return net_r, False, len(fwd_bars), exit_date, gross_r, round(friction, 5)
 
 
+def _compute_trade_daily_pnl(
+    fwd_bars: pd.DataFrame,
+    direction: str,
+    entry_price: float,
+    shares: int,
+    bars_held: int,
+    net_pnl: float,
+    sl_dist: float = 0.0,
+    risk_inr: float = 0.0,
+) -> dict[Any, float]:
+    """
+    Mark-to-market daily PnL distribution across held bars.
+
+    Ensures the sum of daily MTM PnLs exactly equals the trade's total net PnL
+    (including transaction friction).
+    """
+    if bars_held <= 0 or fwd_bars.empty:
+        return {}
+
+    held_bars = fwd_bars.iloc[:bars_held]
+    n = len(held_bars)
+    if n == 0:
+        return {}
+
+    if n == 1:
+        d = held_bars.index[0].date() if hasattr(held_bars.index[0], "date") else held_bars.index[0]
+        return {d: round(net_pnl, 2)}
+
+    res: dict[Any, float] = {}
+    accumulated = 0.0
+
+    # Bar 0 (entry day: from entry open to bar 0 close)
+    d0 = held_bars.index[0].date() if hasattr(held_bars.index[0], "date") else held_bars.index[0]
+    c0 = float(held_bars.iloc[0]["Close"])
+    if shares > 0:
+        pnl_0 = (c0 - entry_price) * shares if direction == "LONG" else (entry_price - c0) * shares
+    elif sl_dist > 0 and risk_inr > 0:
+        r0 = (c0 - entry_price) / sl_dist if direction == "LONG" else (entry_price - c0) / sl_dist
+        pnl_0 = r0 * risk_inr
+    else:
+        pnl_0 = net_pnl / n
+
+    pnl_0 = round(pnl_0, 2)
+    res[d0] = pnl_0
+    accumulated += pnl_0
+
+    # Intermediate bars (close-to-close)
+    for i in range(1, n - 1):
+        di = held_bars.index[i].date() if hasattr(held_bars.index[i], "date") else held_bars.index[i]
+        ci = float(held_bars.iloc[i]["Close"])
+        c_prev = float(held_bars.iloc[i - 1]["Close"])
+        if shares > 0:
+            pnl_i = (ci - c_prev) * shares if direction == "LONG" else (c_prev - ci) * shares
+        elif sl_dist > 0 and risk_inr > 0:
+            ri = (ci - c_prev) / sl_dist if direction == "LONG" else (c_prev - ci) / sl_dist
+            pnl_i = ri * risk_inr
+        else:
+            pnl_i = net_pnl / n
+
+        pnl_i = round(pnl_i, 2)
+        res[di] = pnl_i
+        accumulated += pnl_i
+
+    # Final bar (remainder to guarantee exact penny sum to net_pnl)
+    dk = held_bars.index[-1].date() if hasattr(held_bars.index[-1], "date") else held_bars.index[-1]
+    res[dk] = round(net_pnl - accumulated, 2)
+
+    return res
+
+
 def _daily_portfolio_sharpe(
     trades: list[TradeRecord],
     start_date: Optional[pd.Timestamp] = None,
@@ -344,12 +412,12 @@ def _daily_portfolio_sharpe(
     capital: float = 1_000_000.0,
 ) -> float:
     """
-    Annualised portfolio Sharpe computed from a daily portfolio return / equity curve.
+    Annualised portfolio Sharpe computed from a daily mark-to-market portfolio return curve.
 
-    Aggregates concurrent position PnL by exit date across the trading calendar.
-    For folds where trades enter simultaneously, this captures cross-sectional
-    correlation and concurrent risk rather than treating concurrent trades as
-    independent sequential bets.
+    Accrues concurrent position PnL across active holding bars.
+    Captures cross-sectional correlation and concurrent risk rather than
+    treating concurrent trades as independent sequential bets or booking
+    entire PnL as a single spike on exit date.
     """
     if not trades:
         return 0.0
@@ -373,13 +441,35 @@ def _daily_portfolio_sharpe(
     for t in valid_trades:
         if t.exit_date is None:
             continue
-        d = t.exit_date.date() if hasattr(t.exit_date, "date") else t.exit_date
-        rsk = t.risk_inr if t.risk_inr > 0 else 10_000.0
-        pnl = t.r_multiple * rsk
-        if d in daily_pnl:
-            daily_pnl[d] += pnl
+        rsk = t.risk_inr if t.risk_inr > 0 else 5_000.0
+        total_pnl = t.r_multiple * rsk
+
+        if getattr(t, "daily_pnl", None):
+            for d_raw, pnl_val in t.daily_pnl.items():
+                d = d_raw.date() if hasattr(d_raw, "date") else d_raw
+                if d in daily_pnl:
+                    daily_pnl[d] += pnl_val
+                else:
+                    daily_pnl[d] = daily_pnl.get(d, 0.0) + pnl_val
         else:
-            daily_pnl[d] = daily_pnl.get(d, 0.0) + pnl
+            # Fallback for synthetic/legacy records: accrue linearly over bars_held
+            bars = max(1, t.bars_held)
+            pnl_per_bar = total_pnl / bars
+            try:
+                t_exit = pd.Timestamp(t.exit_date)
+                trade_bdays = pd.bdate_range(end=t_exit, periods=bars)
+                for bd in trade_bdays:
+                    d = bd.date()
+                    if d in daily_pnl:
+                        daily_pnl[d] += pnl_per_bar
+                    else:
+                        daily_pnl[d] = daily_pnl.get(d, 0.0) + pnl_per_bar
+            except Exception:
+                d = t.exit_date.date() if hasattr(t.exit_date, "date") else t.exit_date
+                if d in daily_pnl:
+                    daily_pnl[d] += total_pnl
+                else:
+                    daily_pnl[d] = daily_pnl.get(d, 0.0) + total_pnl
 
     daily_rets = np.array([pnl / capital for pnl in daily_pnl.values()])
     std = float(np.std(daily_rets))
@@ -404,8 +494,12 @@ def _fold_stats(fold: int, trades: list[TradeRecord], dates: tuple) -> FoldStats
     mean  = total / len(rs)
     hit_r = sum(hits) / len(hits)
 
-    # Annualised portfolio Sharpe across the fold trading window
-    sharpe = _daily_portfolio_sharpe(sorted_trades, start, end)
+    valid_exits = [t.exit_date for t in sorted_trades if t.exit_date is not None]
+    start_d = sorted_trades[0].entry_date if sorted_trades else None
+    end_d = max(valid_exits) if valid_exits else (sorted_trades[-1].entry_date if sorted_trades else None)
+
+    # Annualised portfolio Sharpe across active trading window (matching _overall_stats)
+    sharpe = _daily_portfolio_sharpe(sorted_trades, start_d, end_d)
 
     # Max drawdown of cumulative R curve (in chronological order)
     cum  = np.cumsum([0.0] + rs)
@@ -694,6 +788,24 @@ def walk_forward(
                 shares=getattr(cand, "shares", None),
             )
 
+            sl_dist = abs(entry_price - targets.stop)
+            shares_held = getattr(cand, "shares", 0)
+            trade_risk = getattr(cand, "risk_inr", 0.0)
+            if trade_risk <= 0:
+                trade_risk = getattr(config, "RISK_PER_TRADE_INR", 5_000.0)
+            net_trade_pnl = r * trade_risk
+
+            trade_daily_pnl = _compute_trade_daily_pnl(
+                fwd_bars=fwd_bars,
+                direction=d,
+                entry_price=entry_price,
+                shares=shares_held,
+                bars_held=bars,
+                net_pnl=net_trade_pnl,
+                sl_dist=sl_dist,
+                risk_inr=trade_risk,
+            )
+
             fold_trades.append(TradeRecord(
                 fold=fold_idx,
                 ticker=ticker,
@@ -711,8 +823,9 @@ def walk_forward(
                 gross_r_multiple=gross_r,
                 friction_r_applied=friction,
                 trade_horizon=getattr(cand, "trade_horizon", "SWING"),
-                shares=getattr(cand, "shares", 0),
-                risk_inr=getattr(cand, "risk_inr", 0.0),
+                shares=shares_held,
+                risk_inr=trade_risk,
+                daily_pnl=trade_daily_pnl,
             ))
 
         fold_dates = (train_dates[-1], test_dates[-1])

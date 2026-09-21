@@ -196,7 +196,7 @@ class SignalSettings:
     stop_atr_mult: float = 1.5
     target1_atr_mult: float = 3.8
     target2_atr_mult: float = 6.0
-    risk_per_trade_inr: float = 10_000.0
+    risk_per_trade_inr: float = 5_000.0
     use_ema200_filter: bool = True
     vprofile_lookback: int = 30
     vprofile_bins: int = 100
@@ -220,7 +220,7 @@ class SignalSettings:
 
 @dataclass(frozen=True)
 class PortfolioSettings:
-    kelly_fraction: float = 0.5
+    kelly_fraction: float = 4.5
     kelly_min_shares: int = 1
     kelly_max_mult: float = 1.5
     kelly_kurtosis_fallback: float = 4.0
@@ -234,7 +234,7 @@ class PortfolioSettings:
     portfolio_size: int = 6
     candidates_max: int = 20
     capital_inr: float = 1_000_000.0
-    max_portfolio_risk_inr: float = 60_000.0
+    max_portfolio_risk_inr: float = 30_000.0
 
 
 @dataclass(frozen=True)
@@ -310,7 +310,7 @@ class SystemConfig:
     COHORT_RANK_WEIGHT: float = field(default_factory=lambda: float(os.getenv("COHORT_RANK_WEIGHT", "0.40")))
 
     # ── Kelly position sizing ─────────────────────────────────────────────────
-    KELLY_FRACTION:          float = 0.5
+    KELLY_FRACTION:          float = 4.5
     KELLY_MIN_SHARES:        int   = 1
     KELLY_MAX_MULT:          float = 1.5
     KELLY_KURTOSIS_FALLBACK: float = 4.0
@@ -356,7 +356,7 @@ class SystemConfig:
     STOP_ATR_MULT:    float = 1.5
     TARGET1_ATR_MULT: float = 3.8
     TARGET2_ATR_MULT: float = 6.0
-    RISK_PER_TRADE_INR: float = field(default_factory=lambda: float(os.getenv("RISK_PER_TRADE_INR", "10000.0")))
+    RISK_PER_TRADE_INR: float = field(default_factory=lambda: float(os.getenv("RISK_PER_TRADE_INR", "5000.0")))
 
     # ── Intraday trade targets (tighter for 6-hour sessions) ─────────────────
     INTRADAY_STOP_ATR_MULT:    float = 0.50
@@ -392,7 +392,7 @@ class SystemConfig:
     PORTFOLIO_SIZE:   int = field(default_factory=lambda: int(os.getenv("PORTFOLIO_SIZE", "6")))
     CANDIDATES_MAX:   int = field(default_factory=lambda: int(os.getenv("CANDIDATES_MAX", "20")))
     CAPITAL_INR:      float = field(default_factory=lambda: float(os.getenv("CAPITAL_INR", "1000000.0")))
-    MAX_PORTFOLIO_RISK_INR: float = field(default_factory=lambda: float(os.getenv("MAX_PORTFOLIO_RISK_INR", "60000.0")))
+    MAX_PORTFOLIO_RISK_INR: float = field(default_factory=lambda: float(os.getenv("MAX_PORTFOLIO_RISK_INR", "30000.0")))
 
     # ── Execution costs ───────────────────────────────────────────────────────
     SLIPPAGE_BPS:   int = field(default_factory=lambda: int(os.getenv("SLIPPAGE_BPS", "8")))

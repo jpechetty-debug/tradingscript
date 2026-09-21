@@ -48,7 +48,7 @@ Each candidate is evaluated across seven distinct factor dimensions (`core/facto
 | **Volume** | 10% | RVOL, POC, Value Area Low/High | Relative volume vs 20d mean. Hermite $C^1$ smoothstep transition across $[0.95, 1.10]$ from $0.00$ to $0.10$, linear scaling above $1.10$. |
 | **Volatility** | 5% | ATR Ratio, BB Squeeze | Volatility compression identification (ATR $< 85\%$ of 50d mean) and Bollinger Band Squeeze bonus ($+0.15$). |
 | **Relative Strength** | 22% | Sector Rank, Nifty50 RS | 60% sector RS rank within universe + 40% stock log-return differential vs. Nifty50 benchmark over 20-day lookback. |
-| **Breakout** | 14% | 52w High/Low Proximity, BB Width | Distance to 52-week horizontal levels and Bollinger Band Width contraction relative to 50d rolling mean. |
+| **Breakout** | 14% | 52w High (LONG) / 20d Low (SHORT), BB Width | Distance to 52-week high for LONG (continuation structure) vs. 20-day breakdown low for SHORT (swing breakdown structure), plus Bollinger Band Width contraction relative to 50d rolling mean. |
 | **Quality** | 5% | 63d Momentum, Persistence | 3-month direction-aware log momentum, 20-day directional day persistence, and ATR expansion readiness. |
 
 ---
