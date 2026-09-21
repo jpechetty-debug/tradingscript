@@ -1092,13 +1092,30 @@ class ScanService:
     ) -> list[TickerResult]:
         mock_results: list[TickerResult] = []
         open_pos: set[str] = getattr(state, "open_positions", set())
+        loader = getattr(self._persistence, "load_open_positions", None)
+        pos_map: dict[str, dict[str, Any]] = loader() if callable(loader) else {}
+
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
             futures: dict[Any, str] = {}
             for ticker, df in prepared.processed.items():
                 clean_ticker = ticker.replace(".NS", "")
                 is_open = (ticker in open_pos) or (clean_ticker in open_pos)
-                if ticker == config.BENCHMARK or (not is_open and not passes_static_filters(df, config)):
+                import inspect
+                try:
+                    sig = inspect.signature(passes_static_filters)
+                    passes_static = (
+                        passes_static_filters(df, config, min_bars=50)
+                        if "min_bars" in sig.parameters
+                        else passes_static_filters(df, config)
+                    )
+                except Exception:
+                    passes_static = passes_static_filters(df, config)
+
+                if ticker == config.BENCHMARK or (not is_open and not passes_static):
                     continue
+
+                pos_info = pos_map.get(ticker) or pos_map.get(clean_ticker) or {}
+                held_dir = pos_info.get("direction")
 
                 capital_fraction = confidence_position_scale(regime.confidence)
                 if self._capital_scaler is not None:
@@ -1109,24 +1126,36 @@ class ScanService:
                     except Exception:
                         log.debug("Injected capital scaler failed for %s.", ticker, exc_info=debug)
 
-                future = executor.submit(
-                    score_ticker,
-                    ticker=ticker,
-                    daily_df=df,
-                    bench=prepared.bench_series,
-                    sector_ranks=prepared.sector_ranks,
-                    sector_rs=prepared.sector_rs,
-                    session=session,
-                    regime=regime,
-                    config=config,
-                    factor_weights=state.factor_weights,
-                    allow_watchlist=getattr(config, "ENABLE_WATCHLIST", True),
-                    capital_fraction=capital_fraction,
-                    debug=debug,
-                    no_intraday=no_intraday,
-                    force_score=force_score,
-                    is_open_position=is_open,
-                )
+                call_kwargs: dict[str, Any] = {
+                    "ticker": ticker,
+                    "daily_df": df,
+                    "bench": prepared.bench_series,
+                    "sector_ranks": prepared.sector_ranks,
+                    "sector_rs": prepared.sector_rs,
+                    "session": session,
+                    "regime": regime,
+                    "config": config,
+                    "factor_weights": state.factor_weights,
+                    "allow_watchlist": getattr(config, "ENABLE_WATCHLIST", True),
+                    "capital_fraction": capital_fraction,
+                    "debug": debug,
+                    "no_intraday": no_intraday,
+                    "force_score": force_score,
+                    "is_open_position": is_open,
+                }
+                import inspect
+                try:
+                    sig = inspect.signature(score_ticker)
+                    accepts_held_dir = (
+                        "held_direction" in sig.parameters
+                        or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                    )
+                    if accepts_held_dir:
+                        call_kwargs["held_direction"] = held_dir
+                except Exception:
+                    call_kwargs["held_direction"] = held_dir
+
+                future = executor.submit(score_ticker, **call_kwargs)
                 futures[future] = ticker
 
             for future in as_completed(futures):

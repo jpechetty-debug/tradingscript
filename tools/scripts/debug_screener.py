@@ -2,7 +2,7 @@ import pandas as pd
 import yfinance as yf
 import screener
 
-def debug_data():
+def debug_data() -> None:
     ticker = "SBIN.NS"
     print(f"Fetching data for {ticker}...")
     df = yf.download(ticker, period="1y", interval="1d", progress=False)

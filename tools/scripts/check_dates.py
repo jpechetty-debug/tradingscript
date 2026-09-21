@@ -5,7 +5,7 @@ import pytz
 
 IST = pytz.timezone("Asia/Kolkata")
 
-def check_dates():
+def check_dates() -> None:
     ticker = "^NSEI"
     df = yf.download(ticker, period="1y", interval="1d", progress=False)
     index = df.index

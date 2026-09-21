@@ -1,7 +1,7 @@
 import yfinance as yf
 import pandas as pd
 
-def test_yf_layout():
+def test_yf_layout() -> None:
     # Attempt a small download to inspect column structure
     tickers = ["AAPL", "MSFT"]
     data = yf.download(tickers, period="5d", interval="1d", group_by="ticker", progress=False)

@@ -10,7 +10,7 @@ from core.indicators import add_indicators  # noqa: E402
 from core.universe import ALL_TICKERS  # noqa: E402
 
 class MockResult:
-    def __init__(self, ticker):
+    def __init__(self, ticker: str) -> None:
         self.ticker = ticker
 
 # 1. Fetch some data

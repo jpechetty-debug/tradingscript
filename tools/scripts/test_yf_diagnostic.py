@@ -5,7 +5,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("test_yf")
 
-def test_fetch():
+def test_fetch() -> None:
     tickers = ["RELIANCE.NS", "TCS.NS", "INFY.NS"]
     logger.info(f"Testing yfinance fetch for {tickers}")
     try:

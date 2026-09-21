@@ -1,8 +1,9 @@
+from typing import Any
 import yfinance as yf
 import time
 from core.universe import ALL_TICKERS
 
-def download_chunk(tickers):
+def download_chunk(tickers: list[str]) -> Any:
     print(f"Downloading {len(tickers)} tickers...")
     data = yf.download(
         tickers,

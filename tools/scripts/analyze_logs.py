@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-def analyze_scores():
+def analyze_scores() -> None:
     log_file = Path("d:/Tradeidesa/grclaudescript/logs/sovereign.jsonl")
     if not log_file.exists():
         print("Log file not found.")

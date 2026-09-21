@@ -919,6 +919,7 @@ def score_ticker(
     allow_watchlist: bool = False,
     now:          Optional[datetime] = None,
     is_open_position: bool = False,
+    held_direction: Optional[str] = None,
 ) -> Optional[TickerResult]:
     """
     Full ticker evaluation pipeline. Returns None if the ticker does not
@@ -941,6 +942,7 @@ def score_ticker(
         allow_watchlist:Return watchlist tier candidates below MIN_PROB_WIN
         now:            Optional evaluation datetime
         is_open_position:If True, apply PROB_HOLD_FLOOR hysteresis gate
+        held_direction: Original trade direction of held position ("LONG" | "SHORT")
 
     Returns:
         TickerResult or None
@@ -963,6 +965,7 @@ def score_ticker(
         force_score=force_score,
         now=now,
         is_open_position=is_open_position,
+        held_direction=held_direction,
     )
     if cand is None:
         return None

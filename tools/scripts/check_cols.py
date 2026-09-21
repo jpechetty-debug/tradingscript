@@ -1,6 +1,6 @@
 import yfinance as yf
 
-def check_multiindex():
+def check_multiindex() -> None:
     tickers = ["SBIN.NS", "RELIANCE.NS"]
     df = yf.download(tickers, period="5d", interval="1d", group_by="ticker", progress=False)
     print(f"Columns: {df.columns}")

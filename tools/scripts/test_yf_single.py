@@ -5,7 +5,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("test_yf_single")
 
-def test_fetch_single():
+def test_fetch_single() -> None:
     ticker_symbol = "RELIANCE.NS"
     logger.info(f"Testing yfinance Ticker().history() for {ticker_symbol}")
     try:

@@ -4,6 +4,9 @@ import json
 from dataclasses import replace
 from types import SimpleNamespace
 
+from pathlib import Path
+from typing import Any, Optional
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -12,6 +15,7 @@ import core.services as services
 from core.config import CONFIG, MarketRegimeType
 from core.regime import MarketRegime, RegimeTracker
 from core.runtime_paths import RuntimePaths
+from core.scorer import TickerResult
 from core.services import AlertService, MarketDataService, PersistenceService, ScanService
 
 
@@ -732,4 +736,82 @@ def test_scan_service_scan_production_path_end_to_end_unmocked(tmp_path):
     persisted = persistence.load_open_positions()
     assert "HELD" in persisted or "HELD.NS" in persisted
     assert "STOPPED" not in persisted and "STOPPED.NS" not in persisted
+
+
+def test_score_candidates_legacy_mock_held_direction_and_min_bars(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+
+    records_received: list[dict[str, Any]] = []
+
+    def mock_custom_score_ticker(**kwargs: Any) -> Optional[TickerResult]:
+        records_received.append(kwargs)
+        ticker = kwargs.get("ticker", "")
+        if "SHORTPOS" in ticker:
+            res = MagicMock(spec=TickerResult)
+            res.ticker = "SHORTPOS"
+            res.sector = "IT"
+            res.direction = "SHORT"
+            res.prob_win = 0.55
+            res.is_watchlist = False
+            res.is_held = True
+            res.reasons = ["HeldPos"]
+            res.shares = 10
+            res.risk_inr = 1000.0
+            res.entry = 500.0
+            res.stop = 515.0
+            res.t1 = 470.0
+            res.expectancy_r = 1.0
+            res.rr_t1 = 2.0
+            res.trade_horizon = "SWING"
+            return res
+        return None
+
+    # Monkeypatch services.score_ticker to trigger _score_candidates_legacy_mock
+    monkeypatch.setattr(services, "score_ticker", mock_custom_score_ticker)
+
+    paths = _paths(tmp_path)
+    persistence = PersistenceService(paths)
+    persistence.save_open_positions([
+        {
+            "ticker": "SHORTPOS.NS",
+            "direction": "SHORT",
+            "entry": 500.0,
+            "shares": 10,
+            "stop": 515.0,
+            "t1": 470.0,
+            "prob_win": 0.55,
+            "composite": 0.65,
+        }
+    ])
+
+    dates = pd.date_range("2024-01-01", periods=60, freq="B")
+    c = pd.Series([500.0] * 60, index=dates)
+    df_valid = pd.DataFrame({"Open": c, "High": c + 2, "Low": c - 2, "Close": c, "Volume": 500_000})
+
+    # Short dataframe with only 20 bars (< 50 min_bars)
+    dates_short = pd.date_range("2024-01-01", periods=20, freq="B")
+    c_short = pd.Series([100.0] * 20, index=dates_short)
+    df_short_bars = pd.DataFrame({"Open": c_short, "High": c_short + 1, "Low": c_short - 1, "Close": c_short, "Volume": 500_000})
+
+    raw_data = {
+        CONFIG.BENCHMARK: df_valid,
+        "SHORTPOS.NS": df_valid,
+        "UNDERSIZED.NS": df_short_bars,
+    }
+
+    data_service = MarketDataService(fetcher=lambda tickers, cfg: raw_data)
+    service = ScanService(version="test", data_service=data_service, persistence=persistence)
+
+    tracker = RegimeTracker()
+    _ = service.scan(config=replace(CONFIG, MAX_WORKERS=1), regime_tracker=tracker)
+
+    # 1. Verify that UNDERSIZED.NS was filtered out by min_bars=50
+    assert not any("UNDERSIZED" in r.get("ticker", "") for r in records_received)
+
+    # 2. Verify that SHORTPOS received held_direction="SHORT" and is_open_position=True
+    short_calls = [r for r in records_received if "SHORTPOS" in r.get("ticker", "")]
+    assert len(short_calls) == 1
+    assert short_calls[0]["held_direction"] == "SHORT"
+    assert short_calls[0]["is_open_position"] is True
+
 

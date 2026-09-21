@@ -26,11 +26,11 @@ jobs:
 
       - name: Lint with ruff
         run: |
-          ruff check core/ tests/ run.py screener_v14_modular.py server.py --output-format=github
+          ruff check core/ tests/ run.py screener_v14_modular.py server.py scripts/ tools/ utils/ --output-format=github
 
       - name: Type-check with mypy
         run: |
-          mypy core/ run.py screener_v14_modular.py server.py \
+          mypy core/ run.py screener_v14_modular.py server.py scripts/ tools/ utils/ \
             --ignore-missing-imports \
             --disallow-untyped-defs \
             --warn-return-any \

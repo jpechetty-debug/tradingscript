@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 sys.path.append(os.getcwd())
 import screener
 
-def test_telegram():
+def test_telegram() -> None:
     load_dotenv()
 
     # Create a mock TickerResult

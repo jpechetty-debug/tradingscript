@@ -30,7 +30,7 @@ def persist_access_token(access_token: str, env_path: Path | None = None) -> Pat
     return target
 
 
-def generate_access_token():
+def generate_access_token() -> None:
     from fyers_apiv3 import fyersModel
 
     load_dotenv(dotenv_path=_repo_env_path())

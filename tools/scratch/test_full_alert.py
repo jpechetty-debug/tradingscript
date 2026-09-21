@@ -9,7 +9,7 @@ from core.scorer import TickerResult, FactorScores
 # Replicate logging to see errors
 logging.basicConfig(level=logging.INFO)
 
-def test_live_alert():
+def test_live_alert() -> None:
     load_dotenv()
 
     print(f"Token: {os.getenv('TELEGRAM_BOT_TOKEN')}")
