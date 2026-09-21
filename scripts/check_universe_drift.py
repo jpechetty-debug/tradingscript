@@ -16,7 +16,7 @@ log = logging.getLogger("check_universe_drift")
 NIFTY_500_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 
 
-def check_universe_drift():
+def check_universe_drift() -> None:
     """
     Downloads the current Nifty 500 constituents and compares them against
     the curated ALL_TICKERS list in core/universe.py.

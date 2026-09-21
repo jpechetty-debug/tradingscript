@@ -112,3 +112,58 @@ def test_step_preserves_engine_swing_horizon_in_latest_scan(monkeypatch, tmp_pat
     assert cand["trade_horizon"] == "SWING"
     assert cand["horizon_label"] == "SWING (CNC)"
 
+
+def test_step_preserves_engine_swing_horizon_for_short_in_latest_scan(monkeypatch, tmp_path):
+    import json
+    from core.scorer import TickerResult
+
+    target_dir = tmp_path / "state"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    persistence = MagicMock()
+    persistence.paths.state_dir = target_dir
+    persistence.load_trade_log.return_value = []
+
+    res = MagicMock(spec=TickerResult)
+    res.direction = "SHORT"
+    res.entry = 1000.0
+    res.stop = 1015.0  # 1.5% stop
+    res.t1 = 950.0
+    res.reasons = []
+    res.trade_horizon = "SWING"
+    res.factors = None
+    res.__dict__ = {
+        "direction": "SHORT",
+        "entry": 1000.0,
+        "stop": 1015.0,
+        "t1": 950.0,
+        "trade_horizon": "SWING",
+        "factors": None,
+        "reasons": [],
+    }
+
+    original_configure = run.configure_services
+    def fake_configure_services(**kwargs):
+        kwargs["persistence"] = persistence
+        return original_configure(**kwargs)
+
+    monkeypatch.setattr(run, "configure_services", fake_configure_services)
+    monkeypatch.setattr(run, "run_scan", lambda **kwargs: ([res], [res], None))
+
+    def fake_sleep(secs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(run.time, "sleep", fake_sleep)
+    monkeypatch.setattr(run.sys, "exit", lambda x: None)
+
+    run.main(["--watch", "1"])
+
+    scan_file = target_dir / "latest_scan.json"
+    assert scan_file.exists()
+    payload = json.loads(scan_file.read_text(encoding="utf-8"))
+    cand = payload["candidates"][0]
+    assert cand["action"] == "SELL"
+    assert cand["trade_horizon"] == "SWING"
+    assert cand["horizon_label"] == "SWING (CNC)"
+
+

@@ -146,12 +146,12 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
                 is_mean_rev = any("MeanRev" in str(x) for x in d.get("reasons", []))
 
                 engine_horizon = d.get("trade_horizon")
-                if not getattr(config, "INTRADAY_ENABLED", False):
+                if engine_horizon in ("INTRADAY", "SWING"):
+                    horizon = engine_horizon
+                elif not getattr(config, "INTRADAY_ENABLED", False):
                     horizon = "SWING"
                 elif dirn == "SHORT" and getattr(config, "SHORT_IS_INTRADAY_ONLY", True):
                     horizon = "INTRADAY"
-                elif engine_horizon in ("INTRADAY", "SWING"):
-                    horizon = engine_horizon
                 elif sl_pct < 2.5 or (is_mean_rev and sl_pct < 3.0):
                     horizon = "INTRADAY"
                 else:

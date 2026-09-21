@@ -2,7 +2,7 @@
 
 [![Security Scan](https://img.shields.io/badge/Security-Verified-success?style=flat-square)](#)
 [![Lint Compliance](https://img.shields.io/badge/Lint-Ruff%20%7C%20Mypy%20Strict-blue?style=flat-square)](#)
-[![Test Suite](https://img.shields.io/badge/Tests-604%20Passed-brightgreen?style=flat-square)](#)
+[![Test Suite](https://img.shields.io/badge/Tests-627%20Passed-brightgreen?style=flat-square)](#)
 [![Version](https://img.shields.io/badge/Version-14.6--Modular-indigo?style=flat-square)](#)
 
 **Institutional-Grade Quantitative Trading Intelligence & Portfolio Optimization for NSE India.**
@@ -194,8 +194,8 @@ All parameters can be set in `.env` or passed via system environment variables:
 | `IC_LOOKBACK_DAYS` | `120` | Calibration | Historical lookback bars used for factor IC estimation. |
 | `IC_FORWARD_BARS` | `5` | Calibration | Forward return horizon for IC calculation. |
 | `IC_CALIB_OFFSET` | `60` | Calibration | Held-out validation offset bars for out-of-sample Platt calibration. |
-| `RISK_PER_TRADE_INR` | `10000.0` | Risk | Target risk allocation in INR per trade. |
-| `PORTFOLIO_SIZE` | `5` | Portfolio | Maximum number of concurrent positions in optimized portfolio. |
+| `RISK_PER_TRADE_INR` | `5000.0` | Risk | Target risk allocation in INR per trade. |
+| `PORTFOLIO_SIZE` | `6` | Portfolio | Maximum number of concurrent positions in optimized portfolio. |
 | `MAX_SECTOR_PICKS` | `2` | Portfolio | Maximum ticker concentration allowed within a single sector. |
 | `MAX_CORR` | `0.70` | Portfolio | Maximum pairwise correlation permitted between portfolio holdings. |
 | `SLIPPAGE_BPS` | `8` | Execution | Slippage friction in basis points per side for backtesting. |
@@ -208,18 +208,18 @@ All parameters can be set in `.env` or passed via system environment variables:
 The codebase enforces strict institutional validation standards:
 
 ```bash
-# Run the complete test suite (602 unit & integration tests)
+# Run the complete test suite (627 unit & integration tests)
 python -m pytest tests/ -v
 
 # Run strict code quality & lint verification
-python -m ruff check core/ tests/
+python -m ruff check core/ tests/ run.py screener_v14_modular.py server.py scripts/
 
 # Run static type checking
 python -m mypy core/
 ```
 
 - **Static Analysis**: 100% compliant with Ruff and Mypy strict typing.
-- **Regression Safety**: 602/602 test suites passing with zero failures.
+- **Regression Safety**: 627/627 tests passing with zero failures.
 
 ---
 

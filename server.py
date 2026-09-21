@@ -179,7 +179,14 @@ class EngineState:
                 d = item.copy()
                 dirn = d.get("direction", "LONG")
                 d["action"] = d.get("action") or ("BUY" if dirn == "LONG" else "SELL")
-                horizon = d.get("trade_horizon") or ("INTRADAY" if dirn == "SHORT" else "SWING")
+                horizon = d.get("trade_horizon")
+                if horizon not in ("INTRADAY", "SWING"):
+                    if not getattr(CONFIG, "INTRADAY_ENABLED", False):
+                        horizon = "SWING"
+                    elif dirn == "SHORT" and getattr(CONFIG, "SHORT_IS_INTRADAY_ONLY", True):
+                        horizon = "INTRADAY"
+                    else:
+                        horizon = "SWING"
                 d["trade_horizon"] = horizon
                 d["horizon_label"] = "INTRADAY (MIS)" if horizon == "INTRADAY" else "SWING (CNC)"
                 entry = float(d.get("entry") or 0.0)
@@ -298,10 +305,12 @@ def _format_ticker_result(res: TickerResult) -> Dict[str, Any]:
 
     is_mean_rev = any("MeanRev" in str(r) for r in getattr(res, "reasons", []))
 
-    if res.direction == "SHORT":
-        horizon = "INTRADAY"
-    elif engine_horizon in ("INTRADAY", "SWING"):
+    if engine_horizon in ("INTRADAY", "SWING"):
         horizon = engine_horizon
+    elif not getattr(CONFIG, "INTRADAY_ENABLED", False):
+        horizon = "SWING"
+    elif res.direction == "SHORT" and getattr(CONFIG, "SHORT_IS_INTRADAY_ONLY", True):
+        horizon = "INTRADAY"
     elif sl_pct < 2.5 or (is_mean_rev and sl_pct < 3.0):
         horizon = "INTRADAY"
     else:
