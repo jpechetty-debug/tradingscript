@@ -352,7 +352,18 @@ def factor_volume(
     atr_contracting = (atr < 0.85 * atr50m) if atr50m > 0 else False
     is_vcp = (rvol < 0.80) and atr_contracting
 
-    poc, val, vah = true_volume_profile(daily_df, lookback=vprofile_lookback, bins=vprofile_bins)
+    ticker = str(row.get("Ticker", "") or "")
+    if ticker:
+        try:
+            from .cache import SCAN_CACHE
+            poc, val, vah = SCAN_CACHE.volume_profile(
+                daily_df, ticker=ticker, lookback=vprofile_lookback, bins=vprofile_bins
+            )
+        except Exception:
+            poc, val, vah = true_volume_profile(daily_df, lookback=vprofile_lookback, bins=vprofile_bins)
+    else:
+        poc, val, vah = true_volume_profile(daily_df, lookback=vprofile_lookback, bins=vprofile_bins)
+
     poc_ok = (close > poc - 0.3 * atr) if direction == "LONG" else (close < poc + 0.3 * atr)
     va_ok  = (close > val)              if direction == "LONG" else (close < vah)
     turn_r = float(row["Turnover_Avg_20"]) / adv_turnover_floor
@@ -483,23 +494,21 @@ def factor_breakout(
     narrow = (bw < bwavg * 0.85) if bwavg > 0 else False
 
     if direction == "LONG":
-        h52 = (
-            float(daily_df["High"].tail(252).max())
-            if ("High" in daily_df.columns and len(daily_df) > 0)
-            else float(close)
-        )
-        dist = ((h52 - close) / h52 * 100) if h52 > 0 else 100.0
-        ds = max(0.0, 1.0 - dist / near_52w_max_dist_pct)
+        if "High" not in daily_df.columns or daily_df["High"].dropna().empty:
+            ds = 0.0
+        else:
+            h52 = float(daily_df["High"].dropna().tail(252).max())
+            dist = ((h52 - close) / h52 * 100) if h52 > 0 else 100.0
+            ds = max(0.0, 1.0 - dist / near_52w_max_dist_pct)
     else:
-        # SHORT: measure distance FROM 52-week low — near lows = high breakdown score
-        l52 = (
-            float(daily_df["Low"].tail(252).min())
-            if ("Low" in daily_df.columns and len(daily_df) > 0)
-            else float(close)
-        )
-        dist_from_low = ((close - l52) / close * 100) if close > 0 else 100.0
-        # Score 1.0 when within near_52w_max_dist_pct of the 52-week low
-        ds = max(0.0, 1.0 - dist_from_low / near_52w_max_dist_pct)
+        # SHORT: measure distance FROM 20-day breakdown low — near lows = high breakdown score
+        if "Low" not in daily_df.columns or daily_df["Low"].dropna().empty:
+            ds = 0.0
+        else:
+            lo20 = float(daily_df["Low"].dropna().tail(20).min())
+            dist_from_low = ((close - lo20) / close * 100) if close > 0 else 100.0
+            # Score 1.0 when within near_52w_max_dist_pct of the 20-day low
+            ds = max(0.0, 1.0 - dist_from_low / near_52w_max_dist_pct)
 
     bo = ds * 0.65 + (0.35 if narrow else 0.0)
     return float(np.clip(bo, 0.0, 1.0))

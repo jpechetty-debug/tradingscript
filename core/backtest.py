@@ -93,8 +93,9 @@ class TransactionCostModel:
     exchange_pct:        float = 0.0000345    # NSE exchange charge
     sebi_pct:            float = 0.000001     # SEBI charge
     # Asymmetric
-    stt_sell_pct:        float = 0.00025      # STT on sell side only (intraday)
-    stamp_buy_pct:       float = 0.00015      # Stamp duty on buy side only
+    stt_buy_pct:         float = 0.0          # STT on buy side (0.0 for intraday, 0.001 for delivery)
+    stt_sell_pct:        float = 0.00025      # STT on sell side (0.025% intraday, 0.1% delivery)
+    stamp_buy_pct:       float = 0.00015      # Stamp duty on buy side only (0.015%)
     # GST applies on brokerage + exchange + SEBI
     gst_rate:            float = 0.18
     commission_inr:      float = 20.0         # Flat commission in INR per trade (from COMMISSION_INR=20)
@@ -116,12 +117,12 @@ class TransactionCostModel:
 
     def entry_cost_pct(self) -> float:
         """Total buy-side friction as a fraction of entry price."""
-        taxable = (self.brokerage_pct + self.exchange_pct + self.sebi_pct) * self._gst_mult()
-        return self.slippage_pct + taxable + self.stamp_buy_pct
+        taxable = (self.brokerage_pct + self.exchange_pct + self.sebi_pct) * (1.0 + self.gst_rate)
+        return self.slippage_pct + self.stt_buy_pct + taxable + self.stamp_buy_pct
 
     def exit_cost_pct(self) -> float:
         """Total sell-side friction as a fraction of exit price (approx entry price)."""
-        taxable = (self.brokerage_pct + self.exchange_pct + self.sebi_pct) * self._gst_mult()
+        taxable = (self.brokerage_pct + self.exchange_pct + self.sebi_pct) * (1.0 + self.gst_rate)
         return self.slippage_pct + self.stt_sell_pct + taxable
 
     def friction_r(self, entry: float, sl_dist: float, shares: Optional[int] = None) -> float:
@@ -153,13 +154,16 @@ class TransactionCostModel:
 
 # Pre-built instances — reference by name instead of constructing inline.
 DEFAULT_COST_MODEL = TransactionCostModel()   # NSE intraday retail defaults
-SWING_COST_MODEL   = TransactionCostModel(    # NSE delivery defaults (0.1% STT on both legs)
+SWING_COST_MODEL   = TransactionCostModel(    # NSE delivery defaults (0.1% STT on both legs, 0.015% stamp, zero brokerage)
+    brokerage_pct=0.0,
+    stt_buy_pct=0.001,
     stt_sell_pct=0.001,
-    stamp_buy_pct=0.001,
+    stamp_buy_pct=0.00015,
+    commission_inr=0.0,
 )
 ZERO_COST_MODEL    = TransactionCostModel(    # frictionless (legacy / tests)
     slippage_pct=0.0, brokerage_pct=0.0, exchange_pct=0.0,
-    sebi_pct=0.0, stt_sell_pct=0.0, stamp_buy_pct=0.0, gst_rate=0.0,
+    sebi_pct=0.0, stt_buy_pct=0.0, stt_sell_pct=0.0, stamp_buy_pct=0.0, gst_rate=0.0,
     commission_inr=0.0,
 )
 
@@ -193,6 +197,8 @@ class TradeRecord:
     gross_r_multiple:   float = field(default=0.0)  # R before cost deduction
     friction_r_applied: float = field(default=0.0)  # cost drag in R units
     trade_horizon:      str = field(default="SWING")  # "SWING" | "INTRADAY"
+    shares:             int = field(default=0)
+    risk_inr:           float = field(default=0.0)
 
 
 @dataclass
@@ -331,6 +337,58 @@ def _realised_r(
     return net_r, False, len(fwd_bars), exit_date, gross_r, round(friction, 5)
 
 
+def _daily_portfolio_sharpe(
+    trades: list[TradeRecord],
+    start_date: Optional[pd.Timestamp] = None,
+    end_date: Optional[pd.Timestamp] = None,
+    capital: float = 1_000_000.0,
+) -> float:
+    """
+    Annualised portfolio Sharpe computed from a daily portfolio return / equity curve.
+
+    Aggregates concurrent position PnL by exit date across the trading calendar.
+    For folds where trades enter simultaneously, this captures cross-sectional
+    correlation and concurrent risk rather than treating concurrent trades as
+    independent sequential bets.
+    """
+    if not trades:
+        return 0.0
+
+    valid_trades = [t for t in trades if t.exit_date is not None]
+    if not valid_trades:
+        return 0.0
+
+    s_date = start_date or min(t.entry_date for t in valid_trades)
+    e_date = end_date or max(t.exit_date for t in valid_trades if t.exit_date is not None)
+
+    try:
+        b_days = pd.bdate_range(s_date, e_date)
+    except Exception:
+        b_days = pd.DatetimeIndex([t.exit_date for t in valid_trades if t.exit_date is not None])
+
+    if len(b_days) < 2:
+        return 0.0
+
+    daily_pnl: dict[Any, float] = {d.date(): 0.0 for d in b_days}
+    for t in valid_trades:
+        if t.exit_date is None:
+            continue
+        d = t.exit_date.date() if hasattr(t.exit_date, "date") else t.exit_date
+        rsk = t.risk_inr if t.risk_inr > 0 else 10_000.0
+        pnl = t.r_multiple * rsk
+        if d in daily_pnl:
+            daily_pnl[d] += pnl
+        else:
+            daily_pnl[d] = daily_pnl.get(d, 0.0) + pnl
+
+    daily_rets = np.array([pnl / capital for pnl in daily_pnl.values()])
+    std = float(np.std(daily_rets))
+    if std <= 0:
+        return 0.0
+    mean = float(np.mean(daily_rets))
+    return float(round((mean / std) * float(np.sqrt(252.0)), 3))
+
+
 def _fold_stats(fold: int, trades: list[TradeRecord], dates: tuple) -> FoldStats:
     """Compute statistics for one fold from its trade list."""
     start, end = dates
@@ -346,15 +404,8 @@ def _fold_stats(fold: int, trades: list[TradeRecord], dates: tuple) -> FoldStats
     mean  = total / len(rs)
     hit_r = sum(hits) / len(hits)
 
-    # Annualised Sharpe of trade R-multiples using actual fold trade rate
-    std = float(np.std(rs)) if len(rs) > 1 else 0.0
-    days = 20
-    try:
-        days = max(1, (end - start).days)
-    except Exception:
-        pass
-    trades_per_year = max(1.0, (len(trades) / days) * 252.0)
-    sharpe = round((mean / std) * np.sqrt(trades_per_year), 3) if std > 0 else 0.0
+    # Annualised portfolio Sharpe across the fold trading window
+    sharpe = _daily_portfolio_sharpe(sorted_trades, start, end)
 
     # Max drawdown of cumulative R curve (in chronological order)
     cum  = np.cumsum([0.0] + rs)
@@ -383,15 +434,10 @@ def _overall_stats(all_trades: list[TradeRecord], fold_stats: list[FoldStats]) -
     mean  = total / len(rs)
     hits  = sum(1 for t in sorted_trades if t.hit_t1)
 
-    std = float(np.std(rs)) if len(rs) > 1 else 0.0
-    if sorted_trades and std > 0:
-        start_d = sorted_trades[0].entry_date
-        end_d = sorted_trades[-1].entry_date
-        days = max(1, getattr(end_d - start_d, "days", 1))
-        trades_per_year = max(1.0, (len(sorted_trades) / days) * 252.0)
-        sharpe = round((mean / std) * np.sqrt(trades_per_year), 3)
-    else:
-        sharpe = 0.0
+    valid_exits = [t.exit_date for t in sorted_trades if t.exit_date is not None]
+    start_d = sorted_trades[0].entry_date if sorted_trades else None
+    end_d = max(valid_exits) if valid_exits else (sorted_trades[-1].entry_date if sorted_trades else None)
+    sharpe = _daily_portfolio_sharpe(sorted_trades, start_d, end_d)
 
     cum  = np.cumsum([0.0] + rs)
     peak = np.maximum.accumulate(cum)
@@ -626,7 +672,7 @@ def walk_forward(
 
             time_stop = getattr(cand, "time_stop_bars", None)
             if time_stop is None:
-                _, time_stop = compute_trade_management(d, close, atr, row)
+                _, time_stop = compute_trade_management_wrapper(d, close, atr, row)
 
             entry_price = float(fwd_bars.iloc[0]["Open"])
             targets = compute_targets(
@@ -665,6 +711,8 @@ def walk_forward(
                 gross_r_multiple=gross_r,
                 friction_r_applied=friction,
                 trade_horizon=getattr(cand, "trade_horizon", "SWING"),
+                shares=getattr(cand, "shares", 0),
+                risk_inr=getattr(cand, "risk_inr", 0.0),
             ))
 
         fold_dates = (train_dates[-1], test_dates[-1])

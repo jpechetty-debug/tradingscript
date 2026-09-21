@@ -275,7 +275,7 @@ def calculate_kelly_size(
     2. Fat-tail corr   kurt_corr = 3 / (3 + excess_kurtosis)
     3. Fractional K    f = f* x KELLY_FRACTION x kurt_corr
     4. Raw risk (Rs.)  risk = RISK_PER_TRADE_INR x max(f, 0.01) x 100 x cf
-    5. Clamp           risk in [RISK_PER_TRADE_INR x 0.25 x cf,
+    5. Clamp           risk in [RISK_PER_TRADE_INR x 0.05 x cf,
                                 RISK_PER_TRADE_INR x KELLY_MAX_MULT x cf]
     6. Shares          floor(risk / rps), min KELLY_MIN_SHARES.
     """
@@ -301,7 +301,7 @@ def calculate_kelly_size(
     )
     risk_inr = max(
         risk_inr,
-        config.RISK_PER_TRADE_INR * 0.25 * capital_fraction,
+        config.RISK_PER_TRADE_INR * 0.05 * capital_fraction,
     )
 
     if np.isnan(risk_inr) or np.isnan(rps) or rps <= 0:
@@ -432,25 +432,13 @@ def optimize_portfolio(
 
     total_exposure, total_risk = _calc_totals(selected)
 
-    # 3a. Trim lowest-sharpe_rank new candidates until within budget or only held remain
-    while (total_exposure > capital_limit or total_risk > max_risk_limit) and any(not _is_held(c) for c in selected):
-        new_indices = [i for i, c in enumerate(selected) if not _is_held(c)]
-        lowest_idx = min(new_indices, key=lambda i: getattr(selected[i], "sharpe_rank", 0.0))
-        dropped = selected.pop(lowest_idx)
-        log.warning(
-            "Portfolio: trimmed new candidate %s (sharpe_rank=%.2f) to enforce capital/risk invariant.",
-            getattr(dropped, "ticker", ""),
-            getattr(dropped, "sharpe_rank", 0.0),
-        )
-        total_exposure, total_risk = _calc_totals(selected)
-
-    # 3b. If still exceeding limits (e.g. held positions or remaining entries), scale down shares pro-rata
+    # 3a. Scale down position sizes pro-rata FIRST to preserve diversification across qualified candidates
     if (total_exposure > capital_limit or total_risk > max_risk_limit) and selected:
         scale_exp = (capital_limit / total_exposure) if total_exposure > capital_limit else 1.0
         scale_rsk = (max_risk_limit / total_risk) if total_risk > max_risk_limit else 1.0
         scale = min(scale_exp, scale_rsk)
         log.warning(
-            "Portfolio: scaling down position sizes by factor %.3f to satisfy capital (Rs.%.0f) and risk (Rs.%.0f) limits.",
+            "Portfolio: scaling down position sizes by factor %.3f to align with capital (Rs.%.0f) and risk (Rs.%.0f) limits.",
             scale, capital_limit, max_risk_limit,
         )
         scaled_selected = []
@@ -458,7 +446,9 @@ def optimize_portfolio(
             old_shares = getattr(c, "shares", 0)
             rps = abs(getattr(c, "entry", 0.0) - getattr(c, "stop", 0.0))
             new_shares = int(old_shares * scale)
+            # If scaling pushes a new candidate below 1 share, it is dropped; held positions are floored at 1 share
             if new_shares == 0 and not _is_held(c):
+                log.debug("Portfolio: %s dropped after scaling (shares < 1)", getattr(c, "ticker", ""))
                 continue
             new_shares = max(1 if _is_held(c) else 0, new_shares)
             if new_shares > 0:
@@ -470,5 +460,32 @@ def optimize_portfolio(
                     c["risk_inr"] = round(new_shares * rps, 2)
                 scaled_selected.append(c)
         selected = scaled_selected
+        total_exposure, total_risk = _calc_totals(selected)
+
+    # 3b. If residual exposure/risk still exceeds limits (e.g. held positions floored at 1 share, or edge rounding),
+    # trim lowest-sharpe_rank new candidates until within budget or only held remain
+    while (total_exposure > capital_limit or total_risk > max_risk_limit) and any(not _is_held(c) for c in selected):
+        new_indices = [i for i, c in enumerate(selected) if not _is_held(c)]
+        lowest_idx = min(new_indices, key=lambda i: getattr(selected[i], "sharpe_rank", 0.0))
+        dropped = selected.pop(lowest_idx)
+        log.warning(
+            "Portfolio: trimmed new candidate %s (sharpe_rank=%.2f) to enforce capital/risk invariant.",
+            getattr(dropped, "ticker", ""),
+            getattr(dropped, "sharpe_rank", 0.0),
+        )
+        total_exposure, total_risk = _calc_totals(selected)
+
+    # 3c. Re-check final totals and emit explicit ERROR if live book cannot be brought inside limits
+    final_exposure, final_risk = _calc_totals(selected)
+    if final_exposure > capital_limit:
+        log.error(
+            "PORTFOLIO CAPITAL INVARIANT BREACH: total exposure Rs.%.2f exceeds limit Rs.%.2f",
+            final_exposure, capital_limit,
+        )
+    if final_risk > max_risk_limit:
+        log.error(
+            "PORTFOLIO RISK INVARIANT BREACH: total risk Rs.%.2f exceeds limit Rs.%.2f",
+            final_risk, max_risk_limit,
+        )
 
     return selected

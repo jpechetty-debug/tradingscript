@@ -22,6 +22,7 @@ import pytest
 
 from core.backtest import (
     DEFAULT_COST_MODEL,
+    SWING_COST_MODEL,
     ZERO_COST_MODEL,
     TransactionCostModel,
     TradeRecord,
@@ -90,6 +91,19 @@ class TestTransactionCostModel:
         """
         fr = DEFAULT_COST_MODEL.friction_r(entry=100.0, sl_dist=1.5)
         assert 0.10 < fr < 0.25, f"Unexpected friction: {fr}"
+
+    def test_swing_cost_model_stt_and_stamp_separation(self):
+        """SWING_COST_MODEL correctly attributes 0.1% STT on both legs, 0.015% stamp, zero brokerage."""
+        assert SWING_COST_MODEL.stt_buy_pct == 0.001
+        assert SWING_COST_MODEL.stt_sell_pct == 0.001
+        assert SWING_COST_MODEL.stamp_buy_pct == 0.00015
+        assert SWING_COST_MODEL.brokerage_pct == 0.0
+        assert SWING_COST_MODEL.commission_inr == 0.0
+        # Round-trip percentage drag includes stt_buy + stt_sell + stamp_buy + slippage
+        entry_cost = SWING_COST_MODEL.entry_cost_pct()
+        exit_cost = SWING_COST_MODEL.exit_cost_pct()
+        assert entry_cost > exit_cost  # entry includes stamp_buy_pct (0.015%)
+        assert abs((entry_cost - exit_cost) - 0.00015) < 1e-6
 
 
 # ── _realised_r integration ───────────────────────────────────────────────────

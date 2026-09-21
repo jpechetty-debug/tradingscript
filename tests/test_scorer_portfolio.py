@@ -22,6 +22,7 @@ from __future__ import annotations
 import sys
 import os
 import types
+import logging
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -146,6 +147,7 @@ def _make_ticker_result(
     sharpe_rank: float = 1.5,
     sector: str = "Energy",
     prob_win: float = 0.60,
+    is_held: bool = False,
 ) -> TickerResult:
     """Minimal TickerResult for portfolio optimizer tests."""
     from core.factors import FactorScores
@@ -155,7 +157,7 @@ def _make_ticker_result(
         ic_weights={k: 1/7 for k in
                     ["trend","momentum","volume","volatility","rs","breakout","quality"]},
     )
-    return TickerResult(
+    res = TickerResult(
         ticker=ticker, sector=sector, direction=direction,
         close=500.0, change_pct=0.5,
         factors=fs, composite=0.68,
@@ -171,6 +173,9 @@ def _make_ticker_result(
         poc=498.0, val=490.0, vah=510.0,
         regime="TREND_UP", session="OPENING_RANGE",
     )
+    if is_held:
+        res.is_held = True
+    return res
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -354,8 +359,8 @@ class TestCalculateKellySize:
             entry=500.0, stop=485.0, prob_win=0.60,
             rr=2.5, daily_df=df, config=cfg,
         )
-        # Must be within [0.25 * RISK_PER_TRADE_INR, KELLY_MAX_MULT * RISK_PER_TRADE_INR] (accounting for int share quantization)
-        assert risk_inr >= cfg.RISK_PER_TRADE_INR * 0.25 - 15.0
+        # Must be within [0.05 * RISK_PER_TRADE_INR, KELLY_MAX_MULT * RISK_PER_TRADE_INR] (accounting for int share quantization)
+        assert risk_inr >= cfg.RISK_PER_TRADE_INR * 0.05 - 15.0
         assert risk_inr <= cfg.RISK_PER_TRADE_INR * cfg.KELLY_MAX_MULT
 
     def test_capital_fraction_scales_risk(self):
@@ -473,7 +478,7 @@ class TestOptimizePortfolio:
 
     def test_binding_capital_and_risk_invariants(self):
         # 3 candidates, each with entry=1000, stop=950, shares=400 (exp=400k, risk=20k each)
-        # Total exposure = 12L (exceeds 10L), total risk = 60k
+        # Total exposure = 12L (exceeds 7L capital limit), total risk = 60k (exceeds 50k max risk)
         c1 = _make_ticker_result(ticker="A", sector="IT", sharpe_rank=3.0)
         c1.entry, c1.stop, c1.shares, c1.risk_inr = 1000.0, 950.0, 400, 20_000.0
         c2 = _make_ticker_result(ticker="B", sector="BANK", sharpe_rank=2.0)
@@ -486,14 +491,34 @@ class TestOptimizePortfolio:
         cfg.MAX_PORTFOLIO_RISK_INR = 50_000.0
 
         result = optimize_portfolio([c1, c2, c3], cfg)
-        # Lowest rank C3 should have been trimmed first, leaving c1 and c2 (800k exp > 700k limit)
-        # Then remaining scaled down so total_exposure <= 700k and total_risk <= 50k
+        # Pro-rata scaling scales all 3 candidates to ~233 shares each, preserving diversification
         total_exp = sum(c.shares * c.entry for c in result)
         total_risk = sum(c.risk_inr for c in result)
         assert total_exp <= cfg.CAPITAL_INR
         assert total_risk <= cfg.MAX_PORTFOLIO_RISK_INR
+        assert len(result) == 3
+        assert all(c.shares == 233 for c in result)
         assert any(c.ticker == "A" for c in result)
-        assert not any(c.ticker == "C" for c in result)
+        assert any(c.ticker == "C" for c in result)
+
+    def test_residual_breach_logs_error(self, caplog):
+        # 3 held positions at 60k each vs 100k capital limit
+        h1 = _make_ticker_result(ticker="H1", sector="IT", is_held=True)
+        h1.entry, h1.stop, h1.shares, h1.risk_inr = 60_000.0, 58_000.0, 1, 2_000.0
+        h2 = _make_ticker_result(ticker="H2", sector="BANK", is_held=True)
+        h2.entry, h2.stop, h2.shares, h2.risk_inr = 60_000.0, 58_000.0, 1, 2_000.0
+        h3 = _make_ticker_result(ticker="H3", sector="AUTO", is_held=True)
+        h3.entry, h3.stop, h3.shares, h3.risk_inr = 60_000.0, 58_000.0, 1, 2_000.0
+
+        cfg = self._cfg(size=5, max_sector=2)
+        cfg.CAPITAL_INR = 100_000.0
+        cfg.MAX_PORTFOLIO_RISK_INR = 50_000.0
+
+        with caplog.at_level(logging.ERROR):
+            result = optimize_portfolio([h1, h2, h3], cfg)
+
+        assert len(result) == 3
+        assert any("PORTFOLIO CAPITAL INVARIANT BREACH" in r.message for r in caplog.records)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

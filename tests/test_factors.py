@@ -448,6 +448,32 @@ class TestFactorBreakout:
         score_narrow = self._call(bw=0.02, bwavg=0.04)   # bw < bwavg * 0.85 → narrow
         assert score_narrow >= score_wide
 
+    def test_missing_data_fails_to_zero(self):
+        df = _make_ohlcv().drop(columns=["High", "Low"])
+        row = _make_row(_make_ohlcv()).copy()
+        row["BB_Width"] = 0.08  # wide BB -> narrow = False
+        score_long = factor_breakout(row, df, close=100.0, direction="LONG")
+        score_short = factor_breakout(row, df, close=100.0, direction="SHORT")
+        assert score_long == 0.0
+        assert score_short == 0.0
+
+    def test_short_near_20d_low_scores_high_in_recovered_name(self):
+        # Stock crashed to 80, recovered to 150, now pulling back to 20-day low of 140
+        df = _make_ohlcv(n=252)
+        df.loc[df.index[50], "Low"] = 80.0  # 52w low is 80
+        # last 20 days are near 140-150
+        df.loc[df.index[-20:], "Low"] = 140.0
+        df.loc[df.index[-20:], "Close"] = 145.0
+        # current bar at 20-day low of 140
+        df.loc[df.index[-1], "Low"] = 140.0
+        df.loc[df.index[-1], "Close"] = 140.0
+        row = _make_row(df).copy()
+        row["BB_Width"] = 0.08  # wide BB
+
+        score_short = factor_breakout(row, df, close=140.0, direction="SHORT")
+        # Should score high on 20-day breakdown (ds = 1.0 -> 0.65)
+        assert score_short >= 0.65
+
     def test_output_clipped(self):
         assert 0.0 <= self._call() <= 1.0
 
