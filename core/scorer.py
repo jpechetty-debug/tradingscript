@@ -521,7 +521,7 @@ def score_candidate_pass1(
     if force_score:
         direction = "LONG"
     elif is_open_position:
-        # For held positions, retain the established direction unless directional bias is strong
+        # For held positions, retain established direction unconditionally if provided; otherwise infer from directional bias
         if held_direction:
             direction = held_direction
         elif is_bull:

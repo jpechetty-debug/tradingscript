@@ -13,6 +13,7 @@ This module turns the main runtime concerns into explicit collaborators:
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import time
@@ -1095,21 +1096,22 @@ class ScanService:
         loader = getattr(self._persistence, "load_open_positions", None)
         pos_map: dict[str, dict[str, Any]] = loader() if callable(loader) else {}
 
+        try:
+            sig = inspect.signature(passes_static_filters)
+            accepts_min_bars = "min_bars" in sig.parameters
+        except Exception:
+            accepts_min_bars = False
+
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
             futures: dict[Any, str] = {}
             for ticker, df in prepared.processed.items():
                 clean_ticker = ticker.replace(".NS", "")
                 is_open = (ticker in open_pos) or (clean_ticker in open_pos)
-                import inspect
-                try:
-                    sig = inspect.signature(passes_static_filters)
-                    passes_static = (
-                        passes_static_filters(df, config, min_bars=50)
-                        if "min_bars" in sig.parameters
-                        else passes_static_filters(df, config)
-                    )
-                except Exception:
-                    passes_static = passes_static_filters(df, config)
+                passes_static = (
+                    passes_static_filters(df, config, min_bars=50)
+                    if accepts_min_bars
+                    else passes_static_filters(df, config)
+                )
 
                 if ticker == config.BENCHMARK or (not is_open and not passes_static):
                     continue
@@ -1142,18 +1144,8 @@ class ScanService:
                     "no_intraday": no_intraday,
                     "force_score": force_score,
                     "is_open_position": is_open,
+                    "held_direction": held_dir,
                 }
-                import inspect
-                try:
-                    sig = inspect.signature(score_ticker)
-                    accepts_held_dir = (
-                        "held_direction" in sig.parameters
-                        or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-                    )
-                    if accepts_held_dir:
-                        call_kwargs["held_direction"] = held_dir
-                except Exception:
-                    call_kwargs["held_direction"] = held_dir
 
                 future = executor.submit(score_ticker, **call_kwargs)
                 futures[future] = ticker

@@ -46,3 +46,12 @@ exclude = ['(?i)^tmp/', '(?i)^artifacts/', '(?i)^\\.agent/']
 ignore_missing_imports = true
 explicit_package_bases = true
 namespace_packages = true
+
+[[tool.mypy.overrides]]
+module = ["pytz", "pytz.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tools.scripts.check_dates"]
+disable_error_code = ["import-untyped"]
+
