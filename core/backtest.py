@@ -775,6 +775,7 @@ def walk_forward(
                 atr,
                 config,
                 trade_horizon=getattr(cand, "trade_horizon", "SWING"),
+                atr_pctile=float(getattr(cand, "atr_pctile", 50.0)),
             )
 
             r, hit, bars, exit_date, gross_r, friction = _realised_r(

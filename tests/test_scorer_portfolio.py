@@ -250,6 +250,7 @@ class TestComputeTargets:
     def test_long_t1_above_close(self):
         t = compute_targets("LONG", close=500.0, atr=10.0, config=self._cfg())
         assert t.t1 > 500.0
+        # At default atr_pctile=50, scale=1.0, T1_mult=3.80
         assert t.t1 == pytest.approx(500.0 + 3.8 * 10.0, abs=0.01)
 
     def test_long_t2_above_t1(self):
@@ -266,9 +267,17 @@ class TestComputeTargets:
 
     def test_rr_is_t1_over_sl(self):
         t = compute_targets("LONG", close=500.0, atr=10.0, config=self._cfg())
-        sl  = 1.5 * 10.0
+        sl = 1.5 * 10.0
         expected_rr = (3.8 * 10.0) / sl
         assert t.rr == pytest.approx(expected_rr, abs=0.01)
+
+    def test_atr_pctile_differentiation(self):
+        # Coiled setup (low atr_pctile) should get higher T1 and higher RR
+        t_coiled = compute_targets("LONG", close=500.0, atr=10.0, config=self._cfg(), atr_pctile=10.0)
+        # Extended setup (high atr_pctile) should get lower T1 and lower RR
+        t_extended = compute_targets("LONG", close=500.0, atr=10.0, config=self._cfg(), atr_pctile=90.0)
+        assert t_coiled.t1 > t_extended.t1
+        assert t_coiled.rr > t_extended.rr
 
     def test_zero_atr_returns_zero_rr(self):
         t = compute_targets("LONG", close=500.0, atr=0.0, config=self._cfg())

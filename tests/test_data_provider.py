@@ -286,3 +286,39 @@ class TestFetchDailyBatch:
         with patch("core.data_provider._yf_download_chunk", return_value=fake):
             result = fetch_daily_batch(["RELIANCE.NS"], _cfg())
             assert not result
+
+    def test_fyers_session_manager_warns_with_secret_str(self, tmp_path, monkeypatch):
+        from core.config import SecretStr
+        from core.data_provider import FyersSessionManager
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("FYERS_ACCESS_TOKEN=stale-token\n", encoding="utf-8")
+        stale_timestamp = 1_700_000_000
+        os.utime(env_path, (stale_timestamp, stale_timestamp))
+        monkeypatch.chdir(tmp_path)
+
+        FyersSessionManager._instance = None
+        cfg = _cfg(USE_FYERS=True, FYERS_CLIENT_ID="client", FYERS_ACCESS_TOKEN=SecretStr("stale-token"))
+
+        assert FyersSessionManager._warn_if_token_stale(cfg) is True
+
+    def test_fetch_single_ticker_uses_ist_dates(self):
+        from datetime import datetime, timedelta
+        from core.config import IST
+        from core.data_provider import fetch_single_ticker
+
+        cfg = _cfg(USE_FYERS=True)
+        mock_client = MagicMock()
+        mock_client.history.return_value = {
+            "s": "ok",
+            "candles": [[1700000000, 100, 105, 95, 102, 1000]]
+        }
+        with patch("core.data_provider.FyersSessionManager.get_client", return_value=mock_client):
+            fetch_single_ticker("RELIANCE.NS", "NSE:RELIANCE-EQ", cfg)
+
+        call_args = mock_client.history.call_args[1]["data"]
+        expected_to = datetime.now(IST).strftime("%Y-%m-%d")
+        expected_from = (datetime.now(IST) - timedelta(days=365)).strftime("%Y-%m-%d")
+        assert call_args["range_to"] == expected_to
+        assert call_args["range_from"] == expected_from
+

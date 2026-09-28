@@ -644,7 +644,7 @@ async def get_sectors() -> Dict[str, Any]:
     }
 
 
-@app.get("/api/trades")
+@app.get("/api/trades", dependencies=[Depends(verify_api_key)])
 def get_trades(
     ticker: Optional[str] = None,
     limit: int = Query(default=100, ge=1, le=1000, description="Max number of trades to return (1-1000)"),

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 from zoneinfo import ZoneInfo
 
 log = logging.getLogger("sovereign.config")
@@ -44,30 +44,63 @@ def _safe_float_env(key: str, default: float) -> float:
         return default
 
 
-class SecretStr(str):
+class SecretStr:
     """
-    A ``str`` subclass whose ``__repr__`` and ``__str__`` never expose the secret value.
-    Call ``get_secret_value()`` to retrieve the raw string.
+    A protected string container whose ``__repr__``, ``__str__``, and format
+    never expose the secret value. Call ``get_secret_value()`` to retrieve
+    the raw string. String concatenation is blocked by design to prevent
+    unintended secret leakage.
     """
 
-    _SECRET_FIELDS = frozenset({
-        "TELEGRAM_BOT_TOKEN",
-        "FYERS_CLIENT_ID",
-        "FYERS_SECRET_KEY",
-        "FYERS_ACCESS_TOKEN",
-    })
+    def __init__(self, value: Any = "") -> None:
+        if isinstance(value, SecretStr):
+            self._value: str = value.get_secret_value()
+        else:
+            self._value = str(value) if value is not None else ""
+
+    def get_secret_value(self) -> str:
+        """Return the unmasked secret value."""
+        return self._value
 
     def __repr__(self) -> str:
-        raw = super().__str__()
-        if len(raw) >= 12:
-            return f"SecretStr('{raw[:4]}...{raw[-4:]}')"
+        if len(self._value) >= 12:
+            return f"SecretStr('{self._value[:4]}...{self._value[-4:]}')"
         return "SecretStr('****')"
 
     def __str__(self) -> str:
-        return "SecretStr('****')" if super().__str__() else ""
+        return "SecretStr('****')" if self._value else ""
 
-    def get_secret_value(self) -> str:
-        return super().__str__()
+    def __format__(self, format_spec: str) -> str:
+        return str(self)
+
+    def __bool__(self) -> bool:
+        return bool(self._value)
+
+    def __len__(self) -> int:
+        return len(self._value)
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, SecretStr):
+            return self._value == other._value
+        if isinstance(other, str):
+            return self._value == other
+        return False
+
+    def __hash__(self) -> int:
+        return hash(self._value)
+
+    def __add__(self, other: Any) -> None:
+        raise TypeError("Cannot concatenate SecretStr; call get_secret_value() explicitly if raw value is required.")
+
+    def __radd__(self, other: Any) -> None:
+        raise TypeError("Cannot concatenate SecretStr; call get_secret_value() explicitly if raw value is required.")
+
+
+def get_secret_value(secret: Any) -> str:
+    """Safely extract the raw string from a SecretStr, str, or None."""
+    if hasattr(secret, "get_secret_value"):
+        return str(secret.get_secret_value())
+    return str(secret) if secret is not None else ""
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -454,7 +487,7 @@ class SystemConfig:
         for f in fields(self):
             val = getattr(self, f.name)
             if f.name in _SECRET_FIELD_NAMES:
-                parts.append(f"{f.name}={SecretStr(str(val))!r}")
+                parts.append(f"{f.name}={SecretStr(val)!r}")
             else:
                 parts.append(f"{f.name}={val!r}")
         return f"SystemConfig({', '.join(parts)})"

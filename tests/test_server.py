@@ -152,8 +152,19 @@ def test_trigger_scan_authorized(client: TestClient) -> None:
         assert data["status"] == "triggered"
 
 
+def test_get_trades_requires_auth(client: TestClient) -> None:
+    # Missing API key
+    res_no_key = client.get("/api/trades")
+    assert res_no_key.status_code == 401
+
+    # Invalid API key
+    res_bad_key = client.get("/api/trades", headers={"X-API-Key": "wrong-key"})
+    assert res_bad_key.status_code == 401
+
+
 def test_get_trades(client: TestClient) -> None:
-    res = client.get("/api/trades")
+    headers = {"X-API-Key": TEST_API_KEY}
+    res = client.get("/api/trades", headers=headers)
     assert res.status_code == 200
     data = res.json()
     assert "count" in data
@@ -161,11 +172,11 @@ def test_get_trades(client: TestClient) -> None:
     assert isinstance(data["trades"], list)
 
     # limit=0 is rejected by ge=1
-    res_zero = client.get("/api/trades?limit=0")
+    res_zero = client.get("/api/trades?limit=0", headers=headers)
     assert res_zero.status_code == 422
 
     # valid limit
-    res_valid = client.get("/api/trades?limit=50")
+    res_valid = client.get("/api/trades?limit=50", headers=headers)
     assert res_valid.status_code == 200
 
 

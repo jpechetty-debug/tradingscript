@@ -81,7 +81,9 @@ export default function App() {
 
   const fetchTrades = useCallback(async () => {
     try {
-      const res = await fetch('/api/trades?limit=100');
+      const keyToSend = apiKey || (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? 'sovereign-dev-secret-key' : '');
+      const headers = keyToSend ? { 'X-API-Key': keyToSend } : {};
+      const res = await fetch('/api/trades?limit=100', { headers });
       if (res.ok) {
         const data = await res.json();
         setTradesData(data);
@@ -89,7 +91,7 @@ export default function App() {
     } catch (e) {
       console.warn('Trades poll error:', e);
     }
-  }, []);
+  }, [apiKey]);
 
   // Polling guard against overlapping requests
   const isFetchingRef = useRef(false);

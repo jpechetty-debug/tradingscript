@@ -29,7 +29,7 @@ from typing import Any, Optional, Protocol
 import pandas as pd
 import yfinance as yf
 
-from .config import IST, SystemConfig
+from .config import IST, SystemConfig, get_secret_value
 from .runtime_paths import RUNTIME_PATHS, ensure_runtime_dirs
 from .retry import retry_with_backoff, YFINANCE_BREAKER, guarded_call
 
@@ -116,7 +116,7 @@ class FyersSessionManager:
             # Token came from the shell environment — we cannot check age.
             return False
         env_token = cls._env_token(env_path)
-        if not env_token or env_token != str(config.FYERS_ACCESS_TOKEN):
+        if not env_token or env_token != get_secret_value(config.FYERS_ACCESS_TOKEN):
             return False
         try:
             mtime = env_path.stat().st_mtime
@@ -165,8 +165,8 @@ class FyersSessionManager:
             from fyers_apiv3 import fyersModel
 
             cls._instance = fyersModel.FyersModel(
-                client_id=config.FYERS_CLIENT_ID,
-                token=config.FYERS_ACCESS_TOKEN,
+                client_id=get_secret_value(config.FYERS_CLIENT_ID),
+                token=get_secret_value(config.FYERS_ACCESS_TOKEN),
                 log_path=str(RUNTIME_PATHS.logs_dir),
             )
             log.info("Fyers client initialised (client_id=%s).", config.FYERS_CLIENT_ID)
@@ -239,8 +239,8 @@ def fetch_single_ticker(
         "symbol":      fsym,
         "resolution":  FYERS_RESOLUTION,
         "date_format": FYERS_DATE_FORMAT,
-        "range_from":  (datetime.now() - timedelta(days=FYERS_LOOKBACK_DAYS)).strftime("%Y-%m-%d"),
-        "range_to":    datetime.now().strftime("%Y-%m-%d"),
+        "range_from":  (datetime.now(IST) - timedelta(days=FYERS_LOOKBACK_DAYS)).strftime("%Y-%m-%d"),
+        "range_to":    datetime.now(IST).strftime("%Y-%m-%d"),
         "cont_flag":   FYERS_CONT_FLAG,
     }
 

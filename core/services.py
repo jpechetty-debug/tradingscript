@@ -20,6 +20,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+import html
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol, TYPE_CHECKING, Iterator
 
@@ -30,7 +31,7 @@ import pandas as pd
 
 from .backtest import OverallStats, WalkForwardResult, walk_forward
 from .cache import ScanCache
-from .config import CONFIG, IST, MarketRegimeType, SystemConfig
+from .config import CONFIG, IST, MarketRegimeType, SystemConfig, get_secret_value
 from .database import SqliteDatabase
 from .data_provider import fetch_daily_batch
 from .factors import DEFAULT_WEIGHTS, calibrate_ic_weights
@@ -416,16 +417,24 @@ class AlertService:
             )
             return
 
+        version_esc = html.escape(str(self._version))
+        regime_esc = html.escape(str(regime.label))
         lines = [
-            f"<b>Sovereign v{self._version}</b> | {regime.label} | {datetime.now(IST).strftime('%H:%M IST')}"
+            f"<b>Sovereign v{version_esc}</b> | {regime_esc} | {datetime.now(IST).strftime('%H:%M IST')}"
         ]
         for result in top[: config.TELEGRAM_ALERT_TOP_N]:
+            ticker_esc = html.escape(str(result.ticker))
+            direction_esc = html.escape(str(result.direction))
             lines.append(
-                f"<b>{result.ticker}</b> {result.direction} | P={result.prob_win:.0%} | "
+                f"<b>{ticker_esc}</b> {direction_esc} | P={result.prob_win:.0%} | "
                 f"E(R)={result.expectancy_r:.2f} | Entry {result.entry} | SL {result.stop} | "
                 f"T1 {result.t1} | {result.shares} shares"
             )
-        self._messenger("\n".join(lines), str(config.TELEGRAM_BOT_TOKEN), config.TELEGRAM_CHAT_ID)
+        self._messenger(
+            "\n".join(lines),
+            get_secret_value(config.TELEGRAM_BOT_TOKEN),
+            config.TELEGRAM_CHAT_ID,
+        )
         for result in top:
             self._last_alerted[f"{result.ticker}:{getattr(result, 'trade_horizon', 'SWING')}"] = now
 
@@ -1252,7 +1261,7 @@ class ScanService:
                 config=config,
                 regime_label=regime_label,
             )
-            state.factor_weights = new_weights
+            state.factor_weights = self._validated_factor_weights(new_weights)
             state.weights_calibrated = True
             log.info("IC weights optimized: %s", {key: round(value, 4) for key, value in new_weights.items()})
         except Exception as exc:

@@ -545,6 +545,19 @@ def score_candidate_pass1(
                 rsi_val = float(row.get("RSI", 50))
                 if regime.allows_mean_reversion() and rsi_val <= 55:
                     pass
+                # In TREND_DOWN, allow exceptional LONG for strong RS leaders
+                # with full EMA alignment — sector rotation bucking the tape
+                elif (regime.regime == MarketRegimeType.TREND_DOWN
+                      and regime.confirmed
+                      and not is_open_position):
+                    ema50 = float(row.get("EMA_50", 0.0) or 0.0)
+                    ema_stack = (close > ema20 > ema50 > ema200) if ema50 > 0 else (close > ema20 > ema200)
+                    if ema_stack and rsi_val <= 72:
+                        pass  # allow through — RS gate applied later in factors
+                    else:
+                        if debug:
+                            log.debug("%s: regime blocks LONG (%s) — no RS leadership", ticker, regime.regime)
+                        return None
                 else:
                     if is_open_position:
                         log.info("%s: Held position exited via regime structural veto (%s blocks LONG)", ticker, regime.regime)
@@ -690,6 +703,9 @@ def score_candidate_pass2(
     sess_mult = _SESSION_MULT.get(session, 1.0)
     if regime.regime == MarketRegimeType.RANGE:
         sess_mult *= 0.88
+    # Counter-trend penalty: longs in TREND_DOWN must overcome higher bar
+    if direction == "LONG" and regime.regime == MarketRegimeType.TREND_DOWN:
+        sess_mult *= 0.90
     adj_composite = float(np.clip(factors.composite * sess_mult, 0.0, 1.0))
 
     # ── 7. Platt probability ─────────────────────────────────────────────────
@@ -707,7 +723,8 @@ def score_candidate_pass2(
             bins=config.VPROFILE_BINS,
         )
 
-    targets = compute_targets(direction, close, atr, config, trade_horizon=trade_horizon)
+    targets = compute_targets(direction, close, atr, config, trade_horizon=trade_horizon,
+                              atr_pctile=float(row.get("ATR_Pctile", 50) or 50))
 
     # Use value-area T1 if RR qualifies (only for SWING trades; INTRADAY preserves tight ATR targets)
     if config.USE_VALUE_AREA_RR and trade_horizon != "INTRADAY":
@@ -835,6 +852,10 @@ def score_candidate_pass2(
         reasons.append("MTF✅")
     if regime.allows_mean_reversion():
         reasons.append("MeanRev✅")
+    if direction == "LONG" and regime.regime == MarketRegimeType.TREND_DOWN:
+        reasons.append("CounterTrend⚡")
+        if factors.rs > 0.7:
+            reasons.append("RSLeader🏆")
     if is_watchlist:
         reasons.append("Watchlist")
     if is_open_position:

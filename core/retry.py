@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 import time
 from enum import Enum, auto
 from typing import Any, Callable, Optional, Type
@@ -157,13 +158,15 @@ class CircuitBreaker:
         self._state:      BreakerState    = BreakerState.CLOSED
         self._failures:   int             = 0
         self._opened_at:  Optional[float] = None
+        self._lock:       threading.RLock = threading.RLock()
 
     # ── Public interface ──────────────────────────────────────────────────────
 
     @property
     def state(self) -> BreakerState:
-        self._maybe_transition_half_open()
-        return self._state
+        with self._lock:
+            self._maybe_transition_half_open()
+            return self._state
 
     def call(self, fn: Callable[[], Any]) -> Any:
         """
@@ -176,12 +179,13 @@ class CircuitBreaker:
         Any exception from *fn*
             Recorded as a failure and re-raised.
         """
-        current = self.state   # may transition OPEN → HALF-OPEN
+        with self._lock:
+            current = self.state   # may transition OPEN → HALF-OPEN
 
-        if current == BreakerState.OPEN:
-            raise CircuitBreakerOpen(
-                f"Circuit breaker '{self.name}' is OPEN — calls blocked"
-            )
+            if current == BreakerState.OPEN:
+                raise CircuitBreakerOpen(
+                    f"Circuit breaker '{self.name}' is OPEN — calls blocked"
+                )
 
         try:
             result = fn()
@@ -201,60 +205,66 @@ class CircuitBreaker:
 
     def reset(self) -> None:
         """Force-reset to CLOSED (useful in tests or after maintenance)."""
-        self._state    = BreakerState.CLOSED
-        self._failures = 0
-        self._opened_at = None
+        with self._lock:
+            self._state    = BreakerState.CLOSED
+            self._failures = 0
+            self._opened_at = None
         log.info("CircuitBreaker '%s' manually reset to CLOSED.", self.name)
 
     # ── Internal state transitions ────────────────────────────────────────────
 
     def _on_success(self) -> None:
-        if self._state == BreakerState.HALF_OPEN:
-            log.info(
-                "CircuitBreaker '%s': probe succeeded — returning to CLOSED.", self.name
-            )
-        self._state    = BreakerState.CLOSED
-        self._failures = 0
-        self._opened_at = None
+        with self._lock:
+            if self._state == BreakerState.HALF_OPEN:
+                log.info(
+                    "CircuitBreaker '%s': probe succeeded — returning to CLOSED.", self.name
+                )
+            self._state    = BreakerState.CLOSED
+            self._failures = 0
+            self._opened_at = None
 
     def _on_failure(self) -> None:
-        self._failures += 1
-        if self._state == BreakerState.HALF_OPEN:
-            log.warning(
-                "CircuitBreaker '%s': probe failed — re-opening.", self.name
-            )
-            self._trip()
-            return
+        with self._lock:
+            self._failures += 1
+            if self._state == BreakerState.HALF_OPEN:
+                log.warning(
+                    "CircuitBreaker '%s': probe failed — re-opening.", self.name
+                )
+                self._trip()
+                return
 
-        if self._failures >= self.failure_threshold:
-            log.error(
-                "CircuitBreaker '%s': %d consecutive failures — OPENING (timeout=%.0fs).",
-                self.name, self._failures, self.reset_timeout,
-            )
-            self._trip()
+            if self._failures >= self.failure_threshold:
+                log.error(
+                    "CircuitBreaker '%s': %d consecutive failures — OPENING (timeout=%.0fs).",
+                    self.name, self._failures, self.reset_timeout,
+                )
+                self._trip()
 
     def _trip(self) -> None:
-        self._state     = BreakerState.OPEN
-        self._opened_at = time.monotonic()
+        with self._lock:
+            self._state     = BreakerState.OPEN
+            self._opened_at = time.monotonic()
 
     def _maybe_transition_half_open(self) -> None:
-        if (
-            self._state == BreakerState.OPEN
-            and self._opened_at is not None
-            and (time.monotonic() - self._opened_at) >= self.reset_timeout
-        ):
-            log.info(
-                "CircuitBreaker '%s': reset timeout elapsed — entering HALF-OPEN.", self.name
-            )
-            self._state = BreakerState.HALF_OPEN
+        with self._lock:
+            if (
+                self._state == BreakerState.OPEN
+                and self._opened_at is not None
+                and (time.monotonic() - self._opened_at) >= self.reset_timeout
+            ):
+                log.info(
+                    "CircuitBreaker '%s': reset timeout elapsed — entering HALF-OPEN.", self.name
+                )
+                self._state = BreakerState.HALF_OPEN
 
     # ── String representation ─────────────────────────────────────────────────
 
     def __repr__(self) -> str:
-        return (
-            f"CircuitBreaker(name={self.name!r}, state={self._state.name}, "
-            f"failures={self._failures}, threshold={self.failure_threshold})"
-        )
+        with self._lock:
+            return (
+                f"CircuitBreaker(name={self.name!r}, state={self._state.name}, "
+                f"failures={self._failures}, threshold={self.failure_threshold})"
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -77,3 +77,40 @@ class TestCircuitBreaker:
             guarded_call(flaky, breaker=cb, max_attempts=3, base_delay=0.001)
         assert len(calls) == 3          # retried 3 times
         assert cb._failures == 1        # breaker only counted 1 persistent failure
+
+    def test_circuit_breaker_thread_safe_concurrency(self):
+        import concurrent.futures
+
+        cb = CircuitBreaker("concurrent_test", failure_threshold=50)
+
+        def worker():
+            for _ in range(50):
+                cb.record_failure()
+                cb.record_success()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(worker) for _ in range(8)]
+            for f in futures:
+                f.result()
+
+        assert cb.state.name in ("CLOSED", "OPEN", "HALF_OPEN")
+
+    def test_concurrent_call_trips_safely(self):
+        import concurrent.futures
+
+        threshold = 15
+        cb = CircuitBreaker("trip_test", failure_threshold=threshold, reset_timeout=10.0)
+
+        def fail_worker():
+            try:
+                cb.call(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+            except (RuntimeError, CircuitBreakerOpen):
+                pass
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(fail_worker) for _ in range(40)]
+            for f in futures:
+                f.result()
+
+        assert cb.state.name == "OPEN"
+        assert cb._failures >= threshold

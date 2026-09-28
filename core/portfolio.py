@@ -164,6 +164,7 @@ def compute_targets(
     atr: float,
     config: SystemConfig,
     trade_horizon: str = "SWING",
+    atr_pctile: float = 50.0,
 ) -> TradeTargets:
     """
     ATR-based stop, T1, T2 and reward:risk ratio.
@@ -173,6 +174,11 @@ def compute_targets(
                 for realistic R:R within a single 6-hour session.
     - SWING:    Wider stops (1.50x ATR) and multi-day targets (3.80x/6.00x)
                 for holding through volatility over several days.
+
+    ATR-percentile scaling (v14.3):
+    - Low ATR pctile (coiled) → widen T1 by up to +20% (expect expansion)
+    - High ATR pctile (extended) → tighten T1 by up to -15% (expect mean-reversion)
+    This differentiates RR across candidates instead of a uniform ratio.
 
     Value-area override (USE_VALUE_AREA_RR) is handled in scorer.py
     after the volume profile is computed.
@@ -185,6 +191,16 @@ def compute_targets(
         stop_mult   = config.STOP_ATR_MULT     # 1.50
         t1_mult     = config.TARGET1_ATR_MULT  # 3.80
         t2_mult     = config.TARGET2_ATR_MULT  # 6.00
+
+    # ATR-percentile scaling: coiled stocks get wider targets, extended get tighter
+    # Scale factor ranges from +20% (pctile=0) to -15% (pctile=100), centered at 1.0 for median (pctile=50)
+    if atr_pctile < 50.0:
+        atr_scale = 1.0 + 0.20 * ((50.0 - atr_pctile) / 50.0)
+    elif atr_pctile > 50.0:
+        atr_scale = 1.0 - 0.15 * ((atr_pctile - 50.0) / 50.0)
+    else:
+        atr_scale = 1.0
+    t1_mult = t1_mult * atr_scale
 
     sl_dist = stop_mult * atr
 

@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 import core.services as services
-from core.config import CONFIG, MarketRegimeType
+from core.config import CONFIG, MarketRegimeType, SecretStr
 from core.regime import MarketRegime, RegimeTracker
 from core.runtime_paths import RuntimePaths
 from core.scorer import TickerResult
@@ -142,6 +142,54 @@ def test_alert_service_filters_by_threshold_and_uses_messenger():
     assert "BBB" not in message
     assert token == "token"
     assert chat_id == "chat"
+
+
+def test_alert_service_escapes_html_and_unwraps_secret_str():
+    sent: list[tuple[str, str, str]] = []
+
+    def messenger(message: str, token: str, chat_id: str) -> bool:
+        sent.append((message, token, chat_id))
+        return True
+
+    service = AlertService(version="1.0<beta>", messenger=messenger)
+    config = replace(
+        CONFIG,
+        TELEGRAM_BOT_TOKEN=SecretStr("bot-token-xyz"),
+        TELEGRAM_CHAT_ID="chat-123",
+        TELEGRAM_ALERT_MIN_PROB=0.6,
+        TELEGRAM_ALERT_TOP_N=5,
+    )
+    regime = MarketRegime(
+        regime=MarketRegimeType.TREND_UP,
+        breadth=0.7,
+        adx_median=25.0,
+        atr_ratio=1.0,
+        confidence=0.8,
+        confirmed=True,
+    )
+    portfolio = [
+        SimpleNamespace(
+            ticker="TICKER&CO<TEST>",
+            direction="LONG>",
+            prob_win=0.75,
+            expectancy_r=1.5,
+            entry=100.0,
+            stop=95.0,
+            t1=110.0,
+            shares=10,
+        ),
+    ]
+
+    service.send_portfolio_summary(portfolio, regime, config)
+
+    assert len(sent) == 1
+    message, token, chat_id = sent[0]
+    assert "1.0&lt;beta&gt;" in message
+    assert "TICKER&amp;CO&lt;TEST&gt;" in message
+    assert "LONG&gt;" in message
+    assert "<TEST>" not in message
+    assert token == "bot-token-xyz"
+    assert chat_id == "chat-123"
 
 
 def test_alert_service_uses_injected_alerter():
