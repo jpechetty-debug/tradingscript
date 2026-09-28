@@ -55,6 +55,29 @@ def test_server_startup_fails_without_api_key(monkeypatch: pytest.MonkeyPatch) -
             asyncio.run(run_startup())
 
 
+def test_server_startup_fails_with_template_placeholder_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("API_KEY", "your_secure_api_key_here")
+    with patch.object(server, "API_KEY", "your_secure_api_key_here"):
+        with pytest.raises(RuntimeError, match="unedited template placeholder"):
+            import asyncio
+            async def run_startup():
+                async with server.lifespan(server.app):
+                    pass
+            asyncio.run(run_startup())
+
+
+def test_server_startup_fails_with_insecure_key_on_public_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("API_KEY", "sovereign-dev-secret-key")
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    with patch.object(server, "API_KEY", "sovereign-dev-secret-key"):
+        with pytest.raises(RuntimeError, match="insecure default placeholder"):
+            import asyncio
+            async def run_startup():
+                async with server.lifespan(server.app):
+                    pass
+            asyncio.run(run_startup())
+
+
 def test_read_root(client: TestClient) -> None:
     res = client.get("/")
     assert res.status_code == 200

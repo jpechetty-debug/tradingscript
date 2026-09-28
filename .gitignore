@@ -50,3 +50,9 @@ graphify-out/
 # Frontend / Node
 /frontend/node_modules/
 /frontend/dist/
+
+# Scratch and local dev artifacts
+scratch_universe.py
+tools/scratch/
+.codegraph/
+

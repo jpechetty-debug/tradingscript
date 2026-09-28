@@ -2,7 +2,7 @@
 
 [![Security Scan](https://img.shields.io/badge/Security-Verified-success?style=flat-square)](#)
 [![Lint Compliance](https://img.shields.io/badge/Lint-Ruff%20%7C%20Mypy%20Strict-blue?style=flat-square)](#)
-[![Test Suite](https://img.shields.io/badge/Tests-628%20Passed-brightgreen?style=flat-square)](#)
+[![Test Suite](https://img.shields.io/badge/Tests-647%20Passed-brightgreen?style=flat-square)](#)
 [![Version](https://img.shields.io/badge/Version-14.6--Modular-indigo?style=flat-square)](#)
 
 **Institutional-Grade Quantitative Trading Intelligence & Portfolio Optimization for NSE India.**
@@ -122,9 +122,11 @@ Positions are sized via NAV-aware, kurtosis-corrected fractional Kelly criterion
 - **Dynamic Allocation**: $\text{Risk (INR)} = \text{Target Risk} \times f^* \times \text{kurt\_corr} \times \text{capital\_fraction}$
 
 ### Out-of-Sample Platt Probability Calibration
-Composite factor scores are mapped to true empirical win probabilities using a logistic sigmoid (Option B convention):
+Composite factor scores are mapped to win probabilities using a logistic sigmoid (Option B convention):
 $$P(\text{win}) = \frac{1}{1 + \exp(-(A \cdot \text{score} + B))}$$
-Parameters $A$ and $B$ are calibrated via MLE on an **out-of-sample validation window** (`IC_CALIB_OFFSET = 60`), preventing in-sample overfitting and overconfident sizing.
+
+- **Cold-Start Heuristic ($N < 80$ trades)**: Engine defaults to $A=-4.0, B=2.0$ ($\text{sigmoid}(4 \cdot \text{score} - 2)$), where $P \ge 0.52$ gates scores $\ge 0.505$.
+- **Empirical Calibration ($N \ge 80$ trades)**: Once $\ge 80$ trade records accumulate in SQLite (`state/state.db`), maximum-likelihood estimation (MLE) fits parameters $A$ and $B$ on an out-of-sample validation slice (`IC_CALIB_OFFSET = 60`). The calibrated coefficients are saved to `state/platt_calibration.json` and loaded by both live scans and `walk_forward` backtests.
 
 ### Realistic Transaction Cost Friction
 The **TransactionCostModel** (`core/backtest.py`) incorporates real-world execution drag into all backtests:
@@ -135,23 +137,27 @@ Net realized return $R_{\text{net}}$ accounts for total round-trip friction, pre
 
 ---
 
-## 📊 Empirical Walk-Forward Backtest Results
+## 📊 Walk-Forward Verification Smoke Test (Sample Validation)
 
-Walk-forward backtest evaluated across the 504 NSE cash equity universe across 6 rolling out-of-sample folds:
+Walk-forward backtest executed across the 504 NSE cash equity universe across rolling out-of-sample folds to verify pipeline integration, execution friction, and order simulation:
 
 | Metric | Pre-Overhaul Baseline | Overhauled Engine (Phases 1–5) | Statistical Note ($n=10$) |
 | :--- | :--- | :--- | :--- |
-| **Total Out-of-Sample Trades** | 10 | 10 | Selective high-conviction signals |
-| **Hit Rate** | 0.0% | **10.0%** | 95% Wilson CI: [1.8%, 40.4%] |
+| **Out-of-Sample Trades** | 10 | 10 | Sample fold validation run |
+| **Hit Rate (Target 1 Reached)** | 0.0% | **10.0%** | Reached T1 prior to time-stop or SL |
+| **Win Rate (Net $R > 0$)** | 10.0% | **30.0%** | Includes profitable time-stop exits |
 | **Mean Net Realized R** | -0.595 R | **+0.064 R** | 95% t-CI: [-0.45 R, +0.58 R] |
 | **Total Realized Return** | -5.95 R | **+0.64 R** | Friction-adjusted net positive |
-| **Sharpe Ratio (Annualized)** | -17.65 | **+0.91** | Positive risk-adjusted return |
-| **Profit Factor** | 0.07 | **1.16** | > 1.0 hurdle cleared |
-| **Max Drawdown** | -5.95 R | **-1.87 R** | -68.6% drawdown reduction |
+| **Trade-Series Sharpe** | -17.65 | **+0.91** | Discrete trade R return dispersion |
+| **Profit Factor** | 0.07 | **1.16** | Sum of gains / sum of losses |
+| **Max Drawdown** | -5.95 R | **-1.87 R** | Net drawdown over sample fold |
 | **Edge Churn Protection** | None (whipsaws) | **Hysteresis Protected ($P \ge 0.47$)** | Eliminates marginal noise exits |
 
-> **Methodological Note on Small-Sample Confidence Intervals ($n=10$)**:
-> With 10 out-of-sample trades in this verification fold window, the estimated mean return of $+0.064\text{ R}$ reflects proper friction-inclusive execution and asymmetric hysteresis benefits, but exhibits a wide 95% confidence interval ($[-0.45\text{ R}, +0.58\text{ R}]$). In institutional deployment, Platt calibration dynamically transitions from default coefficients to MLE once $\ge 80$ verified executed trades accumulate (`fetch_calibration_trades(min_samples=80)`).
+> ⚠️ **Smoke Test Disclaimer & Statistical Power ($n=10$)**:
+> This table represents a mechanical smoke test verifying that time-stop exits, stop orders, slippage (8 bps), and commissions (₹20) execute as designed. **It is not an institutional statistical proof of trading edge.** With $n=10$, statistical power is limited (mean net $R = +0.064$, $95\%$ CI: $[-0.45\text{ R}, +0.58\text{ R}]$). Hit rate strictly tracks Target 1 hits; profitable time-stop exits contribute to realized return and Profit Factor without triggering Target 1. Full empirical edge validation requires larger longitudinal backtest datasets ($\ge 100+$ trades).
+>
+> ⚠️ **Survivorship Bias Disclosure**:
+> Historical walk-forward tests evaluate historical bars for current `ALL_TICKERS` constituents. Companies that were delisted, merged, or removed from the index during historical periods are not captured, introducing survivorship bias. Institutional deployment requires point-in-time index constituent history.
 
 ---
 
@@ -208,7 +214,7 @@ All parameters can be set in `.env` or passed via system environment variables:
 The codebase enforces strict institutional validation standards:
 
 ```bash
-# Run the complete test suite (628 unit & integration tests)
+# Run the complete test suite (647 unit & integration tests)
 python -m pytest tests/ -v
 
 # Run strict code quality & lint verification
@@ -219,7 +225,7 @@ python -m mypy core/ run.py screener_v14_modular.py server.py scripts/ tools/ ut
 ```
 
 - **Static Analysis**: 100% compliant with Ruff and Mypy strict typing.
-- **Regression Safety**: 628/628 tests passing with zero failures.
+- **Regression Safety**: 647/647 tests passing with zero failures.
 
 ---
 

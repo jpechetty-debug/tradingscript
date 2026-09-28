@@ -39,7 +39,7 @@ Key public API
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 import numpy as np
@@ -276,20 +276,13 @@ def _realised_r(
     (net_r, hit_t1, bars_held, exit_date, gross_r, friction_r_applied)
     """
     sl_dist = abs(entry - stop)
-    if sl_dist <= 0:
+    if sl_dist <= 0 or time_stop <= 0:
         return 0.0, False, 0, None, 0.0, 0.0
 
     rr      = abs(t1 - entry) / sl_dist
     friction = cost_model.friction_r(entry, sl_dist, shares=shares)
 
     for i, (ts, bar) in enumerate(fwd_bars.iterrows()):
-        if i >= time_stop:
-            close   = float(bar["Close"])
-            gross_r = (close - entry) / sl_dist if direction == "LONG" else (entry - close) / sl_dist
-            gross_r = round(gross_r, 4)
-            net_r   = round(gross_r - friction, 4)
-            return net_r, False, i + 1, ts, gross_r, round(friction, 5)
-
         open_p = float(bar["Open"])
         high = float(bar["High"])
         low  = float(bar["Low"])
@@ -320,6 +313,15 @@ def _realised_r(
             if low <= t1:
                 gross_r = round(rr, 4)
                 return round(gross_r - friction, 4), True, i + 1, ts, gross_r, round(friction, 5)
+
+        # Time-stop exit: if trade has completed maximum holding period (i + 1 >= time_stop),
+        # exit at the close of this bar (provided neither stop nor target was triggered above)
+        if (i + 1) >= time_stop:
+            close   = float(bar["Close"])
+            gross_r = (close - entry) / sl_dist if direction == "LONG" else (entry - close) / sl_dist
+            gross_r = round(gross_r, 4)
+            net_r   = round(gross_r - friction, 4)
+            return net_r, False, i + 1, ts, gross_r, round(friction, 5)
 
     # Ran out of bars: exit at last close
     if len(fwd_bars) == 0:
@@ -623,6 +625,19 @@ def walk_forward(
     min_prob  = min_prob if min_prob is not None else config.BACKTEST_MIN_PROB
     if cost_model is DEFAULT_COST_MODEL and horizon_filter.upper() == "SWING":
         cost_model = SWING_COST_MODEL
+
+    # If config still has default PLATT_A / PLATT_B, check if persisted calibration exists
+    if config.PLATT_A == -4.0 and config.PLATT_B == 2.0:
+        try:
+            from .services import PersistenceService
+            _pers = PersistenceService()
+            _pa, _pb, _found = _pers.load_platt(config)
+            if _found:
+                config = replace(config, PLATT_A=_pa, PLATT_B=_pb)
+                log.info("walk_forward using persisted Platt parameters: A=%.4f B=%.4f", _pa, _pb)
+        except Exception:
+            pass
+
     all_trades: list[TradeRecord] = []
     all_folds:  list[FoldStats]   = []
 

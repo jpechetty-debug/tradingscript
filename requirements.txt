@@ -1,4 +1,4 @@
-# Sovereign Engine v13.0 — Pinned Dependencies
+# Sovereign Engine v14.6 — Pinned Dependencies
 # Generated for Python 3.10+
 # Install: pip install -r requirements.txt
  

@@ -199,7 +199,7 @@ export default function App() {
         },
       });
       if (res.status === 401) {
-        showToast('Unauthorized: Invalid X-API-Key (configured as sovereign-dev-secret-key in .env).');
+        showToast('Unauthorized: Invalid X-API-Key. Please verify the API_KEY set in your .env or modal.');
         return;
       }
       if (res.status === 403) {

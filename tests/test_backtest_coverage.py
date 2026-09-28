@@ -294,3 +294,53 @@ def test_walk_forward_simulates_trades_with_adjusted_step_days(monkeypatch) -> N
     assert result.trades[0].entry > 0
     assert result.trades[0].r_multiple != 0.0
     assert result.overall.n_trades > 0
+
+
+def test_realised_r_time_stop_respects_intraday_stop_and_bar_count() -> None:
+    """
+    Regression test: verify that when time_stop=3:
+    1. On the 3rd bar, if low breaches stop (e.g. low=90 vs stop=95), trade exits at -1.0R (not close).
+    2. If 3rd bar does not breach stop/target, trade exits at close on bar 3 (held exactly 3 bars).
+    3. time_stop=0 exits with 0 bars.
+    """
+    idx = pd.date_range("2026-01-01", periods=5, freq="B")
+
+    # Case 1: Stop breach on 3rd bar (low=90 vs stop=95, close=101)
+    df_breach = pd.DataFrame({
+        "Open":  [100.0, 100.0, 100.0],
+        "High":  [101.0, 101.0, 102.0],
+        "Low":   [ 98.0,  97.0,  90.0],  # Breaches stop=95 on bar 3
+        "Close": [100.0, 100.0, 101.0],  # Close is positive
+    }, index=idx[:3])
+
+    net_r, hit_t1, bars, exit_ts, gross_r, fric = _realised_r(
+        direction="LONG", entry=100.0, stop=95.0, t1=110.0,
+        fwd_bars=df_breach, time_stop=3, cost_model=ZERO_COST_MODEL
+    )
+    assert not hit_t1
+    assert gross_r == -1.0  # Stop hit takes precedence over close
+    assert bars == 3
+
+    # Case 2: Clean time-stop exit on 3rd bar (held exactly 3 bars)
+    df_clean = pd.DataFrame({
+        "Open":  [100.0, 100.0, 100.0],
+        "High":  [101.0, 101.0, 102.0],
+        "Low":   [ 98.0,  97.0,  96.0],  # Never breaches stop=95
+        "Close": [100.0, 100.0, 101.0],  # Exits at close on bar 3
+    }, index=idx[:3])
+
+    net_r, hit_t1, bars, exit_ts, gross_r, fric = _realised_r(
+        direction="LONG", entry=100.0, stop=95.0, t1=110.0,
+        fwd_bars=df_clean, time_stop=3, cost_model=ZERO_COST_MODEL
+    )
+    assert not hit_t1
+    assert gross_r == 0.2  # (101 - 100) / 5 = 0.2
+    assert bars == 3       # Exactly 3 bars held
+
+    # Case 3: time_stop=0
+    net_r, hit_t1, bars, exit_ts, gross_r, fric = _realised_r(
+        direction="LONG", entry=100.0, stop=95.0, t1=110.0,
+        fwd_bars=df_clean, time_stop=0, cost_model=ZERO_COST_MODEL
+    )
+    assert bars == 0
+    assert gross_r == 0.0

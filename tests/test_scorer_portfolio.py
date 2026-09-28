@@ -424,6 +424,17 @@ class TestCalculateKellySize:
         )
         assert shares == 0
 
+    def test_expensive_stock_exceeding_max_risk_returns_zero_shares(self):
+        df = _make_ohlcv()
+        cfg = self._cfg()  # max risk = 10_000 * 3.0 = 30_000
+        # Stock with risk-per-share of 50,000 (entry 150_000, stop 100_000) > max_risk 30,000
+        shares, risk, *_ = calculate_kelly_size(
+            entry=150_000.0, stop=100_000.0, prob_win=0.60,
+            rr=2.5, daily_df=df, config=cfg,
+        )
+        assert shares == 0
+        assert risk == 0.0
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # portfolio.py — optimize_portfolio

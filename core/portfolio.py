@@ -325,10 +325,16 @@ def calculate_kelly_size(
     if np.isnan(risk_inr) or np.isnan(rps) or rps <= 0:
         return config.KELLY_MIN_SHARES, 0.0, 0.0, 1.0
 
-    shares = (
-        max(config.KELLY_MIN_SHARES, int(risk_inr / rps))
-        if capital_fraction > 0 else 0
-    )
+    max_risk = config.RISK_PER_TRADE_INR * config.KELLY_MAX_MULT * capital_fraction
+    if capital_fraction <= 0:
+        shares = 0
+    else:
+        raw_shares = int(risk_inr / rps)
+        if raw_shares <= 0 and rps > max_risk:
+            shares = 0
+        else:
+            shares = max(config.KELLY_MIN_SHARES, raw_shares)
+
     return shares, round(shares * rps, 2), round(f, 5), round(kurt_corr, 4)
 
 

@@ -47,6 +47,16 @@ load_dotenv()
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
+INSECURE_PLACEHOLDER_KEYS = frozenset({
+    "your_secure_api_key_here",
+    "your_api_key_here",
+    "sovereign-dev-secret-key",
+    "change-me",
+    "secret",
+    "password",
+    "123456",
+})
+
 API_KEY = os.environ.get("API_KEY")
 
 def verify_api_key(api_key: str = Security(api_key_header)) -> None:
@@ -72,6 +82,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError(
             "CRITICAL SECURITY CONFIGURATION ERROR: 'API_KEY' environment variable must be set. "
             "Please configure API_KEY in your .env or environment variables."
+        )
+
+    key_clean = current_key.lower().strip()
+    if key_clean == "your_secure_api_key_here":
+        raise RuntimeError(
+            "CRITICAL SECURITY CONFIGURATION ERROR: 'API_KEY' is set to the unedited template placeholder "
+            "('your_secure_api_key_here') from .env.example. Generate a unique, secure API_KEY in .env."
+        )
+
+    host = os.environ.get("HOST", "127.0.0.1").lower().strip()
+    if host not in ("127.0.0.1", "localhost") and key_clean in INSECURE_PLACEHOLDER_KEYS:
+        raise RuntimeError(
+            f"CRITICAL SECURITY CONFIGURATION ERROR: 'API_KEY' is set to an insecure default placeholder "
+            f"({current_key!r}) while bound to non-loopback host {host!r}. Server startup refused."
+        )
+
+    if key_clean in INSECURE_PLACEHOLDER_KEYS:
+        log.warning(
+            "SECURITY WARNING: 'API_KEY' is using a development placeholder (%r). "
+            "Permitted on loopback only. Set a strong key before exposing to any network.",
+            current_key,
         )
     # Re-hydrate state from disk and sync persistent killswitch flag
     STATE.load_persisted_state(PERSISTENCE)
