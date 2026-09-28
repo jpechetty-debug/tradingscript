@@ -272,12 +272,22 @@ class TestComputeTargets:
         assert t.rr == pytest.approx(expected_rr, abs=0.01)
 
     def test_atr_pctile_differentiation(self):
-        # Coiled setup (low atr_pctile) should get higher T1 and higher RR
-        t_coiled = compute_targets("LONG", close=500.0, atr=10.0, config=self._cfg(), atr_pctile=10.0)
-        # Extended setup (high atr_pctile) should get lower T1 and lower RR
-        t_extended = compute_targets("LONG", close=500.0, atr=10.0, config=self._cfg(), atr_pctile=90.0)
+        cfg = self._cfg()
+        cfg.ENABLE_ATR_PCTILE_TARGETS = True
+        # Coiled setup (low atr_pctile) should get higher T1 and higher RR when enabled
+        t_coiled = compute_targets("LONG", close=500.0, atr=10.0, config=cfg, atr_pctile=10.0)
+        # Extended setup (high atr_pctile) should get lower T1 and lower RR when enabled
+        t_extended = compute_targets("LONG", close=500.0, atr=10.0, config=cfg, atr_pctile=90.0)
         assert t_coiled.t1 > t_extended.t1
         assert t_coiled.rr > t_extended.rr
+
+        # By default (ENABLE_ATR_PCTILE_TARGETS=False), targets remain strictly fixed to preserve Platt calibration
+        cfg_default = self._cfg()
+        assert not cfg_default.ENABLE_ATR_PCTILE_TARGETS
+        t_default_coiled = compute_targets("LONG", close=500.0, atr=10.0, config=cfg_default, atr_pctile=10.0)
+        t_default_extended = compute_targets("LONG", close=500.0, atr=10.0, config=cfg_default, atr_pctile=90.0)
+        assert t_default_coiled.t1 == t_default_extended.t1
+        assert t_default_coiled.rr == t_default_extended.rr
 
     def test_zero_atr_returns_zero_rr(self):
         t = compute_targets("LONG", close=500.0, atr=0.0, config=self._cfg())
@@ -939,3 +949,86 @@ class TestScoreTicker:
         result = self._call(df=df, cfg=cfg)
         # Just verify it doesn't crash and returns a result
         assert result is None or isinstance(result, TickerResult)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# scorer.py — TREND_DOWN Counter-Trend Long & RS Gate
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestTrendDownCounterTrendScoring:
+    """Test suite for counter-trend LONG evaluation in TREND_DOWN regime."""
+
+    def test_broken_ema_stack_vetoed_in_trend_down(self):
+        df = _make_ohlcv()
+        df["Super_Up"] = True
+        df["EMA_20"] = df["Close"] * 0.95
+        df["EMA_50"] = df["Close"] * 0.96  # EMA_20 < EMA_50 (broken stack)
+        df["EMA_200"] = df["Close"] * 0.80
+        df["RSI"] = 55.0
+        regime = _regime(rtype=MarketRegimeType.TREND_DOWN, confirmed=True)
+        bench = _bench(df)
+        cfg = _config(MIN_PROB_WIN=0.0, MIN_EXPECTANCY_R=-99.0)
+        res = score_ticker("RELIANCE.NS", df, bench, {"Energy": 1}, {"Energy": 2.5}, "OPENING_RANGE", regime, cfg, debug=True)
+        assert res is None
+
+    def test_high_rsi_vetoed_in_trend_down(self):
+        df = _make_ohlcv()
+        df["Super_Up"] = True
+        df["EMA_20"] = df["Close"] * 0.95
+        df["EMA_50"] = df["Close"] * 0.90
+        df["EMA_200"] = df["Close"] * 0.80
+        df["RSI"] = 75.0  # Overbought (> 72)
+        regime = _regime(rtype=MarketRegimeType.TREND_DOWN, confirmed=True)
+        bench = _bench(df)
+        cfg = _config(MIN_PROB_WIN=0.0, MIN_EXPECTANCY_R=-99.0)
+        res = score_ticker("RELIANCE.NS", df, bench, {"Energy": 1}, {"Energy": 2.5}, "OPENING_RANGE", regime, cfg, debug=True)
+        assert res is None
+
+    def test_low_rs_vetoed_in_trend_down(self, monkeypatch):
+        df = _make_ohlcv()
+        df["Super_Up"] = True
+        df["EMA_20"] = df["Close"] * 0.95
+        df["EMA_50"] = df["Close"] * 0.90
+        df["EMA_200"] = df["Close"] * 0.80
+        df["RSI"] = 55.0
+        regime = _regime(rtype=MarketRegimeType.TREND_DOWN, confirmed=True)
+        bench = _bench(df)
+        cfg = _config(MIN_PROB_WIN=0.0, MIN_EXPECTANCY_R=-99.0, MIN_COUNTER_TREND_RS=0.70)
+        from core import scorer
+        orig_compute_factors = scorer.compute_factors
+
+        import dataclasses
+
+        def mock_compute_factors(*args, **kwargs):
+            f = orig_compute_factors(*args, **kwargs)
+            return dataclasses.replace(f, rs=0.50)
+
+        monkeypatch.setattr(scorer, "compute_factors", mock_compute_factors)
+        res = score_ticker("RELIANCE.NS", df, bench, {"Energy": 1}, {"Energy": 2.5}, "OPENING_RANGE", regime, cfg, debug=True)
+        assert res is None
+
+    def test_strong_rs_leader_allowed_in_trend_down(self, monkeypatch):
+        df = _make_ohlcv()
+        df["Super_Up"] = True
+        df["EMA_20"] = df["Close"] * 0.95
+        df["EMA_50"] = df["Close"] * 0.90
+        df["EMA_200"] = df["Close"] * 0.80
+        df["RSI"] = 55.0
+        regime = _regime(rtype=MarketRegimeType.TREND_DOWN, confirmed=True)
+        bench = _bench(df)
+        cfg = _config(MIN_PROB_WIN=0.0, MIN_EXPECTANCY_R=-99.0, MIN_COUNTER_TREND_RS=0.70)
+        from core import scorer
+        import dataclasses
+        orig_compute_factors = scorer.compute_factors
+
+        def mock_compute_factors(*args, **kwargs):
+            f = orig_compute_factors(*args, **kwargs)
+            return dataclasses.replace(f, rs=0.85, composite=0.65)
+
+        monkeypatch.setattr(scorer, "compute_factors", mock_compute_factors)
+        res = score_ticker("RELIANCE.NS", df, bench, {"Energy": 1}, {"Energy": 2.5}, "OPENING_RANGE", regime, cfg, debug=True)
+        assert res is not None
+        assert res.direction == "LONG"
+        assert res.action == "BUY"
+        assert "CounterTrend⚡" in res.reasons
+        assert "RSLeader🏆" in res.reasons

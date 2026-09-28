@@ -398,6 +398,8 @@ class SystemConfig:
     SHORT_IS_INTRADAY_ONLY:    bool  = True
     INTRADAY_ENABLED:          bool  = False  # Disabled until real 1/5-min data pipeline
     MIN_FACTOR_WEIGHT:         float = 0.03   # Floor per factor to prevent starvation
+    MIN_COUNTER_TREND_RS:      float = 0.70   # Min relative strength factor for counter-trend LONG in TREND_DOWN
+    ENABLE_ATR_PCTILE_TARGETS: bool  = False  # Keep disabled by default to preserve empirical Platt calibration
 
     # ── Market regime ─────────────────────────────────────────────────────────
     BREADTH_VETO_BELOW:    float = 0.35

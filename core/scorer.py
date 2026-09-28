@@ -545,18 +545,18 @@ def score_candidate_pass1(
                 rsi_val = float(row.get("RSI", 50))
                 if regime.allows_mean_reversion() and rsi_val <= 55:
                     pass
-                # In TREND_DOWN, allow exceptional LONG for strong RS leaders
-                # with full EMA alignment — sector rotation bucking the tape
+                # In TREND_DOWN, allow preliminary pass for candidates with full EMA
+                # alignment and healthy RSI; strict RS gate (MIN_COUNTER_TREND_RS) is verified post-factor evaluation.
                 elif (regime.regime == MarketRegimeType.TREND_DOWN
                       and regime.confirmed
                       and not is_open_position):
                     ema50 = float(row.get("EMA_50", 0.0) or 0.0)
                     ema_stack = (close > ema20 > ema50 > ema200) if ema50 > 0 else (close > ema20 > ema200)
                     if ema_stack and rsi_val <= 72:
-                        pass  # allow through — RS gate applied later in factors
+                        pass  # preliminary pass; MIN_COUNTER_TREND_RS enforced after compute_factors
                     else:
                         if debug:
-                            log.debug("%s: regime blocks LONG (%s) — no RS leadership", ticker, regime.regime)
+                            log.debug("%s: regime blocks LONG (%s) — lacks full EMA stack or RSI > 72", ticker, regime.regime)
                         return None
                 else:
                     if is_open_position:
@@ -649,6 +649,23 @@ def score_candidate_pass1(
         near_52w_max_dist_pct=config.NEAR_52W_MAX_DIST_PCT,
         rs_lookback=config.RS_LOOKBACK,
     )
+
+    # ── 5d. Counter-trend RS gate ─────────────────────────────────────────────
+    # In confirmed TREND_DOWN, LONG setups must demonstrate top-tier relative strength
+    # leadership against the benchmark tape (factors.rs >= MIN_COUNTER_TREND_RS).
+    if (
+        direction == "LONG"
+        and regime.regime == MarketRegimeType.TREND_DOWN
+        and not is_open_position
+    ):
+        min_rs = float(getattr(config, "MIN_COUNTER_TREND_RS", 0.70))
+        if factors.rs < min_rs:
+            if debug:
+                log.debug(
+                    "%s: counter-trend LONG vetoed — RS factor %.2f < %.2f threshold",
+                    ticker, factors.rs, min_rs,
+                )
+            return None
 
     return CandidateContext(
         ticker=ticker,
@@ -854,7 +871,7 @@ def score_candidate_pass2(
         reasons.append("MeanRev✅")
     if direction == "LONG" and regime.regime == MarketRegimeType.TREND_DOWN:
         reasons.append("CounterTrend⚡")
-        if factors.rs > 0.7:
+        if factors.rs >= 0.70:
             reasons.append("RSLeader🏆")
     if is_watchlist:
         reasons.append("Watchlist")

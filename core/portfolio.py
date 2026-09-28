@@ -192,15 +192,17 @@ def compute_targets(
         t1_mult     = config.TARGET1_ATR_MULT  # 3.80
         t2_mult     = config.TARGET2_ATR_MULT  # 6.00
 
-    # ATR-percentile scaling: coiled stocks get wider targets, extended get tighter
-    # Scale factor ranges from +20% (pctile=0) to -15% (pctile=100), centered at 1.0 for median (pctile=50)
-    if atr_pctile < 50.0:
-        atr_scale = 1.0 + 0.20 * ((50.0 - atr_pctile) / 50.0)
-    elif atr_pctile > 50.0:
-        atr_scale = 1.0 - 0.15 * ((atr_pctile - 50.0) / 50.0)
-    else:
-        atr_scale = 1.0
-    t1_mult = t1_mult * atr_scale
+    # ATR-percentile scaling: coiled stocks get wider targets, extended get tighter.
+    # Gated behind config.ENABLE_ATR_PCTILE_TARGETS (default False) to preserve
+    # empirical consistency with the Platt calibration model fitted on fixed targets.
+    if getattr(config, "ENABLE_ATR_PCTILE_TARGETS", False):
+        if atr_pctile < 50.0:
+            atr_scale = 1.0 + 0.20 * ((50.0 - atr_pctile) / 50.0)
+        elif atr_pctile > 50.0:
+            atr_scale = 1.0 - 0.15 * ((atr_pctile - 50.0) / 50.0)
+        else:
+            atr_scale = 1.0
+        t1_mult = t1_mult * atr_scale
 
     sl_dist = stop_mult * atr
 
