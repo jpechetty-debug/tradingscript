@@ -2,6 +2,7 @@ import json
 import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
+import server
 
 from core.config import CONFIG
 from core.cache import _build_corr_matrix
@@ -68,7 +69,7 @@ def test_correlation_matrix_parity_and_speed():
 
 def test_sse_events_stream():
     """Verify GET /api/events yields Server-Sent Events with connected event."""
-    with client.stream("GET", "/api/events?limit=1") as response:
+    with client.stream("GET", "/api/events?limit=1", headers={"X-API-Key": server.API_KEY or "test-api-key"}) as response:
         assert response.status_code == 200
         assert "text/event-stream" in response.headers.get("content-type", "")
 

@@ -33,8 +33,9 @@ def reset_killswitch_state():
     server.PERSISTENCE.set_killswitch(False)
 
 
-def test_killswitch_status_public():
-    response = client.get("/api/killswitch/status")
+def test_killswitch_status_requires_auth():
+    assert client.get("/api/killswitch/status").status_code == 401
+    response = client.get("/api/killswitch/status", headers=AUTH_HEADERS)
     assert response.status_code == 200
     data = response.json()
     assert "killswitch_active" in data
@@ -46,6 +47,13 @@ def test_killswitch_activation_unauthorized():
     assert response.status_code == 401
 
 
+def test_killswitch_cannot_reset_until_inflight_scan_stops():
+    assert client.post("/api/killswitch", headers=AUTH_HEADERS).status_code == 200
+    STATE.is_scanning = True
+    response = client.post("/api/killswitch/reset", headers=AUTH_HEADERS)
+    assert response.status_code == 409
+
+
 def test_killswitch_lifecycle():
     # 1. Activate killswitch
     res = client.post("/api/killswitch", headers=AUTH_HEADERS)
@@ -53,7 +61,7 @@ def test_killswitch_lifecycle():
     assert res.json()["killswitch_active"] is True
 
     # 2. Check status reflects killed
-    status_res = client.get("/api/killswitch/status")
+    status_res = client.get("/api/killswitch/status", headers=AUTH_HEADERS)
     assert status_res.json()["killswitch_active"] is True
 
     # Check /api/status also reflects killswitch (requires auth)
@@ -72,7 +80,7 @@ def test_killswitch_lifecycle():
     assert reset_res.json()["killswitch_active"] is False
 
     # 5. Status is now clean
-    assert client.get("/api/killswitch/status").json()["killswitch_active"] is False
+    assert client.get("/api/killswitch/status", headers=AUTH_HEADERS).json()["killswitch_active"] is False
 
 
 def test_engine_state_persistence_and_rehydration(tmp_path):

@@ -16,15 +16,17 @@ Endpoints:
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import ipaddress
 import json
 import logging
 import os
 from pathlib import Path
+import threading
 from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Optional
 
 import secrets
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Security
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
@@ -36,10 +38,12 @@ from slowapi.util import get_remote_address
 import uvicorn
 
 import screener_v14_modular as svm
+from core.application import ApplicationRuntime, build_application_runtime
 from core.config import CONFIG, MarketRegimeType
 from core.regime import RegimeTracker
 from core.scorer import TickerResult
-from core.services import PersistenceService
+from core.services import PersistenceService, ScanCancelled
+from core.snapshots import build_scan_snapshot, format_ticker, write_json_atomic
 from core.universe import SECTORS, TICKER_TO_SECTOR
 
 load_dotenv()
@@ -72,16 +76,25 @@ def get_client_ip(request: Request) -> str:
     """
     Extract client IP for rate limiting, with support for trusted reverse proxies.
 
-    If TRUST_PROXIES or TRUSTED_PROXIES is enabled:
-      - Reads the client IP from the 'X-Forwarded-For' header (left-most / client address).
-      - If 'X-Real-IP' is present, falls back to that.
-    Otherwise:
-      - Falls back to slowapi's default `get_remote_address(request)`.
+    Forwarded headers are accepted only when the direct peer belongs to a
+    network explicitly listed in the comma-separated TRUSTED_PROXIES setting.
     """
-    trust_proxy_env = os.environ.get("TRUSTED_PROXIES", os.environ.get("TRUST_PROXIES", "0")).lower().strip()
-    should_trust = trust_proxy_env in ("1", "true", "yes", "*") or bool(trust_proxy_env and trust_proxy_env != "0")
+    trusted = os.environ.get("TRUSTED_PROXIES", "").strip()
+    peer = get_remote_address(request)
+    networks = []
+    for value in (part.strip() for part in trusted.split(",")):
+        if not value:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(value, strict=False))
+        except ValueError:
+            log.warning("Ignoring invalid TRUSTED_PROXIES entry: %r", value)
+    try:
+        peer_is_trusted = any(ipaddress.ip_address(peer) in network for network in networks)
+    except ValueError:
+        peer_is_trusted = False
 
-    if should_trust:
+    if peer_is_trusted:
         forwarded_for = request.headers.get("x-forwarded-for")
         if forwarded_for:
             parts = [p.strip() for p in forwarded_for.split(",") if p.strip()]
@@ -91,7 +104,7 @@ def get_client_ip(request: Request) -> str:
         if real_ip and real_ip.strip():
             return real_ip.strip()
 
-    return get_remote_address(request)
+    return peer
 
 
 log = logging.getLogger("sovereign.server")
@@ -133,21 +146,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Re-hydrate state from disk and sync persistent killswitch flag
     STATE.load_persisted_state(PERSISTENCE)
     STATE.is_killed = PERSISTENCE.get_killswitch()
+    runtime = build_application_runtime(version=svm.VERSION, persistence=PERSISTENCE)
+    app.state.runtime = runtime
 
     # Trigger initial scan in non-blocking background task unless killswitch is active
     scan_task = None
     if not STATE.is_killed:
-        scan_task = asyncio.create_task(_run_scan_task_async())
-        app.state.scan_task = scan_task
+        scan_task = _start_scan_task()
     try:
         yield
     finally:
+        SCAN_CANCEL_EVENT.set()
         if scan_task and not scan_task.done():
-            scan_task.cancel()
             try:
-                await scan_task
-            except asyncio.CancelledError:
-                pass
+                await asyncio.wait_for(scan_task, timeout=10.0)
+            except (asyncio.TimeoutError, ScanCancelled):
+                log.warning("Scan did not stop before server shutdown timeout.")
+        runtime.close()
 
 
 app = FastAPI(
@@ -207,15 +222,15 @@ class EngineState:
         """Persist current scan results to disk (state/latest_scan.json)."""
         try:
             target = persistence.paths.state_dir / "latest_scan.json"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "scan_time": self.last_scan_time,
-                "candidates": self.last_candidates,
-                "portfolio": self.last_portfolio,
-                "sector_rs": self.last_sector_rs,
-                "regime_info": self.last_regime_info,
-            }
-            target.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+            payload = build_scan_snapshot(
+                scan_time=self.last_scan_time,
+                candidates=self.last_candidates,
+                portfolio=self.last_portfolio,
+                sector_rs=self.last_sector_rs,
+                regime_info=self.last_regime_info,
+                config=CONFIG,
+            )
+            write_json_atomic(target, payload)
             log.info("Persisted latest scan snapshot to %s", target)
         except Exception as exc:
             log.warning("Could not persist latest scan state: %s", exc)
@@ -232,31 +247,8 @@ class EngineState:
             raw_cands = data.get("candidates") or []
             raw_port = data.get("portfolio") or []
 
-            def _clean_item(item: dict) -> dict:
-                d = item.copy()
-                dirn = d.get("direction", "LONG")
-                d["action"] = d.get("action") or ("BUY" if dirn == "LONG" else "SELL")
-                horizon = d.get("trade_horizon")
-                if horizon not in ("INTRADAY", "SWING"):
-                    if not getattr(CONFIG, "INTRADAY_ENABLED", False):
-                        horizon = "SWING"
-                    elif dirn == "SHORT" and getattr(CONFIG, "SHORT_IS_INTRADAY_ONLY", True):
-                        horizon = "INTRADAY"
-                    else:
-                        horizon = "SWING"
-                d["trade_horizon"] = horizon
-                d["horizon_label"] = "INTRADAY (MIS)" if horizon == "INTRADAY" else "SWING (CNC)"
-                entry = float(d.get("entry") or 0.0)
-                stop = float(d.get("stop") or 0.0)
-                t1 = float(d.get("t1") or 0.0)
-                if "stop_pct" not in d and entry > 0:
-                    d["stop_pct"] = round(abs(entry - stop) / entry * 100, 2)
-                if "target_pct" not in d and entry > 0:
-                    d["target_pct"] = round(abs(t1 - entry) / entry * 100, 2)
-                return d
-
-            self.last_candidates = [_clean_item(c) for c in raw_cands]
-            self.last_portfolio = [_clean_item(p) for p in raw_port]
+            self.last_candidates = [format_ticker(c, CONFIG) for c in raw_cands]
+            self.last_portfolio = [format_ticker(p, CONFIG) for p in raw_port]
             self.last_sector_rs = data.get("sector_rs") or {}
             self.last_regime_info = data.get("regime_info")
             log.info("Re-hydrated EngineState from %s (%d candidates, %d portfolio)",
@@ -344,6 +336,7 @@ class SSEBroadcaster:
 
 
 BROADCASTER = SSEBroadcaster()
+SCAN_CANCEL_EVENT = threading.Event()
 
 BASE_DIR = Path(__file__).parent.resolve()
 FRONTEND_DIST_DIR = BASE_DIR / "frontend" / "dist"
@@ -353,62 +346,35 @@ if FRONTEND_ASSETS_DIR.exists():
 
 
 def _format_ticker_result(res: TickerResult) -> Dict[str, Any]:
-    d = res.__dict__.copy()
-    if hasattr(res, "factors") and res.factors is not None:
-        d["factors"] = res.factors.__dict__.copy()
-
-    # Explicit Action (BUY vs SELL)
-    d["action"] = getattr(res, "action", None) or ("BUY" if res.direction == "LONG" else "SELL")
-
-    # Trade Horizon: In Indian equity cash market, SHORT is strictly INTRADAY (SEBI square-off by 15:15)
-    # Prefer engine-classified trade_horizon if available
-    engine_horizon = getattr(res, "trade_horizon", None)
-
-    sl_dist = abs(res.entry - res.stop) if (res.entry and res.stop) else 0.0
-    sl_pct = (sl_dist / res.entry * 100) if res.entry > 0 else 5.0
-    t1_dist = abs(res.t1 - res.entry) if (res.entry and res.t1) else 0.0
-    t1_pct = (t1_dist / res.entry * 100) if res.entry > 0 else 10.0
-
-    is_mean_rev = any("MeanRev" in str(r) for r in getattr(res, "reasons", []))
-
-    if engine_horizon in ("INTRADAY", "SWING"):
-        horizon = engine_horizon
-    elif not getattr(CONFIG, "INTRADAY_ENABLED", False):
-        horizon = "SWING"
-    elif res.direction == "SHORT" and getattr(CONFIG, "SHORT_IS_INTRADAY_ONLY", True):
-        horizon = "INTRADAY"
-    elif sl_pct < 2.5 or (is_mean_rev and sl_pct < 3.0):
-        horizon = "INTRADAY"
-    else:
-        horizon = "SWING"
-
-    d["trade_horizon"] = horizon
-    d["horizon_label"] = "INTRADAY (MIS)" if horizon == "INTRADAY" else "SWING (CNC)"
-
-    d["stop_pct"] = round(sl_pct, 2)
-    d["target_pct"] = round(t1_pct, 2)
-    return d
+    return format_ticker(res, CONFIG)
 
 
 
-async def _run_scan_task_async() -> None:
-    async with STATE._lock:
-        if STATE.is_killed:
-            log.warning("Scan aborted: Emergency Killswitch is active.")
-            return
-        if STATE.is_scanning:
-            return
-        STATE.is_scanning = True
-        STATE.scan_error = None
+async def _run_scan_task_async(*, claimed: bool = False) -> None:
+    if not claimed:
+        async with STATE._lock:
+            if STATE.is_killed:
+                log.warning("Scan aborted: Emergency Killswitch is active.")
+                return
+            if STATE.is_scanning:
+                return
+            SCAN_CANCEL_EVENT.clear()
+            STATE.is_scanning = True
+            STATE.scan_error = None
 
     try:
         await BROADCASTER.broadcast("scan_started", {"timestamp": datetime.now(timezone.utc).isoformat()})
+        runtime: ApplicationRuntime | None = getattr(app.state, "runtime", None)
         scan_output = await asyncio.to_thread(
             svm.run_scan,
             config=CONFIG,
             regime_tracker=STATE.regime_tracker,
             regime_override=STATE.regime_override,
+            services=runtime.services if runtime is not None else None,
+            cancel_requested=SCAN_CANCEL_EVENT.is_set,
         )
+        if SCAN_CANCEL_EVENT.is_set() or STATE.is_killed:
+            raise ScanCancelled("scan cancelled by emergency killswitch")
         candidates, portfolio, regime = scan_output[0], scan_output[1], scan_output[2]
 
         async with STATE._lock:
@@ -441,12 +407,27 @@ async def _run_scan_task_async() -> None:
             "portfolio_count": len(STATE.last_portfolio),
             "regime": STATE.last_regime_info,
         })
+    except ScanCancelled as exc:
+        log.warning("Scan cancelled: %s", exc)
+        async with STATE._lock:
+            STATE.is_scanning = False
+            STATE.scan_error = str(exc)
+        await BROADCASTER.broadcast("scan_cancelled", {"error": str(exc)})
     except Exception as exc:
         log.exception("Error executing scan task")
         async with STATE._lock:
             STATE.is_scanning = False
             STATE.scan_error = str(exc)
         await BROADCASTER.broadcast("scan_failed", {"error": str(exc)})
+    finally:
+        if getattr(app.state, "scan_task", None) is asyncio.current_task():
+            app.state.scan_task = None
+
+
+def _start_scan_task(*, claimed: bool = False) -> asyncio.Task[None]:
+    task = asyncio.create_task(_run_scan_task_async(claimed=claimed))
+    app.state.scan_task = task
+    return task
 
 
 def _run_scan_task() -> None:
@@ -543,7 +524,7 @@ async def get_scan_results() -> Dict[str, Any]:
 
 @app.post("/api/scan/trigger", dependencies=[Depends(verify_api_key)])
 @limiter.limit("5/minute")
-async def trigger_scan(request: Request, background_tasks: BackgroundTasks) -> Dict[str, Any]:
+async def trigger_scan(request: Request) -> Dict[str, Any]:
     async with STATE._lock:
         if STATE.is_killed:
             raise HTTPException(
@@ -552,8 +533,11 @@ async def trigger_scan(request: Request, background_tasks: BackgroundTasks) -> D
             )
         if STATE.is_scanning:
             return {"status": "already_running", "message": "Scan execution already in progress"}
+        SCAN_CANCEL_EVENT.clear()
+        STATE.is_scanning = True
+        STATE.scan_error = None
 
-    background_tasks.add_task(_run_scan_task_async)
+    _start_scan_task(claimed=True)
     return {"status": "triggered", "message": "Market scan started in background worker"}
 
 
@@ -589,19 +573,16 @@ async def activate_killswitch() -> Dict[str, Any]:
     """Emergency Kill-Switch: aborts active scans and halts execution."""
     async with STATE._lock:
         STATE.is_killed = True
-        STATE.is_scanning = False
-        STATE.scan_error = "Emergency Killswitch Activated"
+        STATE.scan_error = "Emergency Killswitch Activated; cancellation requested"
         PERSISTENCE.set_killswitch(True)
 
-    scan_task = getattr(app.state, "scan_task", None)
-    if scan_task and not scan_task.done():
-        scan_task.cancel()
+    SCAN_CANCEL_EVENT.set()
 
     log.critical("EMERGENCY KILLSWITCH ACTIVATED: Active scans cancelled.")
     await BROADCASTER.broadcast("killswitch_engaged", {"status": "killed"})
     return {
         "status": "killed",
-        "message": "Emergency killswitch engaged. In-flight scans cancelled.",
+        "message": "Emergency killswitch engaged. In-flight scan cancellation requested.",
         "killswitch_active": True,
     }
 
@@ -610,9 +591,15 @@ async def activate_killswitch() -> Dict[str, Any]:
 async def reset_killswitch() -> Dict[str, Any]:
     """Reset Emergency Kill-Switch to resume normal operations."""
     async with STATE._lock:
+        if STATE.is_scanning:
+            raise HTTPException(
+                status_code=409,
+                detail="Wait for the cancelled scan to stop before resetting the killswitch.",
+            )
         STATE.is_killed = False
         STATE.scan_error = None
         PERSISTENCE.set_killswitch(False)
+        SCAN_CANCEL_EVENT.clear()
 
     log.info("Emergency killswitch cleared. Normal operations resumed.")
     await BROADCASTER.broadcast("killswitch_reset", {"status": "reset"})
@@ -623,7 +610,7 @@ async def reset_killswitch() -> Dict[str, Any]:
     }
 
 
-@app.get("/api/killswitch/status")
+@app.get("/api/killswitch/status", dependencies=[Depends(verify_api_key)])
 async def get_killswitch_status() -> Dict[str, Any]:
     """Check current emergency kill-switch status."""
     async with STATE._lock:
@@ -636,7 +623,7 @@ async def get_killswitch_status() -> Dict[str, Any]:
 
 # --- Server-Sent Events (SSE) Endpoint ---
 
-@app.get("/api/events")
+@app.get("/api/events", dependencies=[Depends(verify_api_key)])
 async def sse_events(
     request: Request,
     limit: Optional[int] = Query(default=None, ge=1, description="Optional max events to receive before closing"),
@@ -702,7 +689,7 @@ async def sse_events(
     )
 
 
-@app.get("/api/sectors")
+@app.get("/api/sectors", dependencies=[Depends(verify_api_key)])
 async def get_sectors() -> Dict[str, Any]:
     sector_summary: Dict[str, List[str]] = {
         sec: tickers for sec, tickers in SECTORS.items()
@@ -733,7 +720,7 @@ def get_trades(
     }
 
 
-@app.get("/api/config")
+@app.get("/api/config", dependencies=[Depends(verify_api_key)])
 def get_config() -> Dict[str, Any]:
     rg = CONFIG.as_regime()
     return {

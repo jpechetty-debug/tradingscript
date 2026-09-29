@@ -26,7 +26,7 @@ continue to work without modification.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from core.backtest import WalkForwardResult
 from core.config import CONFIG, SystemConfig
@@ -88,6 +88,7 @@ def run_scan(
     no_ema_filter: bool = False,
     force_score: bool = False,
     services: Optional[ServiceBundle] = None,
+    cancel_requested: Optional[Callable[[], bool]] = None,
 ) -> tuple[list[TickerResult], list[TickerResult], Optional[MarketRegime]]:
     """
     Compatibility wrapper over :meth:`ScanService.scan`.
@@ -103,6 +104,7 @@ def run_scan(
         no_ema_filter=no_ema_filter,
         no_intraday=no_intraday,
         force_score=force_score,
+        cancel_requested=cancel_requested,
     )
 
 

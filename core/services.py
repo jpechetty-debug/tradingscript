@@ -31,7 +31,7 @@ import pandas as pd
 
 from .backtest import OverallStats, WalkForwardResult, walk_forward
 from .cache import ScanCache
-from .config import CONFIG, IST, MarketRegimeType, SystemConfig, get_secret_value
+from .config import CONFIG, IST, MarketDataSettings, MarketRegimeType, SystemConfig, get_secret_value
 from .database import SqliteDatabase
 from .data_provider import fetch_daily_batch
 from .factors import DEFAULT_WEIGHTS, calibrate_ic_weights
@@ -46,6 +46,7 @@ from .regime import (
     compute_sector_rs,
 )
 from .runtime_paths import RUNTIME_PATHS, RuntimePaths, ensure_parent, ensure_runtime_dirs, resolve_artifact_path
+from .snapshots import write_json_atomic
 from .scorer import (
     CandidateContext,
     TickerResult,
@@ -87,6 +88,16 @@ class SummaryAlerter(Protocol):
 
 
 CurrentNavProvider = Callable[[], Optional[float]]
+CancellationProbe = Callable[[], bool]
+
+
+class ScanCancelled(RuntimeError):
+    """Raised when an in-flight scan receives a cooperative stop request."""
+
+
+def _check_cancelled(cancel_requested: Optional[CancellationProbe]) -> None:
+    if cancel_requested is not None and cancel_requested():
+        raise ScanCancelled("scan cancelled by emergency killswitch")
 
 
 @dataclass
@@ -199,7 +210,7 @@ class PersistenceService:
             "version": 2,
         }
         target = ensure_parent(self.paths.platt_calibration_file)
-        target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        write_json_atomic(target, payload)
         log.info("Platt params saved to DB and %s: A=%.4f B=%.4f (v2)", target, a, b)
 
     def load_trade_log(self) -> list[dict[str, Any]]:
@@ -235,14 +246,14 @@ class PersistenceService:
 
     def save_trade_log(self, trades: list[dict[str, Any]]) -> None:
         target = ensure_parent(self.paths.trade_log_file)
-        target.write_text(json.dumps(trades, indent=2, default=str), encoding="utf-8")
+        write_json_atomic(target, trades)
         self.db.insert_trades(trades)
 
     def append_trade(self, trade: dict[str, Any]) -> None:
         self.db.insert_trade(trade)
         existing = self.load_trade_log()
         target = ensure_parent(self.paths.trade_log_file)
-        target.write_text(json.dumps(existing[-2000:], indent=2, default=str), encoding="utf-8")
+        write_json_atomic(target, existing[-2000:])
 
     def set_killswitch(self, is_killed: bool) -> None:
         self.db.set_killswitch(is_killed)
@@ -289,7 +300,7 @@ class PersistenceService:
         if peak_nav is not None:
             payload["peak_nav"] = float(peak_nav)
         target = ensure_parent(self.paths.portfolio_state_file)
-        target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        write_json_atomic(target, payload)
         log.info("Portfolio state saved to DB and %s", target)
 
     def load_open_positions(self) -> dict[str, dict[str, Any]]:
@@ -311,7 +322,7 @@ class PersistenceService:
 class MarketDataService:
     def __init__(
         self,
-        fetcher: Callable[[list[str], SystemConfig], dict[str, pd.DataFrame]] = fetch_daily_batch,
+        fetcher: Callable[[list[str], MarketDataSettings | SystemConfig], dict[str, pd.DataFrame]] = fetch_daily_batch,
     ) -> None:
         self._fetcher = fetcher
 
@@ -322,7 +333,10 @@ class MarketDataService:
         metrics: Optional[ScanMetrics] = None,
     ) -> dict[str, pd.DataFrame]:
         started = time.monotonic()
-        raw_data = self._fetcher(tickers, config)
+        provider_config: MarketDataSettings | SystemConfig = (
+            config.as_market_data() if self._fetcher is fetch_daily_batch else config
+        )
+        raw_data = self._fetcher(tickers, provider_config)
         if metrics is not None:
             metrics.record_fetch(
                 n_ok=len(raw_data),
@@ -493,6 +507,7 @@ def score_universe(
     sector_ranks: Optional[dict[str, int]] = None,
     direction: str = "BOTH",
     min_bars: int = 50,
+    cancel_requested: Optional[CancellationProbe] = None,
 ) -> list[TickerResult]:
     """
     Pure, shared candidate scoring pipeline across live scan and walk-forward backtest.
@@ -524,6 +539,7 @@ def score_universe(
 
     candidate_items: list[tuple[str, pd.DataFrame]] = []
     for ticker, df in processed.items():
+        _check_cancelled(cancel_requested)
         if ticker == config.BENCHMARK:
             continue
         clean_ticker = ticker.replace(".NS", "")
@@ -536,6 +552,7 @@ def score_universe(
     with ThreadPoolExecutor(max_workers=max_workers) as pass1_executor:
         pass1_futures: dict[Any, str] = {}
         for ticker, df in candidate_items:
+            _check_cancelled(cancel_requested)
             clean_ticker = ticker.replace(".NS", "")
             is_open = (ticker in open_pos) or (clean_ticker in open_pos)
             pos_info = pos_map.get(ticker) or pos_map.get(clean_ticker) or {}
@@ -562,6 +579,10 @@ def score_universe(
             pass1_futures[fut] = ticker
 
         for fut in as_completed(pass1_futures):
+            if cancel_requested is not None and cancel_requested():
+                for pending in pass1_futures:
+                    pending.cancel()
+                raise ScanCancelled("scan cancelled during candidate scoring")
             ticker = pass1_futures[fut]
             try:
                 cand = fut.result()
@@ -585,6 +606,7 @@ def score_universe(
     # Pass 2: Probability gating with hysteresis and Kelly position sizing
     all_results: list[TickerResult] = []
     for cand in ranked_candidates:
+        _check_cancelled(cancel_requested)
         clean_ticker = cand.ticker.replace(".NS", "")
         is_open = (cand.ticker in open_pos) or (clean_ticker in open_pos)
         try:
@@ -671,7 +693,9 @@ class ScanService:
         no_ema_filter: bool = False,
         no_intraday: bool = False,
         force_score: bool = False,
+        cancel_requested: Optional[CancellationProbe] = None,
     ) -> tuple[list[TickerResult], list[TickerResult], Optional[MarketRegime]]:
+        _check_cancelled(cancel_requested)
         state = self._persistence.create_scan_state(config)
         metrics = ScanMetrics()
 
@@ -695,6 +719,7 @@ class ScanService:
             log.error("%s", exc)
             return ScanOutput([], [], None, sector_rs={})
 
+        _check_cancelled(cancel_requested)
         self.last_sector_rs = dict(prepared.sector_rs)
         self._monitor_open_position_stops(prepared.processed, state)
 
@@ -717,6 +742,7 @@ class ScanService:
         )
         regime = self._apply_regime_override(regime, regime_override)
         self.last_regime_info = regime
+        _check_cancelled(cancel_requested)
 
         session = config.session_from_time()
         scoring_config = self._apply_regime_probability_gate(config, regime, debug=debug)
@@ -741,7 +767,10 @@ class ScanService:
             debug=debug,
             no_intraday=no_intraday,
             force_score=force_score,
+            cancel_requested=cancel_requested,
         )
+
+        _check_cancelled(cancel_requested)
 
         metrics.record_score(
             n_passed=len(all_results),
@@ -758,6 +787,7 @@ class ScanService:
             regime_label=regime.label if regime else None,
         )
 
+        _check_cancelled(cancel_requested)
         corr_matrix = state.cache.corr_matrix(prepared.processed, config)
         portfolio_candidates = [r for r in all_results if not getattr(r, "is_watchlist", False)]
         portfolio = optimize_portfolio(portfolio_candidates, config, corr_matrix)
@@ -866,6 +896,7 @@ class ScanService:
         saver = getattr(self._persistence, "save_open_positions", None)
         if callable(saver):
             try:
+                _check_cancelled(cancel_requested)
                 saver(deduped_payload)
             except Exception as exc:
                 log.warning("Could not sync open positions: %s", exc)
@@ -1099,6 +1130,7 @@ class ScanService:
         no_intraday: bool = False,
         force_score: bool,
         current_nav: float,
+        cancel_requested: Optional[CancellationProbe] = None,
     ) -> list[TickerResult]:
         mock_results: list[TickerResult] = []
         open_pos: set[str] = getattr(state, "open_positions", set())
@@ -1114,6 +1146,7 @@ class ScanService:
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
             futures: dict[Any, str] = {}
             for ticker, df in prepared.processed.items():
+                _check_cancelled(cancel_requested)
                 clean_ticker = ticker.replace(".NS", "")
                 is_open = (ticker in open_pos) or (clean_ticker in open_pos)
                 passes_static = (
@@ -1160,6 +1193,7 @@ class ScanService:
                 futures[future] = ticker
 
             for future in as_completed(futures):
+                _check_cancelled(cancel_requested)
                 ticker = futures[future]
                 try:
                     res = future.result()
@@ -1180,6 +1214,7 @@ class ScanService:
         debug: bool,
         no_intraday: bool = False,
         force_score: bool,
+        cancel_requested: Optional[CancellationProbe] = None,
     ) -> tuple[list[TickerResult], float]:
         started = time.monotonic()
         current_nav = self._resolve_current_nav()
@@ -1196,6 +1231,7 @@ class ScanService:
                 no_intraday=no_intraday,
                 force_score=force_score,
                 current_nav=current_nav,
+                cancel_requested=cancel_requested,
             )
             return mock_results, time.monotonic() - started
 
@@ -1217,6 +1253,7 @@ class ScanService:
             current_nav=current_nav,
             sector_ranks=prepared.sector_ranks,
             min_bars=50,
+            cancel_requested=cancel_requested,
         )
         elapsed = time.monotonic() - started
         log.debug("Scoring completed in %.3fs.", elapsed)

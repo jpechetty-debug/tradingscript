@@ -9,6 +9,7 @@ import OverrideModal from './components/OverrideModal';
 import KillswitchModal from './components/KillswitchModal';
 import FactorAttributionModal from './components/FactorAttributionModal';
 import { Briefcase, Layers, PieChart, History, AlertCircle } from 'lucide-react';
+import { streamSse } from './sse';
 
 export default function App() {
   const [status, setStatus] = useState(null);
@@ -127,73 +128,62 @@ export default function App() {
 
   // Real-Time Server-Sent Events (SSE) Stream
   useEffect(() => {
-    let es = null;
     let reconnectTimer = null;
+    let controller = null;
+    let stopped = false;
 
-    const connectSSE = () => {
+    const handleMessage = (rawMessage) => {
       try {
-        es = new EventSource('/api/events');
-
-        es.onopen = () => {
+        const payload = JSON.parse(rawMessage);
+        const { event, data } = payload;
+        if (event === 'connected') {
           setIsSseConnected(true);
-        };
-
-        es.onmessage = (eventMsg) => {
-          try {
-            const payload = JSON.parse(eventMsg.data);
-            const { event, data } = payload;
-
-            if (event === 'connected') {
-              setIsSseConnected(true);
-              if (data && typeof data.killswitch_active === 'boolean') {
-                setStatus(prev => prev ? { ...prev, killswitch_active: data.killswitch_active } : prev);
-              }
-            } else if (event === 'scan_started') {
-              setStatus(prev => prev ? { ...prev, is_scanning: true } : { is_scanning: true });
-              showToast('Market scan initiated in real-time...');
-            } else if (event === 'scan_completed') {
-              setStatus(prev => prev ? { ...prev, is_scanning: false } : { is_scanning: false });
-              fetchScan();
-              fetchStatus();
-              fetchTrades();
-              fetchSectors();
-              showToast(`Scan complete: ${data?.portfolio_count || 0} picks, ${data?.candidates_count || 0} candidates.`);
-            } else if (event === 'scan_failed') {
-              setStatus(prev => prev ? { ...prev, is_scanning: false } : { is_scanning: false });
-              showToast(`Scan failed: ${data?.error || 'Unknown error'}`);
-            } else if (event === 'killswitch_engaged') {
-              setStatus(prev => prev ? { ...prev, killswitch_active: true } : { killswitch_active: true });
-              showToast('CRITICAL: Emergency Kill-Switch Engaged.');
-            } else if (event === 'killswitch_reset') {
-              setStatus(prev => prev ? { ...prev, killswitch_active: false } : { killswitch_active: false });
-              showToast('Emergency Kill-Switch Reset to Normal.');
-            }
-          } catch (err) {
-            console.warn('SSE message parse error:', err);
+          if (data && typeof data.killswitch_active === 'boolean') {
+            setStatus(prev => prev ? { ...prev, killswitch_active: data.killswitch_active } : prev);
           }
-        };
-
-        es.onerror = () => {
-          setIsSseConnected(false);
-          if (es) {
-            es.close();
-            es = null;
-          }
-          reconnectTimer = setTimeout(connectSSE, 5000);
-        };
+        } else if (event === 'scan_started') {
+          setStatus(prev => prev ? { ...prev, is_scanning: true } : { is_scanning: true });
+        } else if (event === 'scan_completed') {
+          setStatus(prev => prev ? { ...prev, is_scanning: false } : { is_scanning: false });
+          refreshAll();
+          showToast(`Scan complete: ${data?.portfolio_count || 0} picks, ${data?.candidates_count || 0} candidates.`);
+        } else if (event === 'scan_failed' || event === 'scan_cancelled') {
+          setStatus(prev => prev ? { ...prev, is_scanning: false } : { is_scanning: false });
+          showToast(`Scan stopped: ${data?.error || 'Unknown error'}`);
+        } else if (event === 'killswitch_engaged') {
+          setStatus(prev => prev ? { ...prev, killswitch_active: true } : { killswitch_active: true });
+        } else if (event === 'killswitch_reset') {
+          setStatus(prev => prev ? { ...prev, killswitch_active: false } : { killswitch_active: false });
+        }
       } catch (err) {
+        console.warn('SSE message parse error:', err);
+      }
+    };
+
+    const connectSSE = async () => {
+      controller = new AbortController();
+      try {
+        await streamSse('/api/events', {
+          headers: getAuthHeaders(),
+          signal: controller.signal,
+          onMessage: handleMessage,
+        });
+      } catch (err) {
+        if (err.name !== 'AbortError') console.warn('SSE connection error:', err);
+      } finally {
         setIsSseConnected(false);
-        reconnectTimer = setTimeout(connectSSE, 5000);
+        if (!stopped) reconnectTimer = setTimeout(connectSSE, 5000);
       }
     };
 
     connectSSE();
 
     return () => {
-      if (es) es.close();
+      stopped = true;
+      if (controller) controller.abort();
       if (reconnectTimer) clearTimeout(reconnectTimer);
     };
-  }, [fetchScan, fetchStatus, fetchTrades, fetchSectors]);
+  }, [getAuthHeaders, refreshAll]);
 
   // Trigger scan handler
   const handleTriggerScan = async () => {

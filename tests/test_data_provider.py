@@ -48,6 +48,27 @@ def _fake_multi_df(tickers):
 
 class TestFetchDailyBatch:
 
+    def test_partial_fyers_result_falls_back_only_for_missing_symbols(self):
+        cfg = _cfg(USE_FYERS=True)
+        fyers_df = _fake_multi_df(["RELIANCE.NS"])["RELIANCE.NS"].copy()
+        captured: list[str] = []
+
+        def fake_fyers(ticker, fsym, config):
+            return (ticker, fyers_df) if ticker == "RELIANCE.NS" else (ticker, None)
+
+        def fake_yfinance(symbols, period, interval):
+            captured.extend(symbols)
+            return _fake_multi_df(symbols)
+
+        with patch("core.data_provider.fetch_single_ticker", side_effect=fake_fyers), patch(
+            "core.data_provider._yf_download_chunk", side_effect=fake_yfinance
+        ):
+            result = fetch_daily_batch(["RELIANCE.NS", "INFY.NS"], cfg)
+
+        assert set(result) == {"RELIANCE.NS", "INFY.NS", "^NSEI"}
+        assert "RELIANCE.NS" not in captured
+        assert set(captured) == {"INFY.NS", "^NSEI"}
+
     def test_yfinance_multiindex_parsed_correctly(self):
         # fetch_daily_batch adds benchmark. Deduping might result in 2 or 3 tickers.
         # We'll use 3 to force MultiIndex.
@@ -242,9 +263,11 @@ class TestFetchDailyBatch:
                 return t, pd.DataFrame({"Close": [100]})
             return t, None
         with patch("core.data_provider.fetch_single_ticker", side_effect=fake_fetch):
-            res = fetch_daily_batch(["RELIANCE.NS", "INFY.NS"], cfg)
-            assert "RELIANCE.NS" in res
-            assert "INFY.NS" not in res
+            with patch("core.data_provider._yf_download_chunk", return_value=pd.DataFrame()) as mock_yf:
+                res = fetch_daily_batch(["RELIANCE.NS", "INFY.NS"], cfg)
+                assert "RELIANCE.NS" in res
+                assert "INFY.NS" not in res
+                mock_yf.assert_called()
 
     def test_fetch_daily_batch_fyers_thread_crash(self):
         cfg = _cfg(USE_FYERS=True, MAX_WORKERS=1)
@@ -321,4 +344,3 @@ class TestFetchDailyBatch:
         expected_from = (datetime.now(IST) - timedelta(days=365)).strftime("%Y-%m-%d")
         assert call_args["range_to"] == expected_to
         assert call_args["range_from"] == expected_from
-

@@ -137,7 +137,8 @@ def test_set_invalid_regime_override(client: TestClient) -> None:
 
 
 def test_get_sectors(client: TestClient) -> None:
-    res = client.get("/api/sectors")
+    assert client.get("/api/sectors").status_code == 401
+    res = client.get("/api/sectors", headers={"X-API-Key": TEST_API_KEY})
     assert res.status_code == 200
     data = res.json()
     assert "total_sectors" in data
@@ -146,7 +147,8 @@ def test_get_sectors(client: TestClient) -> None:
 
 
 def test_get_config(client: TestClient) -> None:
-    res = client.get("/api/config")
+    assert client.get("/api/config").status_code == 401
+    res = client.get("/api/config", headers={"X-API-Key": TEST_API_KEY})
     assert res.status_code == 200
     data = res.json()
     assert "benchmark" in data
@@ -346,10 +348,14 @@ def test_get_client_ip_trusted_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert get_client_ip(mock_request) == "10.0.0.1"
 
     # When proxy trust is enabled, extracts leftmost client IP
-    monkeypatch.setenv("TRUSTED_PROXIES", "1")
+    monkeypatch.setenv("TRUSTED_PROXIES", "10.0.0.1/32")
     assert get_client_ip(mock_request) == "203.0.113.195"
 
+    monkeypatch.setenv("TRUSTED_PROXIES", "192.0.2.0/24")
+    assert get_client_ip(mock_request) == "10.0.0.1"
+
     # Falls back to x-real-ip if x-forwarded-for is missing
+    monkeypatch.setenv("TRUSTED_PROXIES", "10.0.0.1/32")
     mock_request.headers = {"x-real-ip": "198.51.100.22"}
     assert get_client_ip(mock_request) == "198.51.100.22"
 
@@ -367,7 +373,7 @@ def test_sse_subscriber_limit_503(client: TestClient, monkeypatch: pytest.Monkey
         q2 = asyncio.run(BROADCASTER.subscribe())
 
         # Third attempt should be rejected with 503
-        res = client.get("/api/events")
+        res = client.get("/api/events", headers={"X-API-Key": TEST_API_KEY})
         assert res.status_code == 503
         assert "Max SSE subscribers reached" in res.json()["detail"]
 
@@ -376,7 +382,5 @@ def test_sse_subscriber_limit_503(client: TestClient, monkeypatch: pytest.Monkey
         asyncio.run(BROADCASTER.unsubscribe(q2))
     finally:
         BROADCASTER.max_subscribers = orig_cap
-
-
 
 

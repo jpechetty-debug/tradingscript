@@ -20,15 +20,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import atexit
 import logging
 import sys
 import time
-from typing import Any, Callable
-
+from core.application import build_application_runtime
 from core.regime import RegimeTracker
 from core.runtime_components import create_runtime_components
 from core.scorer import TickerResult
-from core.services import PersistenceService
+from core.snapshots import build_scan_snapshot, write_json_atomic
 from screener_v14_modular import (
     CONFIG,
     VERSION,
@@ -40,14 +40,6 @@ from screener_v14_modular import (
 )
 
 log = logging.getLogger("sovereign")
-
-
-def _build_current_nav_provider(persistence: PersistenceService) -> Callable[[], float | None]:
-    def _current_nav() -> float | None:
-        snapshot = persistence.load_portfolio_state()
-        return snapshot.current_nav if snapshot is not None else None
-
-    return _current_nav
 
 
 def main(argv: list[str] | None = None, prog: str | None = None) -> None:
@@ -87,24 +79,14 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
         return
 
     config = CONFIG
-    persistence = PersistenceService()
-    portfolio_state = persistence.load_portfolio_state()
-    portfolio_peak = (
-        portfolio_state.peak_nav
-        if portfolio_state is not None and portfolio_state.peak_nav is not None
-        else portfolio_state.current_nav
-        if portfolio_state is not None
-        else 1_000_000.0
+    runtime = build_application_runtime(
+        version=VERSION,
+        component_factory=create_runtime_components,
+        service_factory=configure_services,
     )
-    components = create_runtime_components(portfolio_peak=portfolio_peak)
-    services = configure_services(
-        persistence=persistence,
-        probability_gate=components.gate,
-        capital_scaler=components.scaler,
-        factor_calibrator=components.calibrator,
-        alerter=components.alerter,
-        current_nav_provider=_build_current_nav_provider(persistence),
-    )
+    atexit.register(runtime.close)
+    components = runtime.components
+    services = runtime.services
     regime_tracker = RegimeTracker()
     last_portfolio: list[TickerResult] = []
     last_trade_count: int = 0
@@ -124,57 +106,24 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
         if not args.no_telegram and portfolio and regime:
             _send_alert(portfolio, regime, config, services=services)
 
-        # Persist latest scan for FastAPI UI server
+        # Persist latest scan for FastAPI UI server through the shared serializer.
         try:
-            import json
             from datetime import datetime, timezone
             target = services.persistence.paths.state_dir / "latest_scan.json"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            def _fmt(r: Any) -> dict[str, Any]:
-                d: dict[str, Any] = dict(r.__dict__)
-                if hasattr(r, "factors") and r.factors is not None:
-                    d["factors"] = dict(r.factors.__dict__)
-                dirn = d.get("direction", "LONG")
-                d["action"] = "BUY" if dirn == "LONG" else "SELL"
-                entry = float(d.get("entry") or 0.0)
-                stop = float(d.get("stop") or 0.0)
-                t1 = float(d.get("t1") or 0.0)
-                sl_dist = abs(entry - stop) if (entry and stop) else 0.0
-                sl_pct = (sl_dist / entry * 100) if entry > 0 else 5.0
-                t1_dist = abs(t1 - entry) if (entry and t1) else 0.0
-                t1_pct = (t1_dist / entry * 100) if entry > 0 else 10.0
-                is_mean_rev = any("MeanRev" in str(x) for x in d.get("reasons", []))
-
-                engine_horizon = d.get("trade_horizon")
-                if engine_horizon in ("INTRADAY", "SWING"):
-                    horizon = engine_horizon
-                elif not getattr(config, "INTRADAY_ENABLED", False):
-                    horizon = "SWING"
-                elif dirn == "SHORT" and getattr(config, "SHORT_IS_INTRADAY_ONLY", True):
-                    horizon = "INTRADAY"
-                elif sl_pct < 2.5 or (is_mean_rev and sl_pct < 3.0):
-                    horizon = "INTRADAY"
-                else:
-                    horizon = "SWING"
-
-                d["trade_horizon"] = horizon
-                d["horizon_label"] = "INTRADAY (MIS)" if horizon == "INTRADAY" else "SWING (CNC)"
-                d["stop_pct"] = round(sl_pct, 2)
-                d["target_pct"] = round(t1_pct, 2)
-                return d
-            payload = {
-                "scan_time": datetime.now(timezone.utc).isoformat(),
-                "candidates": [_fmt(c) for c in results],
-                "portfolio": [_fmt(p) for p in portfolio],
-                "sector_rs": services.scan_service.get_last_sector_rs(),
-                "regime_info": {
+            payload = build_scan_snapshot(
+                scan_time=datetime.now(timezone.utc).isoformat(),
+                candidates=results,
+                portfolio=portfolio,
+                sector_rs=services.scan_service.get_last_sector_rs(),
+                regime_info={
                     "regime": str(regime.regime.value if hasattr(regime.regime, "value") else regime.regime),
                     "label": regime.label,
                     "confidence": regime.confidence,
                     "confirmed": regime.confirmed,
                 } if regime else None,
-            }
-            target.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+                config=config,
+            )
+            write_json_atomic(target, payload)
         except Exception as exc:
             log.debug("Failed to persist latest_scan.json in run.py: %s", exc)
 

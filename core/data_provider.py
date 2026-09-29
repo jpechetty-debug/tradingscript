@@ -29,12 +29,18 @@ from typing import Any, Optional, Protocol
 import pandas as pd
 import yfinance as yf
 
-from .config import IST, SystemConfig, get_secret_value
+from .config import IST, MarketDataSettings, SystemConfig, get_secret_value
 from .runtime_paths import RUNTIME_PATHS, ensure_runtime_dirs
-from .retry import retry_with_backoff, YFINANCE_BREAKER, guarded_call
+from .retry import FYERS_BREAKER, YFINANCE_BREAKER, guarded_call
 
 log = logging.getLogger("sovereign.data")
 ensure_runtime_dirs()
+
+MarketDataConfig = MarketDataSettings | SystemConfig
+
+
+def _setting(config: MarketDataConfig, typed_name: str, legacy_name: str) -> Any:
+    return getattr(config, typed_name) if hasattr(config, typed_name) else getattr(config, legacy_name)
 
 
 class _HistoryClient(Protocol):
@@ -55,20 +61,14 @@ def _yf_download_chunk(
     period: str,
     interval: str,
 ) -> pd.DataFrame:
-    """yfinance batch download with exponential-backoff retry."""
-    return retry_with_backoff(
-        lambda: yf.download(
-            symbols,
-            period=period,
-            interval=interval,
-            group_by="ticker",
-            progress=False,
-            auto_adjust=True,
-        ),
-        max_attempts=4,
-        base_delay=1.0,
-        max_delay=30.0,
-        label=f"yf_download[{symbols[0] if symbols else '?'}]",
+    """Perform one yfinance request; the caller owns retry policy."""
+    return yf.download(
+        symbols,
+        period=period,
+        interval=interval,
+        group_by="ticker",
+        progress=False,
+        auto_adjust=True,
     )
 
 
@@ -99,7 +99,7 @@ class FyersSessionManager:
         return None
 
     @classmethod
-    def _warn_if_token_stale(cls, config: SystemConfig) -> bool:
+    def _warn_if_token_stale(cls, config: MarketDataConfig) -> bool:
         """
         Emit a WARNING if the loaded access token is likely stale.
 
@@ -116,7 +116,8 @@ class FyersSessionManager:
             # Token came from the shell environment — we cannot check age.
             return False
         env_token = cls._env_token(env_path)
-        if not env_token or env_token != get_secret_value(config.FYERS_ACCESS_TOKEN):
+        token = _setting(config, "fyers_access_token", "FYERS_ACCESS_TOKEN")
+        if not env_token or env_token != get_secret_value(token):
             return False
         try:
             mtime = env_path.stat().st_mtime
@@ -136,7 +137,7 @@ class FyersSessionManager:
         return False
 
     @classmethod
-    def get_client(cls, config: SystemConfig) -> Optional[_HistoryClient]:
+    def get_client(cls, config: MarketDataConfig) -> Optional[_HistoryClient]:
         """
         Return a cached Fyers client, constructing it on first call.
 
@@ -146,7 +147,9 @@ class FyersSessionManager:
         if cls._instance is not None:
             return cls._instance
 
-        if not config.FYERS_CLIENT_ID or not config.FYERS_ACCESS_TOKEN:
+        client_id = _setting(config, "fyers_client_id", "FYERS_CLIENT_ID")
+        access_token = _setting(config, "fyers_access_token", "FYERS_ACCESS_TOKEN")
+        if not client_id or not access_token:
             log.warning(
                 "Fyers credentials not set (FYERS_CLIENT_ID / FYERS_ACCESS_TOKEN); "
                 "falling back to yfinance."
@@ -165,11 +168,11 @@ class FyersSessionManager:
             from fyers_apiv3 import fyersModel
 
             cls._instance = fyersModel.FyersModel(
-                client_id=get_secret_value(config.FYERS_CLIENT_ID),
-                token=get_secret_value(config.FYERS_ACCESS_TOKEN),
+                client_id=get_secret_value(client_id),
+                token=get_secret_value(access_token),
                 log_path=str(RUNTIME_PATHS.logs_dir),
             )
-            log.info("Fyers client initialised (client_id=%s).", config.FYERS_CLIENT_ID)
+            log.info("Fyers client initialised (client_id=%s).", client_id)
             return cls._instance
 
         except ImportError:
@@ -223,7 +226,7 @@ def _fyers_to_df(data: dict) -> pd.DataFrame:
 def fetch_single_ticker(
     ticker: str,
     fsym: str,
-    config: SystemConfig,
+    config: MarketDataConfig,
 ) -> tuple[str, Optional[pd.DataFrame]]:
     """
     Fetch one year of daily OHLCV for *ticker* from Fyers.
@@ -245,7 +248,14 @@ def fetch_single_ticker(
     }
 
     try:
-        res = fyers.history(data=request)
+        res = guarded_call(
+            lambda: fyers.history(data=request),
+            breaker=FYERS_BREAKER,
+            max_attempts=2,
+            base_delay=0.25,
+            max_delay=2.0,
+            label=f"fyers history[{ticker}]",
+        )
         df  = _fyers_to_df(res)
         if not df.empty:
             log.debug("Fyers OK: %s (%d bars).", ticker, len(df))
@@ -270,7 +280,7 @@ def fetch_single_ticker(
 
 def fetch_daily_batch(
     tickers: list[str],
-    config: SystemConfig,
+    config: MarketDataConfig,
 ) -> dict[str, pd.DataFrame]:
     """
     Download daily OHLCV for *tickers* plus the benchmark symbol.
@@ -286,20 +296,24 @@ def fetch_daily_batch(
     ``{ticker: OHLCV_DataFrame}`` for every symbol successfully fetched.
     """
     out: dict[str, pd.DataFrame] = {}
-    all_symbols: list[str] = sorted(list(set(tickers + [config.BENCHMARK])))
+    benchmark = str(_setting(config, "benchmark", "BENCHMARK"))
+    max_workers = int(_setting(config, "max_workers", "MAX_WORKERS"))
+    use_fyers = bool(_setting(config, "use_fyers", "USE_FYERS"))
+    daily_period = str(_setting(config, "daily_period", "DAILY_PERIOD"))
+    all_symbols: list[str] = sorted(list(set(tickers + [benchmark])))
 
     fyers_map: dict[str, str] = {
         t: f"NSE:{t.replace('.NS', '')}-EQ" for t in all_symbols
     }
-    fyers_map[config.BENCHMARK] = "NSE:NIFTY50-INDEX"
+    fyers_map[benchmark] = "NSE:NIFTY50-INDEX"
 
     # ── 1. Fyers path ─────────────────────────────────────────────────────────
-    if config.USE_FYERS:
+    if use_fyers:
         log.info(
             "📡 Fyers download: %d symbols (parallel, workers=%d)…",
-            len(all_symbols), config.MAX_WORKERS,
+            len(all_symbols), max_workers,
         )
-        with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures: list[Future] = [
                 executor.submit(fetch_single_ticker, t, fyers_map[t], config)
                 for t in all_symbols
@@ -318,21 +332,27 @@ def fetch_daily_batch(
                         exc_info=True,
                     )
 
-        if out:
-            log.info("Fyers: %d / %d symbols fetched.", len(out), len(all_symbols))
+        if len(out) == len(all_symbols):
+            log.info("Fyers: all %d symbols fetched.", len(all_symbols))
             return out
 
-        log.warning("Fyers returned no data — falling back to yfinance.")
+        missing_symbols = [symbol for symbol in all_symbols if symbol not in out]
+        log.warning(
+            "Fyers: %d / %d symbols fetched; filling %d missing symbols via yfinance.",
+            len(out), len(all_symbols), len(missing_symbols),
+        )
+    else:
+        missing_symbols = all_symbols
 
     # ── 2. yfinance fallback ──────────────────────────────────────────────────
-    log.warning("📡 yfinance fallback: %d symbols (chunked)…", len(all_symbols))
+    log.warning("📡 yfinance fallback: %d symbols (chunked)…", len(missing_symbols))
 
-    for i in range(0, len(all_symbols), YFINANCE_CHUNK_SIZE):
-        chunk = all_symbols[i : i + YFINANCE_CHUNK_SIZE]
+    for i in range(0, len(missing_symbols), YFINANCE_CHUNK_SIZE):
+        chunk = missing_symbols[i : i + YFINANCE_CHUNK_SIZE]
 
         try:
             raw: pd.DataFrame = guarded_call(
-                lambda: _yf_download_chunk(chunk, config.DAILY_PERIOD, YFINANCE_INTERVAL),
+                lambda: _yf_download_chunk(chunk, daily_period, YFINANCE_INTERVAL),
                 breaker=YFINANCE_BREAKER,
                 max_attempts=4,
                 base_delay=1.0,

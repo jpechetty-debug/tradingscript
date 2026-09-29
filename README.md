@@ -2,7 +2,7 @@
 
 [![Security Scan](https://img.shields.io/badge/Security-Verified-success?style=flat-square)](#)
 [![Lint Compliance](https://img.shields.io/badge/Lint-Ruff%20%7C%20Mypy%20Strict-blue?style=flat-square)](#)
-[![Test Suite](https://img.shields.io/badge/Tests-649%20Passed-brightgreen?style=flat-square)](#)
+[![Test Suite](https://img.shields.io/badge/Tests-653%20Passed-brightgreen?style=flat-square)](#)
 [![Version](https://img.shields.io/badge/Version-14.6--Modular-indigo?style=flat-square)](#)
 
 **Institutional-Grade Quantitative Trading Intelligence & Portfolio Optimization for NSE India.**
@@ -214,7 +214,7 @@ All parameters can be set in `.env` or passed via system environment variables:
 The codebase enforces strict institutional validation standards:
 
 ```bash
-# Run the complete test suite (649 unit & integration tests)
+# Run the complete test suite (653 unit & integration tests)
 python -m pytest tests/ -v
 
 # Run strict code quality & lint verification
@@ -225,7 +225,7 @@ python -m mypy core/ run.py screener_v14_modular.py server.py scripts/ tools/ ut
 ```
 
 - **Static Analysis**: 100% compliant with Ruff and Mypy strict typing.
-- **Regression Safety**: 649/649 tests passing with zero failures.
+- **Regression Safety**: 653/653 tests passing with zero failures.
 
 ---
 

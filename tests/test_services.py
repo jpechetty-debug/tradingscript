@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from pathlib import Path
 from typing import Any, Optional
@@ -372,6 +373,22 @@ def test_scan_service_scan_returns_early_in_panic_regime(monkeypatch):
     assert portfolio == []
     assert observed_regime == panic
     assert scored == []
+
+
+def test_scan_service_honours_cooperative_cancellation_before_fetch():
+    from core.services import ScanCancelled
+
+    fetcher = MagicMock()
+    service = ScanService(
+        version="test",
+        data_service=MarketDataService(fetcher=fetcher),
+        persistence=_FakePersistence(),
+    )
+
+    with pytest.raises(ScanCancelled):
+        service.scan(config=CONFIG, cancel_requested=lambda: True)
+
+    fetcher.assert_not_called()
 
 
 def test_scan_service_backtest_writes_relative_output_under_artifacts(tmp_path, monkeypatch):
@@ -861,5 +878,3 @@ def test_score_candidates_legacy_mock_held_direction_and_min_bars(monkeypatch: p
     assert len(short_calls) == 1
     assert short_calls[0]["held_direction"] == "SHORT"
     assert short_calls[0]["is_open_position"] is True
-
-
