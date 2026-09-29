@@ -214,7 +214,7 @@ All parameters can be set in `.env` or passed via system environment variables:
 The codebase enforces strict institutional validation standards:
 
 ```bash
-# Run the complete test suite (647 unit & integration tests)
+# Run the complete test suite (649 unit & integration tests)
 python -m pytest tests/ -v
 
 # Run strict code quality & lint verification
@@ -225,7 +225,7 @@ python -m mypy core/ run.py screener_v14_modular.py server.py scripts/ tools/ ut
 ```
 
 - **Static Analysis**: 100% compliant with Ruff and Mypy strict typing.
-- **Regression Safety**: 647/647 tests passing with zero failures.
+- **Regression Safety**: 649/649 tests passing with zero failures.
 
 ---
 
