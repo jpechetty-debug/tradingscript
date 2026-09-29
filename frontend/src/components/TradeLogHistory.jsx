@@ -64,7 +64,10 @@ export default function TradeLogHistory({ tradesData }) {
               return (
                 <tr key={idx}>
                   <td className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                    {trade.ts ? new Date(trade.ts).toLocaleString() : 'N/A'}
+                    {(() => {
+                      const rawTs = trade.timestamp || trade.ts || trade.closed_at || trade.entry_ts;
+                      return rawTs ? new Date(rawTs).toLocaleString() : 'N/A';
+                    })()}
                   </td>
                   <td className="mono" style={{ fontWeight: '700' }}>{trade.ticker || 'UNKNOWN'}</td>
                   <td>

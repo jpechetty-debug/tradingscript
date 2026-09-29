@@ -85,17 +85,31 @@ def test_read_root(client: TestClient) -> None:
 
 
 def test_get_status(client: TestClient) -> None:
-    res = client.get("/api/status")
+    # Unauthenticated request must return 401
+    res_unauth = client.get("/api/status")
+    assert res_unauth.status_code == 401
+
+    # Authenticated request must succeed
+    res = client.get("/api/status", headers={"X-API-Key": TEST_API_KEY})
     assert res.status_code == 200
     data = res.json()
     assert data["status"] == "online"
     assert "version" in data
     assert "session" in data
     assert "regime_locked" in data
+    assert "platt_calibration" in data
+    assert "a" in data["platt_calibration"]
+    assert "b" in data["platt_calibration"]
+    assert "is_calibrated" in data["platt_calibration"]
 
 
 def test_get_scan_results_empty_initially(client: TestClient) -> None:
-    res = client.get("/api/scan")
+    # Unauthenticated request must return 401
+    res_unauth = client.get("/api/scan")
+    assert res_unauth.status_code == 401
+
+    # Authenticated request must succeed
+    res = client.get("/api/scan", headers={"X-API-Key": TEST_API_KEY})
     assert res.status_code == 200
     data = res.json()
     assert "is_scanning" in data
@@ -313,6 +327,56 @@ def test_enrich_preserves_persisted_swing_horizon_for_short(tmp_path: pytest.Tem
     assert STATE.last_candidates[0]["action"] == "SELL"
     assert STATE.last_candidates[0]["trade_horizon"] == "SWING"
     assert STATE.last_candidates[0]["horizon_label"] == "SWING (CNC)"
+
+
+def test_get_client_ip_trusted_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+    from server import get_client_ip
+
+    mock_request = MagicMock()
+    mock_request.client.host = "10.0.0.1"
+    mock_request.headers = {
+        "x-forwarded-for": "203.0.113.195, 10.0.0.1",
+        "x-real-ip": "203.0.113.195",
+    }
+
+    # When proxy trust is disabled, returns direct client host
+    monkeypatch.delenv("TRUSTED_PROXIES", raising=False)
+    monkeypatch.delenv("TRUST_PROXIES", raising=False)
+    assert get_client_ip(mock_request) == "10.0.0.1"
+
+    # When proxy trust is enabled, extracts leftmost client IP
+    monkeypatch.setenv("TRUSTED_PROXIES", "1")
+    assert get_client_ip(mock_request) == "203.0.113.195"
+
+    # Falls back to x-real-ip if x-forwarded-for is missing
+    mock_request.headers = {"x-real-ip": "198.51.100.22"}
+    assert get_client_ip(mock_request) == "198.51.100.22"
+
+
+def test_sse_subscriber_limit_503(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+    from server import BROADCASTER
+
+    # Temporarily set cap to small number for testing
+    orig_cap = BROADCASTER.max_subscribers
+    BROADCASTER.max_subscribers = 2
+    try:
+        # Subscribe 2 test queues directly
+        q1 = asyncio.run(BROADCASTER.subscribe())
+        q2 = asyncio.run(BROADCASTER.subscribe())
+
+        # Third attempt should be rejected with 503
+        res = client.get("/api/events")
+        assert res.status_code == 503
+        assert "Max SSE subscribers reached" in res.json()["detail"]
+
+        # Clean up
+        asyncio.run(BROADCASTER.unsubscribe(q1))
+        asyncio.run(BROADCASTER.unsubscribe(q2))
+    finally:
+        BROADCASTER.max_subscribers = orig_cap
+
 
 
 

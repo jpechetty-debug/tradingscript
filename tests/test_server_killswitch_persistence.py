@@ -56,8 +56,9 @@ def test_killswitch_lifecycle():
     status_res = client.get("/api/killswitch/status")
     assert status_res.json()["killswitch_active"] is True
 
-    # Check /api/status also reflects killswitch
-    engine_status = client.get("/api/status").json()
+    # Check /api/status also reflects killswitch (requires auth)
+    assert client.get("/api/status").status_code == 401
+    engine_status = client.get("/api/status", headers=AUTH_HEADERS).json()
     assert engine_status["killswitch_active"] is True
 
     # 3. Triggering scan must be blocked with 403 Forbidden

@@ -2,7 +2,7 @@
 
 [![Security Scan](https://img.shields.io/badge/Security-Verified-success?style=flat-square)](#)
 [![Lint Compliance](https://img.shields.io/badge/Lint-Ruff%20%7C%20Mypy%20Strict-blue?style=flat-square)](#)
-[![Test Suite](https://img.shields.io/badge/Tests-647%20Passed-brightgreen?style=flat-square)](#)
+[![Test Suite](https://img.shields.io/badge/Tests-649%20Passed-brightgreen?style=flat-square)](#)
 [![Version](https://img.shields.io/badge/Version-14.6--Modular-indigo?style=flat-square)](#)
 
 **Institutional-Grade Quantitative Trading Intelligence & Portfolio Optimization for NSE India.**

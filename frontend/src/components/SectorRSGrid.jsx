@@ -58,7 +58,7 @@ export default function SectorRSGrid({ sectorsData }) {
                 <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>#{idx + 1}</span>
                 <span className={`badge ${isPositive ? 'badge-long' : 'badge-short'}`}>
                   {isPositive ? <TrendingUp size={12} style={{ verticalAlign: 'middle' }} /> : <TrendingDown size={12} style={{ verticalAlign: 'middle' }} />}
-                  {' '}{sec.rs ? `${sec.rs > 0 ? '+' : ''}${sec.rs.toFixed(2)}%` : '0.00%'}
+                  {' '}{Number.isFinite(sec.rs) ? `${sec.rs > 0 ? '+' : ''}${sec.rs.toFixed(2)}%` : '0.00%'}
                 </span>
               </div>
 

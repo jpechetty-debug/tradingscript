@@ -42,34 +42,43 @@ export default function App() {
     setTimeout(() => setErrorToast(null), 5000);
   };
 
+  const getAuthHeaders = useCallback(() => {
+    const keyToSend = apiKey || (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? 'sovereign-dev-secret-key' : '');
+    return keyToSend ? { 'X-API-Key': keyToSend } : {};
+  }, [apiKey]);
+
   // Data fetching routines
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/status');
+      const res = await fetch('/api/status', { headers: getAuthHeaders() });
       if (res.ok) {
         const data = await res.json();
         setStatus(data);
+      } else if (res.status === 401) {
+        showToast('Unauthorized: Please configure API_KEY in settings or .env.');
       }
     } catch (e) {
       console.warn('Status poll error:', e);
     }
-  }, []);
+  }, [getAuthHeaders]);
 
   const fetchScan = useCallback(async () => {
     try {
-      const res = await fetch('/api/scan');
+      const res = await fetch('/api/scan', { headers: getAuthHeaders() });
       if (res.ok) {
         const data = await res.json();
         setScanData(data);
+      } else if (res.status === 401) {
+        showToast('Unauthorized: Please configure API_KEY in settings or .env.');
       }
     } catch (e) {
       console.warn('Scan poll error:', e);
     }
-  }, []);
+  }, [getAuthHeaders]);
 
   const fetchSectors = useCallback(async () => {
     try {
-      const res = await fetch('/api/sectors');
+      const res = await fetch('/api/sectors', { headers: getAuthHeaders() });
       if (res.ok) {
         const data = await res.json();
         setSectorsData(data);
@@ -77,13 +86,11 @@ export default function App() {
     } catch (e) {
       console.warn('Sectors poll error:', e);
     }
-  }, []);
+  }, [getAuthHeaders]);
 
   const fetchTrades = useCallback(async () => {
     try {
-      const keyToSend = apiKey || (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? 'sovereign-dev-secret-key' : '');
-      const headers = keyToSend ? { 'X-API-Key': keyToSend } : {};
-      const res = await fetch('/api/trades?limit=100', { headers });
+      const res = await fetch('/api/trades?limit=100', { headers: getAuthHeaders() });
       if (res.ok) {
         const data = await res.json();
         setTradesData(data);
@@ -91,7 +98,7 @@ export default function App() {
     } catch (e) {
       console.warn('Trades poll error:', e);
     }
-  }, [apiKey]);
+  }, [getAuthHeaders]);
 
   // Polling guard against overlapping requests
   const isFetchingRef = useRef(false);

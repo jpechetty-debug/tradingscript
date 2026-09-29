@@ -68,9 +68,35 @@ def verify_api_key(api_key: str = Security(api_key_header)) -> None:
         )
 
 
+def get_client_ip(request: Request) -> str:
+    """
+    Extract client IP for rate limiting, with support for trusted reverse proxies.
+
+    If TRUST_PROXIES or TRUSTED_PROXIES is enabled:
+      - Reads the client IP from the 'X-Forwarded-For' header (left-most / client address).
+      - If 'X-Real-IP' is present, falls back to that.
+    Otherwise:
+      - Falls back to slowapi's default `get_remote_address(request)`.
+    """
+    trust_proxy_env = os.environ.get("TRUSTED_PROXIES", os.environ.get("TRUST_PROXIES", "0")).lower().strip()
+    should_trust = trust_proxy_env in ("1", "true", "yes", "*") or bool(trust_proxy_env and trust_proxy_env != "0")
+
+    if should_trust:
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            parts = [p.strip() for p in forwarded_for.split(",") if p.strip()]
+            if parts:
+                return parts[0]
+        real_ip = request.headers.get("x-real-ip")
+        if real_ip and real_ip.strip():
+            return real_ip.strip()
+
+    return get_remote_address(request)
+
+
 log = logging.getLogger("sovereign.server")
 
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(key_func=get_client_ip)
 
 
 @asynccontextmanager
@@ -246,13 +272,17 @@ STATE.load_persisted_state(PERSISTENCE)
 
 
 
+MAX_SSE_SUBSCRIBERS = int(os.environ.get("MAX_SSE_SUBSCRIBERS", "50"))
+
+
 class SSEBroadcaster:
     """Thread-safe event broadcaster for Server-Sent Events (SSE)."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_subscribers: int = MAX_SSE_SUBSCRIBERS) -> None:
         self._subscribers: set[asyncio.Queue] = set()
         self._lock = asyncio.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self.max_subscribers = max_subscribers
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -263,10 +293,15 @@ class SSEBroadcaster:
                 self._loop = asyncio.get_running_loop()
             except RuntimeError:
                 pass
-        queue: asyncio.Queue = asyncio.Queue(maxsize=100)
         async with self._lock:
+            if len(self._subscribers) >= self.max_subscribers:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Max SSE subscribers reached ({self.max_subscribers}). Please retry later.",
+                )
+            queue: asyncio.Queue = asyncio.Queue(maxsize=100)
             self._subscribers.add(queue)
-        return queue
+            return queue
 
     async def unsubscribe(self, queue: asyncio.Queue) -> None:
         async with self._lock:
@@ -450,7 +485,7 @@ def read_root() -> FileResponse:
     return FileResponse(str(dashboard_path), media_type="text/html")
 
 
-@app.get("/api/status")
+@app.get("/api/status", dependencies=[Depends(verify_api_key)])
 async def get_status() -> Dict[str, Any]:
     rg_settings = CONFIG.as_regime()
     session = rg_settings.session_from_time()
@@ -459,6 +494,7 @@ async def get_status() -> Dict[str, Any]:
     mins_to_sq = rg_settings.minutes_to_squareoff()
     phase_val = phase.value if hasattr(phase, "value") else str(phase)
     cutoff_active = phase_val in ("INTRADAY_FREEZE", "SWING_CLOSING", "POST_MARKET")
+    platt_a, platt_b, platt_calibrated = PERSISTENCE.load_platt(CONFIG)
     async with STATE._lock:
         return {
             "status": "online",
@@ -474,10 +510,16 @@ async def get_status() -> Dict[str, Any]:
             "scan_error": STATE.scan_error,
             "last_known_regime": STATE.last_regime_info,
             "killswitch_active": STATE.is_killed,
+            "platt_calibration": {
+                "a": platt_a,
+                "b": platt_b,
+                "is_calibrated": platt_calibrated,
+                "min_trades_required": 80,
+            },
         }
 
 
-@app.get("/api/scan")
+@app.get("/api/scan", dependencies=[Depends(verify_api_key)])
 async def get_scan_results() -> Dict[str, Any]:
     rg_settings = CONFIG.as_regime()
     phase = rg_settings.get_market_phase()
