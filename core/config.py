@@ -144,6 +144,10 @@ class MarketDataSettings:
     fyers_secret_key: SecretStr = field(default_factory=lambda: SecretStr(os.getenv("FYERS_SECRET_KEY", "")))
     fyers_redirect_uri: str = field(default_factory=lambda: os.getenv("FYERS_REDIRECT_URI", ""))
     fyers_access_token: SecretStr = field(default_factory=lambda: SecretStr(os.getenv("FYERS_ACCESS_TOKEN", "")))
+    yfinance_chunk_size: int = field(default_factory=lambda: int(os.getenv("YFINANCE_CHUNK_SIZE", "50")))
+    yfinance_min_chunk_interval: float = field(default_factory=lambda: float(os.getenv("YFINANCE_MIN_CHUNK_INTERVAL", "1.0")))
+    yfinance_cache_ttl_hours: float = field(default_factory=lambda: float(os.getenv("YFINANCE_CACHE_TTL_HOURS", "24")))
+    yfinance_negative_cache_ttl_hours: float = field(default_factory=lambda: float(os.getenv("YFINANCE_NEGATIVE_CACHE_TTL_HOURS", "168")))
 
 
 @dataclass(frozen=True)
@@ -443,6 +447,10 @@ class SystemConfig:
     DAILY_PERIOD: str = "1y"
     BENCHMARK:    str = "^NSEI"
     MAX_WORKERS:  int = field(default_factory=lambda: min(20, (os.cpu_count() or 4) * 2))
+    YFINANCE_CHUNK_SIZE: int = field(default_factory=lambda: int(os.getenv("YFINANCE_CHUNK_SIZE", "50")))
+    YFINANCE_MIN_CHUNK_INTERVAL: float = field(default_factory=lambda: float(os.getenv("YFINANCE_MIN_CHUNK_INTERVAL", "1.0")))
+    YFINANCE_CACHE_TTL_HOURS: float = field(default_factory=lambda: float(os.getenv("YFINANCE_CACHE_TTL_HOURS", "24")))
+    YFINANCE_NEGATIVE_CACHE_TTL_HOURS: float = field(default_factory=lambda: float(os.getenv("YFINANCE_NEGATIVE_CACHE_TTL_HOURS", "168")))
 
     # ── Session times (IST) ───────────────────────────────────────────────────
     SESSION_OPEN_END:   str = "10:15"
@@ -511,6 +519,10 @@ class SystemConfig:
             fyers_secret_key=self.FYERS_SECRET_KEY,
             fyers_redirect_uri=self.FYERS_REDIRECT_URI,
             fyers_access_token=self.FYERS_ACCESS_TOKEN,
+            yfinance_chunk_size=self.YFINANCE_CHUNK_SIZE,
+            yfinance_min_chunk_interval=self.YFINANCE_MIN_CHUNK_INTERVAL,
+            yfinance_cache_ttl_hours=self.YFINANCE_CACHE_TTL_HOURS,
+            yfinance_negative_cache_ttl_hours=self.YFINANCE_NEGATIVE_CACHE_TTL_HOURS,
         )
 
     def as_regime(self) -> RegimeSettings:

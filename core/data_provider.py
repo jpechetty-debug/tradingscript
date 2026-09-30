@@ -20,7 +20,10 @@ Fixes vs original
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -54,6 +57,63 @@ FYERS_CONT_FLAG: str     = "1"
 FYERS_LOOKBACK_DAYS: int = 365
 YFINANCE_CHUNK_SIZE: int = 40
 YFINANCE_INTERVAL: str   = "1d"
+_YFINANCE_CACHE_DIR = RUNTIME_PATHS.state_dir / "yfinance"
+_YFINANCE_FETCH_LOCK = threading.Lock()
+_YFINANCE_RATE_LOCK = threading.Lock()
+_YFINANCE_LAST_REQUEST = 0.0
+
+
+def _cache_path(symbol: str, period: str, *, negative: bool = False) -> Path:
+    """Return a filesystem-safe cache path for one Yahoo response."""
+    digest = hashlib.sha256(f"{symbol}|{period}|{YFINANCE_INTERVAL}".encode()).hexdigest()
+    suffix = ".missing" if negative else ".pkl"
+    return _YFINANCE_CACHE_DIR / f"{digest}{suffix}"
+
+
+def _is_fresh(path: Path, ttl_hours: float) -> bool:
+    return ttl_hours > 0 and path.exists() and (time.time() - path.stat().st_mtime) < ttl_hours * 3600
+
+
+def _load_cached_daily(symbol: str, period: str, ttl_hours: float) -> Optional[pd.DataFrame]:
+    path = _cache_path(symbol, period)
+    if not _is_fresh(path, ttl_hours):
+        return None
+    try:
+        frame = pd.read_pickle(path)
+        return frame if isinstance(frame, pd.DataFrame) and not frame.empty else None
+    except Exception:
+        log.warning("Ignoring unreadable yfinance cache for %s.", symbol, exc_info=True)
+        return None
+
+
+def _store_cached_daily(symbol: str, period: str, frame: pd.DataFrame) -> None:
+    _YFINANCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    target = _cache_path(symbol, period)
+    tmp = target.with_suffix(".tmp")
+    frame.to_pickle(tmp)
+    tmp.replace(target)
+
+
+def _is_negative_cached(symbol: str, period: str, ttl_hours: float) -> bool:
+    return _is_fresh(_cache_path(symbol, period, negative=True), ttl_hours)
+
+
+def _store_negative_cache(symbol: str, period: str) -> None:
+    _YFINANCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _cache_path(symbol, period, negative=True).touch()
+
+
+def _rate_limited_yf_download(symbols: list[str], period: str, interval: str, min_interval: float) -> pd.DataFrame:
+    """Serialize Yahoo requests across overlapping scans and enforce a safe pace."""
+    global _YFINANCE_LAST_REQUEST
+    with _YFINANCE_RATE_LOCK:
+        delay = min_interval - (time.monotonic() - _YFINANCE_LAST_REQUEST)
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            return _yf_download_chunk(symbols, period, interval)
+        finally:
+            _YFINANCE_LAST_REQUEST = time.monotonic()
 
 
 def _yf_download_chunk(
@@ -300,6 +360,10 @@ def fetch_daily_batch(
     max_workers = int(_setting(config, "max_workers", "MAX_WORKERS"))
     use_fyers = bool(_setting(config, "use_fyers", "USE_FYERS"))
     daily_period = str(_setting(config, "daily_period", "DAILY_PERIOD"))
+    chunk_size = max(1, int(_setting(config, "yfinance_chunk_size", "YFINANCE_CHUNK_SIZE")))
+    min_interval = max(0.0, float(_setting(config, "yfinance_min_chunk_interval", "YFINANCE_MIN_CHUNK_INTERVAL")))
+    cache_ttl = max(0.0, float(_setting(config, "yfinance_cache_ttl_hours", "YFINANCE_CACHE_TTL_HOURS")))
+    negative_ttl = max(0.0, float(_setting(config, "yfinance_negative_cache_ttl_hours", "YFINANCE_NEGATIVE_CACHE_TTL_HOURS")))
     all_symbols: list[str] = sorted(list(set(tickers + [benchmark])))
 
     fyers_map: dict[str, str] = {
@@ -345,67 +409,89 @@ def fetch_daily_batch(
         missing_symbols = all_symbols
 
     # ── 2. yfinance fallback ──────────────────────────────────────────────────
-    log.warning("📡 yfinance fallback: %d symbols (chunked)…", len(missing_symbols))
+    # This lock is deliberately broader than one request: a second overlapping
+    # scan re-checks the cache after the first scan completes instead of issuing
+    # the same Yahoo requests again.
+    with _YFINANCE_FETCH_LOCK:
+        uncached_symbols: list[str] = []
+        for symbol in missing_symbols:
+            cached = _load_cached_daily(symbol, daily_period, cache_ttl)
+            if cached is not None:
+                out[symbol] = cached
+            elif _is_negative_cached(symbol, daily_period, negative_ttl):
+                log.debug("yfinance: skipping negative-cached symbol %s.", symbol)
+            else:
+                uncached_symbols.append(symbol)
 
-    for i in range(0, len(missing_symbols), YFINANCE_CHUNK_SIZE):
-        chunk = missing_symbols[i : i + YFINANCE_CHUNK_SIZE]
+        log.info(
+            "yfinance fallback: %d symbols (%d cache hits, %d network candidates).",
+            len(missing_symbols), len(out), len(uncached_symbols),
+        )
 
-        try:
-            raw: pd.DataFrame = guarded_call(
-                lambda: _yf_download_chunk(chunk, daily_period, YFINANCE_INTERVAL),
-                breaker=YFINANCE_BREAKER,
-                max_attempts=4,
-                base_delay=1.0,
-                max_delay=30.0,
-                label=f"yfinance chunk[{chunk[0]}]",
-            )
-        except Exception:
-            log.error(
-                "yfinance: download failed for chunk starting at %s.",
-                chunk[0],
-                exc_info=True,
-            )
-            continue
+        for i in range(0, len(uncached_symbols), chunk_size):
+            chunk = uncached_symbols[i : i + chunk_size]
 
-        if raw.empty:
-            log.debug("yfinance: empty result for chunk %s.", chunk)
-            continue
-
-        log.info("yfinance chunk %s: shape=%s.", chunk, raw.shape)
-
-        for t in chunk:
             try:
-                if isinstance(raw.columns, pd.MultiIndex):
-                    if t not in raw.columns.get_level_values(0):
-                        log.debug("yfinance: %s absent from MultiIndex result.", t)
-                        continue
-                    df = raw.xs(t, axis=1, level=0).copy()
-                else:
-                    if len(chunk) == 1:
-                        df = raw.copy()
-                    else:
-                        log.warning(
-                            "Expected MultiIndex for multi-ticker chunk but got flat "
-                            "columns — skipping %s.", t
-                        )
-                        continue
-
-                df.dropna(how="all", inplace=True)
-                df.columns = [c.title() for c in df.columns]
-
-                if df.empty:
-                    log.debug("yfinance: %s — empty after dropna.", t)
-                    continue
-
-                out[t] = df
-                log.debug("yfinance OK: %s (%d bars).", t, len(df))
-
-            except KeyError:
-                log.debug("yfinance: %s not found in response.", t, exc_info=True)
+                raw: pd.DataFrame = guarded_call(
+                    lambda: _rate_limited_yf_download(
+                        chunk, daily_period, YFINANCE_INTERVAL, min_interval
+                    ),
+                    breaker=YFINANCE_BREAKER,
+                    max_attempts=3,
+                    base_delay=1.0,
+                    max_delay=30.0,
+                    label=f"yfinance chunk[{chunk[0]}]",
+                )
             except Exception:
                 log.error(
-                    "yfinance: unexpected error extracting %s.", t, exc_info=True
+                    "yfinance: download failed for chunk starting at %s.",
+                    chunk[0],
+                    exc_info=True,
                 )
+                continue
+
+            if raw.empty:
+                log.debug("yfinance: empty result for chunk %s.", chunk)
+                continue
+
+            log.info("yfinance chunk %s: shape=%s.", chunk, raw.shape)
+
+            for t in chunk:
+                try:
+                    if isinstance(raw.columns, pd.MultiIndex):
+                        if t not in raw.columns.get_level_values(0):
+                            _store_negative_cache(t, daily_period)
+                            log.debug("yfinance: %s absent from MultiIndex result.", t)
+                            continue
+                        df = raw.xs(t, axis=1, level=0).copy()
+                    else:
+                        if len(chunk) == 1:
+                            df = raw.copy()
+                        else:
+                            log.warning(
+                                "Expected MultiIndex for multi-ticker chunk but got flat "
+                                "columns — skipping %s.", t
+                            )
+                            continue
+
+                    df.dropna(how="all", inplace=True)
+                    df.columns = [c.title() for c in df.columns]
+
+                    if df.empty:
+                        _store_negative_cache(t, daily_period)
+                        log.debug("yfinance: %s — empty after dropna.", t)
+                        continue
+
+                    out[t] = df
+                    _store_cached_daily(t, daily_period, df)
+                    log.debug("yfinance OK: %s (%d bars).", t, len(df))
+
+                except KeyError:
+                    log.debug("yfinance: %s not found in response.", t, exc_info=True)
+                except Exception:
+                    log.error(
+                        "yfinance: unexpected error extracting %s.", t, exc_info=True
+                    )
 
     log.info("yfinance: %d / %d symbols fetched.", len(out), len(all_symbols))
     return out

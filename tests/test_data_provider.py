@@ -29,6 +29,9 @@ def _cfg(**kw):
     object.__setattr__(cfg, "DAILY_PERIOD", "1y")
     object.__setattr__(cfg, "MAX_WORKERS", 4)
     object.__setattr__(cfg, "BENCHMARK", "^NSEI")
+    object.__setattr__(cfg, "YFINANCE_CACHE_TTL_HOURS", 0)
+    object.__setattr__(cfg, "YFINANCE_NEGATIVE_CACHE_TTL_HOURS", 0)
+    object.__setattr__(cfg, "YFINANCE_MIN_CHUNK_INTERVAL", 0)
     for k, v in kw.items():
         object.__setattr__(cfg, k, v)
     return cfg
@@ -137,6 +140,32 @@ class TestFetchDailyBatch:
             assert all(c[0].isupper() for c in cols)
         else:
             pytest.fail("RELIANCE.NS missing from result")
+
+    def test_yfinance_results_are_reused_from_persistent_cache(self, tmp_path, monkeypatch):
+        import core.data_provider as provider
+
+        cfg = _cfg(YFINANCE_CACHE_TTL_HOURS=24)
+        monkeypatch.setattr(provider, "_YFINANCE_CACHE_DIR", tmp_path)
+        fake = _fake_multi_df(["RELIANCE.NS", "^NSEI"])
+        with patch("core.data_provider._yf_download_chunk", return_value=fake) as download:
+            first = fetch_daily_batch(["RELIANCE.NS"], cfg)
+            second = fetch_daily_batch(["RELIANCE.NS"], cfg)
+
+        assert set(first) == set(second) == {"RELIANCE.NS", "^NSEI"}
+        assert download.call_count == 1
+
+    def test_missing_yfinance_symbol_is_negative_cached(self, tmp_path, monkeypatch):
+        import core.data_provider as provider
+
+        cfg = _cfg(YFINANCE_CACHE_TTL_HOURS=24, YFINANCE_NEGATIVE_CACHE_TTL_HOURS=24)
+        monkeypatch.setattr(provider, "_YFINANCE_CACHE_DIR", tmp_path)
+        # The response has the benchmark only, so RELIANCE is a confirmed empty result.
+        fake = _fake_multi_df(["^NSEI"])
+        with patch("core.data_provider._yf_download_chunk", return_value=fake) as download:
+            fetch_daily_batch(["RELIANCE.NS"], cfg)
+            fetch_daily_batch(["RELIANCE.NS"], cfg)
+
+        assert download.call_count == 1
 
     def test_fyers_session_manager_skips_stale_dotenv_token(self, tmp_path, monkeypatch):
         from core.data_provider import FyersSessionManager
