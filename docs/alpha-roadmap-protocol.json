@@ -1,0 +1,35 @@
+{
+  "version": "SWING_ALPHA_ROADMAP_V3",
+  "created": "2026-10-04",
+  "status": "RESEARCH_IMPLEMENTATION_EDGE_UNPROVEN",
+  "phase_1": {
+    "relative_strength": "63-session stock/benchmark log-return difference; average-tie percentile ranks in the liquid available universe; rank strictly above 80.",
+    "sector_rotation": "Top 3 of the complete manifest sector-index universe; worst rank for ties; no rank when any sector history is missing.",
+    "breadth": "Available-stock SMA50 breadth: above 60% full size; 40-60% half size; below 40% or under 90% valid coverage no new allocation.",
+    "portfolio": "At new entries: heat at most 6% of current NAV and the existing absolute risk cap; sector notional at most 25% NAV; pairwise absolute correlation strictly below 0.75 and the existing stricter limit, at least 30 paired daily observations. Existing position/count/cash limits also apply. Held positions are not forcibly sold."
+  },
+  "phase_2": {
+    "pead": "Positive observed consensus EPS surprise with expectations captured before announcement, within existing 20-session freshness limit.",
+    "earnings_momentum": "Observed EPS growth above 20%, revenue growth above 15%, explicitly raised guidance, price above SMA200; fundamentals period-end age at most 150 calendar days and reporting period matching the earnings surprise.",
+    "flow": "Complete 20-session instrument-specific FII and DII net INR observations, observed delivery/turnover comparison, and volume expansion. Market aggregate flows cannot stand in for stock-level observations.",
+    "composite": "30% relative-strength percentile, 25% earnings, 20% flow, 15% sector leadership, 10% candle structure; score strictly above 85/100. Missing required factors reject rather than receiving zero or silently changing weights. Phase 1 explicitly uses only RS/sector/structure, normalized over their frozen weights."
+  },
+  "phase_3": {
+    "regimes": "High benchmark ATR expansion: ADX at least 35; low cross-sectional median ADX: range, disable breakout; benchmark above SMA200: bull ADX at least 20; otherwise bear ADX at least 30. Unknown ADX rejects.",
+    "walk_forward": "Rolling 5 calendar years of training, next calendar year of testing, disjoint test windows; partial last year labeled. Training results never choose alpha thresholds. Flat books and modeled liquidation at each test boundary.",
+    "stress": "10,000 seeded circular-block trade bootstrap paths; additional slippage, gap loss and missed fills. Report drawdown, 95% loss VaR/expected shortfall and threshold-defined ruin probability. Trade-level approximation is not a concurrent daily portfolio simulation."
+  },
+  "phase_4": {
+    "meta": "Opt-in standardized regularized logistic regression, global and per-regime cohorts. Only known closed training labels; 5-session embargo, chronological 80/20 split with overlapping labels purged, minimum 40 samples and 10 examples per class in fit split. No DATA_END training labels in walk-forward. Report holdout Brier score. Predictions are training estimates, not certified calibrated win probabilities; gate at 0.55.",
+    "research": "Dated local source packets for financials, results, promoter/institutional holdings, sector tailwinds and commentary. Optional explicitly configured Responses API call creates bull/bear theses, risks and catalysts; citations require exact quotes from supplied sources. Drafts require semantic review. No order authority.",
+    "optimization": "Deterministic alpha-rank constrained new-entry allocation against supplied held positions; replay enforces the same NAV/sector/heat/correlation limits against its simulated actual book. Scan allocations are indicative and exclude fees; replay includes modeled costs."
+  },
+  "limitations": [
+    "No external licensed feeds are acquired; unavailable evidence remains unavailable.",
+    "Current-snapshot membership is not point-in-time population coverage; survivorship and adjusted-price revision bias remain.",
+    "This new protocol does not change the frozen V1 or V2 prospective protocols.",
+    "Percentage limits are new-entry limits: subsequent marks may raise held exposures above them.",
+    "All thresholds and score recipes are research hypotheses, not proven sources of alpha.",
+    "No live trading strategy is promoted automatically."
+  ]
+}

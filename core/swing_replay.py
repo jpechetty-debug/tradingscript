@@ -17,6 +17,7 @@ from .swing_exits import ExitPolicy
 from .regime import RegimeTracker, classify_regime, compute_breadth, compute_sector_rs
 from .services import score_universe
 from .swing import SwingPlan, swing_fill_size
+from .alpha_portfolio import PortfolioLimits, bounded_quantity
 
 
 class ReplaySignal(Protocol):
@@ -51,7 +52,8 @@ def replay_swing(raw: dict[str, pd.DataFrame], config: SystemConfig,
                  prepared: dict[str, pd.DataFrame] | None = None,
                  warm_history: bool = False, exit_policy: ExitPolicy | None = None,
                  signal_provider: Callable[[dict[str, pd.DataFrame], pd.Timestamp, SystemConfig], Sequence[ReplaySignal]] | None = None,
-                 entry_guard: Callable[[ReplaySignal, pd.Timestamp], str | None] | None = None) -> ReplayResult:
+                 entry_guard: Callable[[ReplaySignal, pd.Timestamp], str | None] | None = None,
+                 portfolio_limits: PortfolioLimits | None = None) -> ReplayResult:
     """No live state or calibration; limits apply to the actual simulated held book."""
     processed = prepared if prepared is not None else {ticker: add_indicators(frame, config) for ticker, frame in raw.items()}
     dates = raw[config.BENCHMARK].loc[start:end].index
@@ -148,8 +150,10 @@ def replay_swing(raw: dict[str, pd.DataFrame], config: SystemConfig,
                       volatility_regime=("HIGH" if volatility.iloc[-1] > threshold else "LOW") if np.isfinite(threshold) else "UNKNOWN",
                       breadth_regime="STRONG" if breadth >= .55 else "WEAK" if breadth < .45 else "NEUTRAL")
         context = {r.ticker: dict(labels, research_context=getattr(r, "research_context", {})) for r in result}
-        returns = {t: f.Close.pct_change().iloc[-60:] for t, f in frames.items()}
-        correlation = pd.DataFrame(returns).corr()
+        returns = {t: (f.Close.reindex(bench.index).pct_change(fill_method=None).iloc[-60:]
+                       if portfolio_limits else f.Close.pct_change().iloc[-60:]) for t, f in frames.items()}
+        correlation = pd.DataFrame(returns).corr(
+            min_periods=portfolio_limits.min_correlation_observations if portfolio_limits else 1)
         return result
 
     if warm_history:
@@ -203,12 +207,14 @@ def replay_swing(raw: dict[str, pd.DataFrame], config: SystemConfig,
                 reason = "position_cap"
             elif sum(p["candidate"].sector == candidate.sector for p in book.values()) >= config.MAX_SECTOR_PICKS:
                 reason = "sector_cap"
-            elif config.MAX_CORR < 1:
+            elif config.MAX_CORR < 1 or portfolio_limits is not None:
                 for held in book:
                     if held not in correlation or ticker not in correlation.index or not np.isfinite(float(correlation.loc[ticker, held])):
                         reason = "correlation_unknown"
                         break
-                    if abs(float(correlation.loc[ticker, held])) > config.MAX_CORR:
+                    corr_value = abs(float(correlation.loc[ticker, held]))
+                    if (corr_value > config.MAX_CORR or
+                            (portfolio_limits is not None and corr_value >= portfolio_limits.max_correlation)):
                         reason = "correlation_cap"
                         break
             if reason:
@@ -238,6 +244,16 @@ def replay_swing(raw: dict[str, pd.DataFrame], config: SystemConfig,
                 rejected["gap_or_size"] += 1
                 decision(candidate, date, "entry_bounds_or_rr" if candidate.strategy_id.startswith("SWING_") else "invalid_levels_or_size")
                 continue
+            if portfolio_limits is not None:
+                sector_value = sum(p["shares"] * float(bars[t].Open if t in bars else p["mark"])
+                                   for t, p in book.items() if p["candidate"].sector == candidate.sector)
+                quantity, limit_reason = bounded_quantity(
+                    quantity, price, stop, nav_open, sum(p["risk"] for p in book.values()), sector_value,
+                    config.MAX_PORTFOLIO_RISK_INR, portfolio_limits,
+                    getattr(candidate, "research_context", {}).get("breadth_risk_scale", 1.))
+                if quantity <= 0:
+                    decision(candidate, date, limit_reason)
+                    continue
             available_risk = max(0., config.MAX_PORTFOLIO_RISK_INR - sum(p["risk"] for p in book.values()))
             risk_quantity = int(available_risk / (price - stop))
             cash_quantity = max(0, int((cash - cost_model.commission_inr) / (price * (1 + cost_model.entry_cost_pct()))))
@@ -306,7 +322,13 @@ def replay_swing(raw: dict[str, pd.DataFrame], config: SystemConfig,
         previous_bench_close = equity[-1]["benchmark_close"] if equity else bench_open
         overnight = bench_open / previous_bench_close - 1
         intraday = bench_close / bench_open - 1
+        sector_values: dict[str, float] = {}
+        for position in book.values():
+            sector = position["candidate"].sector
+            sector_values[sector] = sector_values.get(sector, 0.) + position["shares"] * position["mark"]
         equity.append(dict(date=date, nav=nav, cash=cash, positions=len(book), daily_return=nav / previous_nav - 1,
+                           portfolio_heat=sum(p["risk"] for p in book.values()) / nav if nav > 0 else 0.,
+                           max_sector_exposure=max(sector_values.values(), default=0.) / nav if nav > 0 else 0.,
                            exposure_open=exposure_open, exposure_close=(nav - cash) / nav if nav > 0 else 0.,
                            benchmark_close=bench_close, benchmark_return=bench_close / previous_bench_close - 1,
                            exposure_matched_benchmark_return=previous_exposure * overnight + exposure_open * intraday))

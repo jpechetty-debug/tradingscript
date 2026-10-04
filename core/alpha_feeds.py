@@ -15,6 +15,8 @@ SCHEMAS = {
     "earnings": ("ticker", "period_end", "announced_at", "expected_at", "expectation_ingested_at",
                  "actual_eps", "expected_eps", "expectation_kind"),
     "delivery": ("ticker", "session", "delivery_qty", "total_qty", "turnover"),
+    "fundamentals": ("ticker", "period_end", "eps_growth", "revenue_growth", "guidance_raised"),
+    "flows": ("ticker", "session", "fii_net_inr", "dii_net_inr"),
 }
 
 
@@ -52,7 +54,8 @@ class AlphaFeed:
                     raise ValueError(f"Empty {col}")
         if "ticker" in data:
             data["ticker"] = data.ticker.str.upper().str.removesuffix(".NS")
-        numeric = [c for c in ("close", "actual_eps", "expected_eps", "delivery_qty", "total_qty", "turnover") if c in data]
+        numeric = [c for c in ("close", "actual_eps", "expected_eps", "delivery_qty", "total_qty", "turnover",
+                              "eps_growth", "revenue_growth", "fii_net_inr", "dii_net_inr") if c in data]
         for col in numeric:
             data[col] = pd.to_numeric(data[col], errors="raise")
         if numeric and not np.isfinite(data[numeric].to_numpy(dtype=float)).all():
@@ -73,9 +76,18 @@ class AlphaFeed:
                     | (data.expectation_ingested_at >= data.announced_at)
                     | (data.published_at < data.announced_at) | (data.period_end > data.announced_at.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize())).any():
                 raise ValueError("Earnings expectations must have been observed before the announcement")
+        if kind == "fundamentals":
+            flags = data.guidance_raised.astype(str).str.lower()
+            if not flags.isin(["true", "false", "1", "0"]).all():
+                raise ValueError("guidance_raised must be an explicit boolean")
+            data["guidance_raised"] = flags.isin(["true", "1"])
+        date_col = "session" if "session" in data else "period_end" if "period_end" in data else None
+        if date_col and (data[date_col] > data.published_at.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize()).any():
+            raise ValueError("Observation cannot be published before its session/period end")
         keys = {"indices": ["index", "session"], "delivery": ["ticker", "session"],
                 "earnings": ["ticker", "period_end"], "sectors": ["ticker", "effective_date"],
-                "surveillance": ["ticker", "effective_date"]}
+                "surveillance": ["ticker", "effective_date"], "fundamentals": ["ticker", "period_end"],
+                "flows": ["ticker", "session"]}
         self.keys = keys[kind]
         if data.duplicated([*self.keys, "known_at"]).any():
             raise ValueError("Conflicting same-time feed revisions")
