@@ -20,7 +20,7 @@ def test_raw_get() -> None:
             print(r.text[:200])
         else:
             logger.warning(f"Response failed: {r.text[:200]}")
-    except Exception as e:
+    except (requests.RequestException, OSError) as e:
         logger.error(f"Raw GET failed with exception: {type(e).__name__}: {e}")
 
 if __name__ == "__main__":

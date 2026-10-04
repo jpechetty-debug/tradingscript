@@ -60,6 +60,31 @@ def test_system_config_adapters_preserve_values():
     assert app.signal.super_period == 14
     assert app.portfolio.portfolio_size == 8
 
+    # Verify composed domain property delegation
+    assert cfg.regime.regime_confirm_bars == 4
+    assert cfg.signal.super_period == 14
+    assert cfg.portfolio.portfolio_size == 8
+    assert cfg.market_data.daily_period == cfg.DAILY_PERIOD
+    assert cfg.execution_cost.slippage_bps == 12
+    assert cfg.scoring_runtime.platt_a == -3.5
+    assert cfg.settings.regime.regime_confirm_bars == 4
+    assert cfg.app_settings.signal.super_period == 14
+
+    # Verify fallback lowercase delegation
+    assert cfg.regime_confirm_bars == 4
+    assert cfg.super_period == 14
+
+    # Verify construction from AppSettings composition
+    cfg_composed = SystemConfig.from_app_settings(app)
+    assert cfg_composed.REGIME_CONFIRM_BARS == 4
+    assert cfg_composed.SUPER_PERIOD == 14
+    assert cfg_composed.PORTFOLIO_SIZE == 8
+
+    cfg_payload = SystemConfig(settings_payload=app)
+    assert cfg_payload.REGIME_CONFIRM_BARS == 4
+    assert cfg_payload.SUPER_PERIOD == 14
+
+
 
 def test_leaf_modules_no_global_config_import():
     """Ensure leaf modules in core/ do not import global CONFIG singleton."""

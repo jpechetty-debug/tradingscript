@@ -29,7 +29,7 @@ def check_universe_drift() -> None:
             timeout=10
         )
         response.raise_for_status()
-    except Exception as e:
+    except (requests.RequestException, OSError) as e:
         log.error(f"Failed to fetch Nifty 500 list: {e}")
         sys.exit(1)
 

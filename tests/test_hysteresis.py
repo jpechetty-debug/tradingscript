@@ -507,7 +507,7 @@ class TestStopLossAndTargetMonitoring:
 
             # Insert an open position with stop_loss = 2500.0
             ps.save_open_positions([
-                {"ticker": "RELIANCE.NS", "direction": "LONG", "entry": 2550.0, "shares": 10, "stop": 2500.0, "t1": 2650.0, "prob_win": 0.55, "composite": 0.60}
+                {"ticker": "RELIANCE.NS", "direction": "LONG", "entry": 2550.0, "shares": 10, "stop": 2500.0, "t1": 2650.0, "prob_win": 0.55, "composite": 0.60, "opened_at": "2024-01-01T10:00:00+05:30"}
             ])
 
             config = SystemConfig()
@@ -515,7 +515,7 @@ class TestStopLossAndTargetMonitoring:
             assert "RELIANCE.NS" in state.open_positions
 
             # Processed data has Low=2480.0 (breaching 2500 stop)
-            df = pd.DataFrame({"Close": [2490.0], "Low": [2480.0], "High": [2510.0]})
+            df = pd.DataFrame({"Close": [2490.0], "Low": [2480.0], "High": [2510.0]}, index=pd.to_datetime(["2024-01-02"]))
             processed = {"RELIANCE.NS": df}
 
             scan_svc = ScanService(version="14.6.0", persistence=ps)
@@ -534,7 +534,7 @@ class TestStopLossAndTargetMonitoring:
 
             # Insert an open position with target = 2650.0
             ps.save_open_positions([
-                {"ticker": "TCS.NS", "direction": "LONG", "entry": 2500.0, "shares": 10, "stop": 2400.0, "t1": 2650.0, "prob_win": 0.55, "composite": 0.60}
+                {"ticker": "TCS.NS", "direction": "LONG", "entry": 2500.0, "shares": 10, "stop": 2400.0, "t1": 2650.0, "prob_win": 0.55, "composite": 0.60, "opened_at": "2024-01-01T10:00:00+05:30"}
             ])
 
             config = SystemConfig()
@@ -542,7 +542,7 @@ class TestStopLossAndTargetMonitoring:
             assert "TCS.NS" in state.open_positions
 
             # Processed data has High=2680.0 (reaching target)
-            df = pd.DataFrame({"Close": [2660.0], "Low": [2490.0], "High": [2680.0]})
+            df = pd.DataFrame({"Close": [2660.0], "Low": [2490.0], "High": [2680.0]}, index=pd.to_datetime(["2024-01-02"]))
             processed = {"TCS.NS": df}
 
             scan_svc = ScanService(version="14.6.0", persistence=ps)

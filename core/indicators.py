@@ -64,7 +64,7 @@ def _wilder(s: pd.Series, period: int) -> pd.Series:
 try:
     from numba import njit
     _NUMBA_AVAILABLE = True
-except Exception:
+except ImportError:
     _NUMBA_AVAILABLE = False
 
 

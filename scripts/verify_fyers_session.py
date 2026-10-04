@@ -37,7 +37,7 @@ def check_token_age(env_path: Path, max_age_hours: int = 18) -> tuple[bool, floa
         mtime = env_path.stat().st_mtime
         age_hours = (datetime.now(timezone.utc).timestamp() - mtime) / 3600.0
         return (age_hours <= max_age_hours), age_hours
-    except Exception:
+    except OSError:
         return False, 0.0
 
 
@@ -112,7 +112,7 @@ def verify_fyers_session(json_output: bool = False) -> int:
                 print(f"   Broker response: {results['error_message']}")
                 print("   Action required: Run `python tools/scripts/fyers_setup.py`")
             return 1
-    except Exception as exc:
+    except (OSError, RuntimeError, ValueError, KeyError, AttributeError) as exc:
         results["api_connectivity"] = "ERROR"
         results["status"] = "ERROR"
         results["error_message"] = str(exc)

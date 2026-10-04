@@ -360,7 +360,7 @@ def factor_volume(
             poc, val, vah = SCAN_CACHE.volume_profile(
                 daily_df, ticker=ticker_name, lookback=vprofile_lookback, bins=vprofile_bins
             )
-        except Exception:
+        except (KeyError, ValueError, TypeError, AttributeError, IndexError):
             poc, val, vah = true_volume_profile(daily_df, lookback=vprofile_lookback, bins=vprofile_bins)
     else:
         poc, val, vah = true_volume_profile(daily_df, lookback=vprofile_lookback, bins=vprofile_bins)

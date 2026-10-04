@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import pickle
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -34,7 +35,13 @@ import yfinance as yf
 
 from .config import IST, MarketDataSettings, SystemConfig, get_secret_value
 from .runtime_paths import RUNTIME_PATHS, ensure_runtime_dirs
-from .retry import FYERS_BREAKER, YFINANCE_BREAKER, guarded_call
+from .retry import (
+    FYERS_BREAKER,
+    YFINANCE_BREAKER,
+    CircuitBreakerOpen,
+    MaxRetriesExceeded,
+    guarded_call,
+)
 
 log = logging.getLogger("sovereign.data")
 ensure_runtime_dirs()
@@ -76,12 +83,12 @@ def _is_fresh(path: Path, ttl_hours: float) -> bool:
 
 def _load_cached_daily(symbol: str, period: str, ttl_hours: float) -> Optional[pd.DataFrame]:
     path = _cache_path(symbol, period)
-    if not _is_fresh(path, ttl_hours):
-        return None
     try:
+        if not _is_fresh(path, ttl_hours):
+            return None
         frame = pd.read_pickle(path)
         return frame if isinstance(frame, pd.DataFrame) and not frame.empty else None
-    except Exception:
+    except (OSError, pickle.UnpicklingError, EOFError, ImportError, AttributeError, TypeError, ValueError):
         log.warning("Ignoring unreadable yfinance cache for %s.", symbol, exc_info=True)
         return None
 
@@ -329,7 +336,15 @@ def fetch_single_ticker(
         log.warning("Fyers API error for %s: %s", ticker, exc)
         return ticker, None
 
-    except Exception:
+    except (
+        OSError,
+        RuntimeError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        MaxRetriesExceeded,
+        CircuitBreakerOpen,
+    ):
         # Network timeout, SDK bug, etc. — DEBUG to avoid flooding logs
         # during market-close periods when some symbols are unavailable.
         log.debug("Unexpected error fetching %s from Fyers.", ticker, exc_info=True)

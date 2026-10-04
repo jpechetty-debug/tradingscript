@@ -56,6 +56,7 @@ from .regime import (
     compute_sector_rs,
 )
 from .scorer import compute_trade_management
+from .swing import SwingPlan, swing_fill_size
 # ─────────────────────────────────────────────────────────────────────────────
 # TRANSACTION COST MODEL  (NSE intraday defaults)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -197,6 +198,19 @@ class TradeRecord:
     shares:             int = field(default=0)
     risk_inr:           float = field(default=0.0)
     daily_pnl:          dict[Any, float] = field(default_factory=dict)
+    strategy_id:        str = "LEGACY"
+    exit_price: float = 0.
+    exit_reason: str = ""
+    net_return: Optional[float] = None
+    benchmark_return: Optional[float] = None
+    excess_return: Optional[float] = None
+    entry_regime: str = "UNKNOWN"
+    benchmark_trend: str = "UNKNOWN"
+    volatility_regime: str = "UNKNOWN"
+    breadth_regime: str = "UNKNOWN"
+    research_context: dict[str, Any] = field(default_factory=dict)
+    exit_fills: list[dict[str, Any]] = field(default_factory=list)
+    signal_time: str = ""
 
 
 @dataclass
@@ -433,7 +447,7 @@ def _daily_portfolio_sharpe(
 
     try:
         b_days = pd.bdate_range(s_date, e_date)
-    except Exception:
+    except (ValueError, TypeError):
         b_days = pd.DatetimeIndex([t.exit_date for t in valid_trades if t.exit_date is not None])
 
     if len(b_days) < 2:
@@ -466,7 +480,7 @@ def _daily_portfolio_sharpe(
                         daily_pnl[d] += pnl_per_bar
                     else:
                         daily_pnl[d] = daily_pnl.get(d, 0.0) + pnl_per_bar
-            except Exception:
+            except (ValueError, TypeError):
                 d = t.exit_date.date() if hasattr(t.exit_date, "date") else t.exit_date
                 if d in daily_pnl:
                     daily_pnl[d] += total_pnl
@@ -623,20 +637,15 @@ def walk_forward(
     historical periods are not represented, which introduces potential survivorship bias.
     """
     min_prob  = min_prob if min_prob is not None else config.BACKTEST_MIN_PROB
-    if cost_model is DEFAULT_COST_MODEL and horizon_filter.upper() == "SWING":
-        cost_model = SWING_COST_MODEL
+    if cost_model is DEFAULT_COST_MODEL:
+        cost_model = (
+            replace(SWING_COST_MODEL, slippage_pct=config.SLIPPAGE_BPS / 10_000.0)
+            if horizon_filter.upper() == "SWING"
+            else TransactionCostModel.from_config(config)
+        )
 
-    # If config still has default PLATT_A / PLATT_B, check if persisted calibration exists
-    if config.PLATT_A == -4.0 and config.PLATT_B == 2.0:
-        try:
-            from .services import PersistenceService
-            _pers = PersistenceService()
-            _pa, _pb, _found = _pers.load_platt(config)
-            if _found:
-                config = replace(config, PLATT_A=_pa, PLATT_B=_pb)
-                log.info("walk_forward using persisted Platt parameters: A=%.4f B=%.4f", _pa, _pb)
-        except Exception:
-            pass
+    # Historical runs use only explicitly supplied parameters. Loading the
+    # latest live calibration here would leak future outcomes into old folds.
 
     all_trades: list[TradeRecord] = []
     all_folds:  list[FoldStats]   = []
@@ -709,7 +718,7 @@ def walk_forward(
                 continue
             try:
                 processed[ticker] = add_indicators(train_df, config)
-            except Exception:
+            except (KeyError, ValueError, TypeError, IndexError):
                 log.debug("Indicator error for %s in fold %d.", ticker, fold_idx, exc_info=True)
 
         if bench_key not in processed:
@@ -766,7 +775,14 @@ def walk_forward(
         for cand in candidates:
             d = cand.direction
             ticker = cand.ticker
-            full_df = raw_data.get(ticker)
+            data_ticker = next(
+                (key for key in (ticker, f"{ticker}.NS", ticker.removesuffix(".NS"))
+                 if key in raw_data and key in processed),
+                None,
+            )
+            if data_ticker is None:
+                continue
+            full_df = raw_data.get(data_ticker)
             if full_df is None or full_df.empty:
                 continue
 
@@ -774,7 +790,7 @@ def walk_forward(
             if fwd_bars.empty:
                 continue
 
-            train_df = processed[ticker]
+            train_df = processed[data_ticker]
             row = train_df.iloc[-1]
             close = float(row["Close"])
             atr = float(row.get("ATR", close * 0.015))
@@ -792,6 +808,21 @@ def walk_forward(
                 trade_horizon=getattr(cand, "trade_horizon", "SWING"),
                 atr_pctile=float(getattr(cand, "atr_pctile", 50.0)),
             )
+            shares_held = getattr(cand, "shares", 0)
+            trade_risk = getattr(cand, "risk_inr", 0.0)
+            strategy_id = getattr(cand, "strategy_id", "LEGACY")
+            if not isinstance(strategy_id, str):
+                strategy_id = "LEGACY"
+            if strategy_id.startswith("SWING_"):
+                plan = SwingPlan(strategy_id, cand.signal_time, cand.entry,
+                                 cand.entry_min, cand.entry_max, cand.stop, cand.t1, cand.t2,
+                                 cand.time_stop_bars, atr)
+                shares_held, trade_risk = swing_fill_size(plan, entry_price, config)
+                if not shares_held:
+                    continue
+                targets = targets.__class__(stop=plan.stop, t1=plan.target, t2=plan.target2,
+                                            rr=(plan.target - entry_price) / (entry_price - plan.stop))
+                time_stop = plan.time_stop_bars
 
             r, hit, bars, exit_date, gross_r, friction = _realised_r(
                 direction=d,
@@ -801,12 +832,10 @@ def walk_forward(
                 fwd_bars=fwd_bars,
                 time_stop=time_stop,
                 cost_model=cost_model,
-                shares=getattr(cand, "shares", None),
+                shares=shares_held,
             )
 
             sl_dist = abs(entry_price - targets.stop)
-            shares_held = getattr(cand, "shares", 0)
-            trade_risk = getattr(cand, "risk_inr", 0.0)
             if trade_risk <= 0:
                 trade_risk = getattr(config, "RISK_PER_TRADE_INR", 5_000.0)
             net_trade_pnl = r * trade_risk
@@ -842,6 +871,7 @@ def walk_forward(
                 shares=shares_held,
                 risk_inr=trade_risk,
                 daily_pnl=trade_daily_pnl,
+                strategy_id=strategy_id,
             ))
 
         fold_dates = (train_dates[-1], test_dates[-1])

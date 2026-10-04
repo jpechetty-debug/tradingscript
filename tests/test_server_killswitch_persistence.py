@@ -11,7 +11,7 @@ from core.portfolio import _ticker_excess_kurtosis
 from core.runtime_paths import RuntimePaths
 from core.services import PersistenceService
 import server
-from server import app, EngineState, STATE, API_KEY_NAME
+from server import app, EngineState, API_KEY_NAME
 
 client = TestClient(app)
 AUTH_HEADERS = {API_KEY_NAME: server.API_KEY or "test-api-key"}
@@ -20,17 +20,17 @@ AUTH_HEADERS = {API_KEY_NAME: server.API_KEY or "test-api-key"}
 @pytest.fixture(autouse=True)
 def reset_killswitch_state():
     """Ensure clean killswitch state for every test."""
-    with STATE._lock:
-        STATE.is_killed = False
-        STATE.is_scanning = False
-        STATE.scan_error = None
-    server.PERSISTENCE.set_killswitch(False)
+    with server.app.state.engine._lock:
+        server.app.state.engine.is_killed = False
+        server.app.state.engine.is_scanning = False
+        server.app.state.engine.scan_error = None
+    server.app.state.persistence.set_killswitch(False)
     yield
-    with STATE._lock:
-        STATE.is_killed = False
-        STATE.is_scanning = False
-        STATE.scan_error = None
-    server.PERSISTENCE.set_killswitch(False)
+    with server.app.state.engine._lock:
+        server.app.state.engine.is_killed = False
+        server.app.state.engine.is_scanning = False
+        server.app.state.engine.scan_error = None
+    server.app.state.persistence.set_killswitch(False)
 
 
 def test_killswitch_status_requires_auth():
@@ -49,7 +49,7 @@ def test_killswitch_activation_unauthorized():
 
 def test_killswitch_cannot_reset_until_inflight_scan_stops():
     assert client.post("/api/killswitch", headers=AUTH_HEADERS).status_code == 200
-    STATE.is_scanning = True
+    server.app.state.engine.is_scanning = True
     response = client.post("/api/killswitch/reset", headers=AUTH_HEADERS)
     assert response.status_code == 409
 

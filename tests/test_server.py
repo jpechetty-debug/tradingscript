@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import server
-from server import app, STATE
+from server import app
 
 TEST_API_KEY = "test-secret-key-12345"
 
@@ -26,17 +26,17 @@ def ensure_api_key(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture(autouse=True)
 def reset_server_state():
-    with STATE._lock:
-        STATE.is_killed = False
-        STATE.is_scanning = False
-        STATE.scan_error = None
-    server.PERSISTENCE.set_killswitch(False)
+    with server.app.state.engine._lock:
+        server.app.state.engine.is_killed = False
+        server.app.state.engine.is_scanning = False
+        server.app.state.engine.scan_error = None
+    server.app.state.persistence.set_killswitch(False)
     yield
-    with STATE._lock:
-        STATE.is_killed = False
-        STATE.is_scanning = False
-        STATE.scan_error = None
-    server.PERSISTENCE.set_killswitch(False)
+    with server.app.state.engine._lock:
+        server.app.state.engine.is_killed = False
+        server.app.state.engine.is_scanning = False
+        server.app.state.engine.scan_error = None
+    server.app.state.persistence.set_killswitch(False)
 
 
 @pytest.fixture
@@ -122,13 +122,13 @@ def test_set_regime_override(client: TestClient) -> None:
     res = client.post("/api/regime/override", json={"regime": "PANIC"}, headers={"X-API-Key": TEST_API_KEY})
     assert res.status_code == 200
     assert res.json()["regime_override"] == "PANIC"
-    assert STATE.regime_override == "PANIC"
+    assert server.app.state.engine.regime_override == "PANIC"
 
     # Clear override
     res_clear = client.post("/api/regime/override", json={"regime": "CLEAR"}, headers={"X-API-Key": TEST_API_KEY})
     assert res_clear.status_code == 200
     assert res_clear.json()["regime_override"] is None
-    assert STATE.regime_override is None
+    assert server.app.state.engine.regime_override is None
 
 
 def test_set_invalid_regime_override(client: TestClient) -> None:
@@ -167,8 +167,8 @@ def test_trigger_scan_unauthorized(client: TestClient) -> None:
 
 
 def test_trigger_scan_already_running(client: TestClient) -> None:
-    with STATE._lock:
-        STATE.is_scanning = True
+    with server.app.state.engine._lock:
+        server.app.state.engine.is_scanning = True
 
     try:
         res = client.post("/api/scan/trigger", headers={"X-API-Key": TEST_API_KEY})
@@ -176,13 +176,13 @@ def test_trigger_scan_already_running(client: TestClient) -> None:
         data = res.json()
         assert data["status"] == "already_running"
     finally:
-        with STATE._lock:
-            STATE.is_scanning = False
+        with server.app.state.engine._lock:
+            server.app.state.engine.is_scanning = False
 
 
 def test_trigger_scan_authorized(client: TestClient) -> None:
-    with STATE._lock:
-        STATE.is_scanning = False
+    with server.app.state.engine._lock:
+        server.app.state.engine.is_scanning = False
 
     with patch("server.svm.run_scan", return_value=([], [], None)):
         res = client.post("/api/scan/trigger", headers={"X-API-Key": TEST_API_KEY})
@@ -268,10 +268,10 @@ def test_enrich_preserves_persisted_swing_horizon_with_tight_stop(tmp_path: pyte
     mock_persistence = MagicMock()
     mock_persistence.paths.state_dir = target_dir
 
-    STATE.load_persisted_state(mock_persistence)
-    assert len(STATE.last_candidates) == 1
-    assert STATE.last_candidates[0]["trade_horizon"] == "SWING"
-    assert STATE.last_candidates[0]["horizon_label"] == "SWING (CNC)"
+    server.app.state.engine.load_persisted_state(mock_persistence)
+    assert len(server.app.state.engine.last_candidates) == 1
+    assert server.app.state.engine.last_candidates[0]["trade_horizon"] == "SWING"
+    assert server.app.state.engine.last_candidates[0]["horizon_label"] == "SWING (CNC)"
 
 
 def test_format_ticker_result_preserves_engine_swing_horizon_for_short() -> None:
@@ -324,11 +324,11 @@ def test_enrich_preserves_persisted_swing_horizon_for_short(tmp_path: pytest.Tem
     mock_persistence = MagicMock()
     mock_persistence.paths.state_dir = target_dir
 
-    STATE.load_persisted_state(mock_persistence)
-    assert len(STATE.last_candidates) == 1
-    assert STATE.last_candidates[0]["action"] == "SELL"
-    assert STATE.last_candidates[0]["trade_horizon"] == "SWING"
-    assert STATE.last_candidates[0]["horizon_label"] == "SWING (CNC)"
+    server.app.state.engine.load_persisted_state(mock_persistence)
+    assert len(server.app.state.engine.last_candidates) == 1
+    assert server.app.state.engine.last_candidates[0]["action"] == "SELL"
+    assert server.app.state.engine.last_candidates[0]["trade_horizon"] == "SWING"
+    assert server.app.state.engine.last_candidates[0]["horizon_label"] == "SWING (CNC)"
 
 
 def test_get_client_ip_trusted_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -362,7 +362,7 @@ def test_get_client_ip_trusted_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_sse_subscriber_limit_503(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncio
-    from server import BROADCASTER
+    BROADCASTER = server.app.state.broadcaster
 
     # Temporarily set cap to small number for testing
     orig_cap = BROADCASTER.max_subscribers

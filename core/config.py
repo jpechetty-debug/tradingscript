@@ -13,13 +13,20 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field, fields
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Optional
 from zoneinfo import ZoneInfo
 
 log = logging.getLogger("sovereign.config")
+
+
+@lru_cache(maxsize=128)
+def parse_market_time(value: str) -> time:
+    """Cache by clock string, including across newly constructed settings slices."""
+    return datetime.strptime(value, "%H:%M").time()
 
 
 def _safe_int_env(key: str, default: int) -> int:
@@ -176,8 +183,8 @@ class RegimeSettings:
 
     def session_from_time(self, now: datetime | None = None) -> str:
         current_time = (now.astimezone(IST) if now is not None else datetime.now(IST)).time()
-        t1 = datetime.strptime(self.session_open_end, "%H:%M").time()
-        t2 = datetime.strptime(self.session_midday_end, "%H:%M").time()
+        t1 = parse_market_time(self.session_open_end)
+        t2 = parse_market_time(self.session_midday_end)
         if current_time < t1:
             return "OPENING_RANGE"
         if current_time < t2:
@@ -186,12 +193,12 @@ class RegimeSettings:
 
     def get_market_phase(self, now: datetime | None = None) -> MarketPhase:
         current_time = (now.astimezone(IST) if now is not None else datetime.now(IST)).time()
-        t_open = datetime.strptime(self.market_open_time, "%H:%M").time()
-        t_intra_start = datetime.strptime(self.intraday_entry_start, "%H:%M").time()
-        t_morning_end = datetime.strptime(self.session_open_end, "%H:%M").time()
-        t_midday_end = datetime.strptime(self.session_midday_end, "%H:%M").time()
-        t_cutoff = datetime.strptime(self.intraday_entry_cutoff, "%H:%M").time()
-        t_close = datetime.strptime(self.market_close_time, "%H:%M").time()
+        t_open = parse_market_time(self.market_open_time)
+        t_intra_start = parse_market_time(self.intraday_entry_start)
+        t_morning_end = parse_market_time(self.session_open_end)
+        t_midday_end = parse_market_time(self.session_midday_end)
+        t_cutoff = parse_market_time(self.intraday_entry_cutoff)
+        t_close = parse_market_time(self.market_close_time)
 
         if current_time < t_open:
             return MarketPhase.PRE_MARKET
@@ -209,14 +216,14 @@ class RegimeSettings:
 
     def minutes_to_squareoff(self, now: datetime | None = None) -> int:
         dt = now.astimezone(IST) if now is not None else datetime.now(IST)
-        t_sq = datetime.strptime(self.mis_squareoff_time, "%H:%M").time()
+        t_sq = parse_market_time(self.mis_squareoff_time)
         sq_dt = dt.replace(hour=t_sq.hour, minute=t_sq.minute, second=0, microsecond=0)
         diff = (sq_dt - dt).total_seconds() / 60.0
         return max(0, int(diff))
 
     def is_regime_locked(self, now: datetime | None = None) -> bool:
         current_time = (now.astimezone(IST) if now is not None else datetime.now(IST)).time()
-        open_t = datetime.strptime(self.market_open_time, "%H:%M").time()
+        open_t = parse_market_time(self.market_open_time)
         lock_end = (
             datetime.combine(date.today(), open_t)
             + timedelta(minutes=self.regime_lock_minutes)
@@ -393,6 +400,21 @@ class SystemConfig:
     STOP_ATR_MULT:    float = 1.5
     TARGET1_ATR_MULT: float = 3.8
     TARGET2_ATR_MULT: float = 6.0
+    # Explicit swing setups remain research-only until independently validated.
+    SWING_SETUP_ENABLED: bool = field(default_factory=lambda: os.getenv("SWING_SETUP_ENABLED", "false").lower() in ("true", "1", "yes"))
+    SWING_MIN_BARS: int = 150
+    SWING_MIN_RR: float = 1.5
+    SWING_MAX_GAP_ATR: float = .5
+    SWING_RISK_FRACTION: float = .0025
+    SWING_MAX_EXPOSURE_FRACTION: float = .10
+    SWING_BREAKOUT_LOOKBACK: int = 20
+    SWING_BREAKOUT_RVOL: float = 1.2
+    SWING_BREAKOUT_TIME_BARS: int = 15
+    SWING_PULLBACK_TIME_BARS: int = 10
+    SWING_STOP_BUFFER_ATR: float = .1
+    SWING_STOP_MODE: str = "STRUCTURE"
+    SWING_STOP_ATR_MULT: float = 1.
+    SWING_RESEARCH_TAG: str = ""
     RISK_PER_TRADE_INR: float = field(default_factory=lambda: float(os.getenv("RISK_PER_TRADE_INR", "5000.0")))
 
     # ── Intraday trade targets (tighter for 6-hour sessions) ─────────────────
@@ -491,10 +513,13 @@ class SystemConfig:
         default_factory=lambda: SecretStr(os.getenv("FYERS_ACCESS_TOKEN", ""))
     )
     USE_FYERS:          bool = True
+    settings_payload:   Optional[AppSettings] = field(default=None, repr=False)
 
     def __repr__(self) -> str:
         parts = []
         for f in fields(self):
+            if f.name == "settings_payload":
+                continue
             val = getattr(self, f.name)
             if f.name in _SECRET_FIELD_NAMES:
                 parts.append(f"{f.name}={SecretStr(val)!r}")
@@ -508,47 +533,16 @@ class SystemConfig:
     def is_regime_locked(self, now: datetime | None = None) -> bool:
         return self.as_regime().is_regime_locked(now)
 
+    def _settings_values(self, settings_type: type[Any]) -> dict[str, Any]:
+        """One uppercase mapping convention; preserve legacy constructor/replace/serialization."""
+        return {setting.name: getattr(self, setting.name.upper()) for setting in fields(settings_type)}
+
     # ── Slice Adapters ────────────────────────────────────────────────────────
     def as_market_data(self) -> MarketDataSettings:
-        return MarketDataSettings(
-            daily_period=self.DAILY_PERIOD,
-            benchmark=self.BENCHMARK,
-            max_workers=self.MAX_WORKERS,
-            use_fyers=self.USE_FYERS,
-            fyers_client_id=self.FYERS_CLIENT_ID,
-            fyers_secret_key=self.FYERS_SECRET_KEY,
-            fyers_redirect_uri=self.FYERS_REDIRECT_URI,
-            fyers_access_token=self.FYERS_ACCESS_TOKEN,
-            yfinance_chunk_size=self.YFINANCE_CHUNK_SIZE,
-            yfinance_min_chunk_interval=self.YFINANCE_MIN_CHUNK_INTERVAL,
-            yfinance_cache_ttl_hours=self.YFINANCE_CACHE_TTL_HOURS,
-            yfinance_negative_cache_ttl_hours=self.YFINANCE_NEGATIVE_CACHE_TTL_HOURS,
-        )
+        return MarketDataSettings(**self._settings_values(MarketDataSettings))
 
     def as_regime(self) -> RegimeSettings:
-        return RegimeSettings(
-            breadth_veto_below=self.BREADTH_VETO_BELOW,
-            rs_lookback=self.RS_LOOKBACK,
-            near_52w_max_dist_pct=self.NEAR_52W_MAX_DIST_PCT,
-            vol_contract_ratio=self.VOL_CONTRACT_RATIO,
-            regime_adx_trend=self.REGIME_ADX_TREND,
-            regime_adx_range=self.REGIME_ADX_RANGE,
-            regime_atr_expansion=self.REGIME_ATR_EXPANSION,
-            regime_breadth_panic=self.REGIME_BREADTH_PANIC,
-            regime_breadth_panic_exit=self.REGIME_BREADTH_PANIC_EXIT,
-            regime_confirm_bars=self.REGIME_CONFIRM_BARS,
-            market_open_time=self.MARKET_OPEN_TIME,
-            regime_lock_minutes=self.REGIME_LOCK_MINUTES,
-            session_open_end=self.SESSION_OPEN_END,
-            session_midday_end=self.SESSION_MIDDAY_END,
-            intraday_entry_start=self.INTRADAY_ENTRY_START,
-            intraday_entry_cutoff=self.INTRADAY_ENTRY_CUTOFF,
-            swing_scan_start=self.SWING_SCAN_START,
-            mis_squareoff_time=self.MIS_SQUAREOFF_TIME,
-            market_close_time=self.MARKET_CLOSE_TIME,
-            midday_breakout_min_prob=self.MIDDAY_BREAKOUT_MIN_PROB,
-            intraday_enabled=self.INTRADAY_ENABLED,
-        )
+        return RegimeSettings(**self._settings_values(RegimeSettings))
 
     def get_market_phase(self, now: datetime | None = None) -> MarketPhase:
         return self.as_regime().get_market_phase(now)
@@ -557,74 +551,19 @@ class SystemConfig:
         return self.as_regime().minutes_to_squareoff(now)
 
     def as_signal(self) -> SignalSettings:
-        return SignalSettings(
-            super_period=self.SUPER_PERIOD,
-            super_mult=self.SUPER_MULT,
-            adx_period=self.ADX_PERIOD,
-            adx_strong=self.ADX_STRONG,
-            stop_atr_mult=self.STOP_ATR_MULT,
-            target1_atr_mult=self.TARGET1_ATR_MULT,
-            target2_atr_mult=self.TARGET2_ATR_MULT,
-            risk_per_trade_inr=self.RISK_PER_TRADE_INR,
-            use_ema200_filter=self.USE_EMA200_FILTER,
-            vprofile_lookback=self.VPROFILE_LOOKBACK,
-            vprofile_bins=self.VPROFILE_BINS,
-            use_value_area_rr=self.USE_VALUE_AREA_RR,
-            va_min_rr=self.VA_MIN_RR,
-            adv_share_floor=self.ADV_SHARE_FLOOR,
-            adv_turnover_floor=self.ADV_TURNOVER_FLOOR,
-            ic_lookback_days=self.IC_LOOKBACK_DAYS,
-            ic_forward_bars=self.IC_FORWARD_BARS,
-            icir_min_obs=self.ICIR_MIN_OBS,
-            ic_calib_offset=self.IC_CALIB_OFFSET,
-            watchlist_min_prob=self.WATCHLIST_MIN_PROB,
-            prob_hold_floor=self.PROB_HOLD_FLOOR,
-            enable_watchlist=self.ENABLE_WATCHLIST,
-            cohort_min_obs=self.COHORT_MIN_OBS,
-            cohort_rank_weight=self.COHORT_RANK_WEIGHT,
-            short_is_intraday_only=self.SHORT_IS_INTRADAY_ONLY,
-            min_factor_weight=self.MIN_FACTOR_WEIGHT,
-        )
+        return SignalSettings(**self._settings_values(SignalSettings))
 
     def as_portfolio(self) -> PortfolioSettings:
-        return PortfolioSettings(
-            kelly_fraction=self.KELLY_FRACTION,
-            kelly_min_shares=self.KELLY_MIN_SHARES,
-            kelly_max_mult=self.KELLY_MAX_MULT,
-            kelly_kurtosis_fallback=self.KELLY_KURTOSIS_FALLBACK,
-            kelly_kurtosis_window=self.KELLY_KURTOSIS_WINDOW,
-            kelly_kurtosis_min_obs=self.KELLY_KURTOSIS_MIN_OBS,
-            cov_ewma_lambda=self.COV_EWMA_LAMBDA,
-            cov_ewma_blend=self.COV_EWMA_BLEND,
-            cov_lookback=self.COV_LOOKBACK,
-            max_corr=self.MAX_CORR,
-            max_sector_picks=self.MAX_SECTOR_PICKS,
-            portfolio_size=self.PORTFOLIO_SIZE,
-            candidates_max=self.CANDIDATES_MAX,
-            capital_inr=self.CAPITAL_INR,
-            max_portfolio_risk_inr=self.MAX_PORTFOLIO_RISK_INR,
-        )
+        return PortfolioSettings(**self._settings_values(PortfolioSettings))
 
     def as_execution_cost(self) -> ExecutionCostSettings:
-        return ExecutionCostSettings(
-            slippage_bps=self.SLIPPAGE_BPS,
-            commission_inr=self.COMMISSION_INR,
-        )
+        return ExecutionCostSettings(**self._settings_values(ExecutionCostSettings))
 
     def as_alerts(self) -> AlertSettings:
-        return AlertSettings(
-            telegram_bot_token=self.TELEGRAM_BOT_TOKEN,
-            telegram_chat_id=self.TELEGRAM_CHAT_ID,
-            telegram_alert_min_prob=self.TELEGRAM_ALERT_MIN_PROB,
-            telegram_alert_top_n=self.TELEGRAM_ALERT_TOP_N,
-            telegram_dedup_hours=self.TELEGRAM_DEDUP_HOURS,
-        )
+        return AlertSettings(**self._settings_values(AlertSettings))
 
     def as_backtest(self) -> BacktestSettings:
-        return BacktestSettings(
-            backtest_days=self.BACKTEST_DAYS,
-            backtest_min_prob=self.BACKTEST_MIN_PROB,
-        )
+        return BacktestSettings(**self._settings_values(BacktestSettings))
 
     def as_scoring_runtime(self) -> ScoringRuntime:
         return ScoringRuntime(
@@ -652,7 +591,98 @@ class SystemConfig:
             backtest=self.as_backtest(),
         )
 
+    # ── Composed Domain Settings Delegation ──────────────────────────────────
+    @property
+    def market_data(self) -> MarketDataSettings:
+        return self.as_market_data()
+
+    @property
+    def regime(self) -> RegimeSettings:
+        return self.as_regime()
+
+    @property
+    def signal(self) -> SignalSettings:
+        return self.as_signal()
+
+    @property
+    def portfolio(self) -> PortfolioSettings:
+        return self.as_portfolio()
+
+    @property
+    def execution_cost(self) -> ExecutionCostSettings:
+        return self.as_execution_cost()
+
+    @property
+    def alerts(self) -> AlertSettings:
+        return self.as_alerts()
+
+    @property
+    def backtest(self) -> BacktestSettings:
+        return self.as_backtest()
+
+    @property
+    def scoring_runtime(self) -> ScoringRuntime:
+        return self.as_scoring_runtime()
+
+    @property
+    def settings(self) -> AppSettings:
+        return self.as_app_settings()
+
+    @property
+    def app_settings(self) -> AppSettings:
+        return self.as_app_settings()
+
+    @classmethod
+    def from_app_settings(cls, settings: AppSettings, **extra: Any) -> SystemConfig:
+        """Compose a SystemConfig instance from an AppSettings composite."""
+        kwargs: dict[str, Any] = dict(extra)
+        for slice_obj in (
+            settings.market_data,
+            settings.regime,
+            settings.signal,
+            settings.portfolio,
+            settings.execution_cost,
+            settings.alerts,
+            settings.backtest,
+        ):
+            for f in fields(slice_obj):
+                attr_name = f.name.upper()
+                if attr_name not in kwargs and attr_name in cls.__dataclass_fields__:
+                    kwargs[attr_name] = getattr(slice_obj, f.name)
+        return cls(**kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        lower = name.lower()
+        for slice_obj in (
+            self.as_regime(),
+            self.as_signal(),
+            self.as_portfolio(),
+            self.as_market_data(),
+            self.as_execution_cost(),
+            self.as_alerts(),
+            self.as_backtest(),
+        ):
+            if hasattr(slice_obj, lower):
+                return getattr(slice_obj, lower)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
     def __post_init__(self) -> None:
+        if self.settings_payload is not None:
+            for slice_obj in (
+                self.settings_payload.market_data,
+                self.settings_payload.regime,
+                self.settings_payload.signal,
+                self.settings_payload.portfolio,
+                self.settings_payload.execution_cost,
+                self.settings_payload.alerts,
+                self.settings_payload.backtest,
+            ):
+                for f in fields(slice_obj):
+                    attr_name = f.name.upper()
+                    if attr_name in self.__dataclass_fields__:
+                        setattr(self, attr_name, getattr(slice_obj, f.name))
         if self.PROB_HOLD_FLOOR >= self.MIN_PROB_WIN:
             adjusted = max(0.0, self.MIN_PROB_WIN - 0.05)
             log.warning(
@@ -680,7 +710,7 @@ def load_system_config(env_file: Optional[str | Path] = None) -> SystemConfig:
             load_dotenv(env_file, override=True)
         else:
             load_dotenv()
-    except Exception:
+    except (ImportError, OSError):
         pass
     return SystemConfig()
 

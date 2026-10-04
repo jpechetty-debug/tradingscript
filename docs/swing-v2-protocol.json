@@ -1,0 +1,43 @@
+{
+  "version": "SWING_ALPHA_V2",
+  "created": "2026-10-02",
+  "status": "LOCAL_PRE_REGISTRATION_FRAMEWORK_ONLY_NO_ALPHA_CLAIM",
+  "prospective_first_session": "2026-10-05",
+  "prospective_end_date": "2027-10-02",
+  "models": {
+    "SECTOR": "Top quartile of a fixed, complete official sector-index universe by 63-session relative return versus Nifty 500; worst rank for ties.",
+    "PEAD": "Positive EPS surprise against consensus captured before announcement, observed within 20 completed post-announcement sessions. Seasonal forecasts remain separate diagnostics.",
+    "COMBINED": "Secondary hypothesis requiring both sector leadership and consensus surprise; never silently replace either standalone model."
+  },
+  "common": {
+    "timing": "Completed-bar breakout/pullback trigger; V1 EMA alignment/relative strength eligibility not inherited; RVOL recorded, no new RVOL threshold.",
+    "risk": "Existing bounded entry, fixed fractional risk, cash, total risk, sector, position and correlation caps; surveillance CLEAR required at observation and next-session open.",
+    "observation": "18:00 IST; source publication and ingestion must both precede observation. Historical downloads are not prospective observations.",
+    "breadth": "Fraction of available snapshot stocks above 200-session SMA, valid denominator and coverage recorded; not claimed Nifty-500 population breadth.",
+    "earnings_hold_cap": 40,
+    "default_exit": "FIXED structural initial stop and target; 40-session PEAD cap is a research parameter, not an optimal holding-period claim."
+  },
+  "secondary_individual_ablations": [
+    "Nifty 500 above 200-session SMA",
+    "Available-universe breadth above 50%, at least 90% coverage",
+    "India VIX below median of previous 126 sessions excluding today",
+    "5-session delivery fraction, quantity and turnover above prior 20-session values",
+    "Highest held close minus 2 ATR, updated after close for next session",
+    "Highest held high minus 3 ATR, updated after close for next session"
+  ],
+  "evaluation": {
+    "primary": "Net mean R and exposure-matched benchmark excess NAV, separately for sector and PEAD models, after modeled costs.",
+    "interval": "Entry-month cluster bootstrap, 2000 draws, seed 20261002, 95% interval; intervals do not correct multiple comparisons.",
+    "inconclusive": "Fewer than 40 closed trades or six entry months per model; unavailable feeds, incomplete index rank universe or unverified timestamp/coverage provenance.",
+    "comparison": "Same price universe, dates, capital, costs and portfolio limits; retain all variants, do not pick a retrospective winner.",
+    "freeze": "Protocol hash, settings, execution parameters, price snapshot and feed hashes retained. Freeze data-provider coverage and sector universe before prospective observation. Changes start a new version."
+  },
+  "limitations": [
+    "Current constituent subset is not point-in-time; missing/delisted stock prices remain unresolved.",
+    "No licensed data acquisition is included. Local timestamps do not by themselves prove historical availability.",
+    "Daily fills do not establish price-band, auction or broker feasibility. Partial live fills are not implemented.",
+    "Earnings EPS must use consistent currency, share adjustments and consolidated/standalone accounting basis; framework cannot certify these from supplied numbers.",
+    "Delivery volume is an accumulation proxy, not identification of institutions.",
+    "No trading strategy is promoted or enabled automatically."
+  ]
+}

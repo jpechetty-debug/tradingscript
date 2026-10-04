@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,11 +31,16 @@ class SqliteDatabase:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._connections = threading.local()
         self.init_schema()
 
     @contextmanager
     def get_connection(self) -> Generator[sqlite3.Connection, None, None]:
         """Context manager yielding a SQLite connection configured with WAL and busy timeout."""
+        active = getattr(self._connections, "active", None)
+        if active is not None:
+            yield active
+            return
         conn = sqlite3.connect(
             str(self.db_path),
             timeout=10.0,
@@ -45,12 +51,14 @@ class SqliteDatabase:
             conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute("PRAGMA synchronous = NORMAL;")
             conn.execute("PRAGMA busy_timeout = 5000;")
+            self._connections.active = conn
             yield conn
             conn.commit()
         except Exception:
             conn.rollback()
             raise
         finally:
+            self._connections.active = None
             conn.close()
 
     def init_schema(self) -> None:
@@ -144,9 +152,31 @@ class SqliteDatabase:
                 CREATE INDEX IF NOT EXISTS idx_exec_ticker ON executed_trades(ticker);
                 CREATE INDEX IF NOT EXISTS idx_exec_outcome ON executed_trades(outcome);
                 CREATE INDEX IF NOT EXISTS idx_exec_horizon ON executed_trades(trade_horizon);
+
+                CREATE TABLE IF NOT EXISTS paper_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT UNIQUE NOT NULL,
+                    event_type TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                );
+                CREATE TRIGGER IF NOT EXISTS paper_events_no_update BEFORE UPDATE ON paper_events
+                BEGIN SELECT RAISE(ABORT, 'Paper history is append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS paper_events_no_delete BEFORE DELETE ON paper_events
+                BEGIN SELECT RAISE(ABORT, 'Paper history is append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS paper_events_no_replace BEFORE INSERT ON paper_events
+                WHEN EXISTS (SELECT 1 FROM paper_events WHERE event_id = NEW.event_id OR sequence = NEW.sequence)
+                BEGIN SELECT RAISE(ABORT, 'Paper event already exists'); END;
             """)
 
             # Migration: ensure trade_id and source columns exist and populate empty legacy records
+            executed_cols = [c[1] for c in conn.execute("PRAGMA table_info(executed_trades);").fetchall()]
+            if "source" not in executed_cols:
+                conn.execute("ALTER TABLE executed_trades ADD COLUMN source TEXT NOT NULL DEFAULT 'EXECUTED';")
+            if "strategy_id" not in executed_cols:
+                conn.execute("ALTER TABLE executed_trades ADD COLUMN strategy_id TEXT NOT NULL DEFAULT 'LEGACY';")
+            if "execution_metadata" not in executed_cols:
+                conn.execute("ALTER TABLE executed_trades ADD COLUMN execution_metadata TEXT NOT NULL DEFAULT '{}';")
             cols = [col[1] for col in conn.execute("PRAGMA table_info(trade_log);").fetchall()]
             if "trade_id" not in cols:
                 conn.execute("ALTER TABLE trade_log ADD COLUMN trade_id TEXT;")
@@ -157,6 +187,36 @@ class SqliteDatabase:
             position_cols = [c[1] for c in conn.execute("PRAGMA table_info(open_positions);").fetchall()]
             if "raw_payload" not in position_cols:
                 conn.execute("ALTER TABLE open_positions ADD COLUMN raw_payload TEXT NOT NULL DEFAULT '{}';")
+
+    def append_paper_event(self, event_id: str, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Clock-stamp a durable event; conflicting retries never rewrite history."""
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        with self.get_connection() as conn:
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM paper_events WHERE event_id = ?", (event_id,)).fetchone()
+            if row is not None:
+                if row["event_type"] != event_type or row["payload"] != encoded:
+                    raise ValueError("Paper event ID already belongs to a different event")
+            else:
+                recorded = datetime.now(timezone.utc).isoformat()
+                conn.execute("INSERT INTO paper_events (event_id, event_type, recorded_at, payload) VALUES (?, ?, ?, ?)",
+                             (event_id, event_type, recorded, encoded))
+                row = conn.execute("SELECT * FROM paper_events WHERE event_id = ?", (event_id,)).fetchone()
+            event = dict(row)
+            event["payload"] = json.loads(event["payload"])
+            return event
+
+    def fetch_paper_events(self, after: int = 0, limit: int = 1000) -> list[dict[str, Any]]:
+        with self.get_connection() as conn:
+            rows = conn.execute("SELECT * FROM paper_events WHERE sequence > ? ORDER BY sequence LIMIT ?",
+                                (after, limit)).fetchall()
+            return [{**dict(row), "payload": json.loads(row["payload"])} for row in rows]
+
+    def get_paper_event(self, event_id: str) -> Optional[dict[str, Any]]:
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM paper_events WHERE event_id = ?", (event_id,)).fetchone()
+            return {**dict(row), "payload": json.loads(row["payload"])} if row is not None else None
 
     # ── Portfolio State ─────────────────────────────────────────────────────────
 
@@ -351,7 +411,7 @@ class SqliteDatabase:
                     payload = json.loads(r["raw_payload"])
                     if isinstance(payload, dict):
                         trades.append(payload)
-                except Exception:
+                except (json.JSONDecodeError, TypeError, KeyError):
                     continue
             return trades
 
@@ -474,6 +534,7 @@ class SqliteDatabase:
                 """
                 SELECT composite, outcome FROM executed_trades
                 WHERE outcome IN ('WIN', 'LOSS', 'BREAKEVEN')
+                  AND source = 'EXECUTED'
                   AND composite IS NOT NULL
                 ORDER BY id ASC;
                 """

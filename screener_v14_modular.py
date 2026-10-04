@@ -40,9 +40,9 @@ from core.services import (
 from core.telemetry import setup_logging
 
 try:
-    from importlib.metadata import version as _pkg_version
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
     VERSION: str = _pkg_version("sovereign-engine")
-except Exception:
+except (PackageNotFoundError, ImportError):
     VERSION = "14.6.0"  # fallback when package is not pip-installed
 
 log = logging.getLogger("sovereign")

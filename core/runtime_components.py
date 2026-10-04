@@ -233,7 +233,7 @@ class RollingFactorCalibrator:
                     loaded = json.loads(text)
                     if isinstance(loaded, dict):
                         return {str(key): float(value) for key, value in loaded.items()}
-            except Exception:
+            except (OSError, json.JSONDecodeError, ValueError, TypeError):
                 pass
         return {
             "trend": 0.28,
@@ -267,7 +267,7 @@ class RollingFactorCalibrator:
                 log_entries = []
             log_entries.append(entry)
             ensure_parent(self._tpath).write_text(json.dumps(log_entries[-2000:], indent=2), encoding="utf-8")
-        except Exception as exc:
+        except (OSError, TypeError, ValueError) as exc:
             logger.error("Could not persist trade: %s", exc)
 
 

@@ -1,0 +1,35 @@
+{
+  "protocol": "SWING_STRUCTURAL_V1",
+  "frozen_date": "2026-10-02",
+  "status": "LOCAL_PREREGISTRATION_FOR_FUTURE_OBSERVATIONS_NOT_EXTERNAL_REGISTRATION",
+  "prospective_first_session": "2026-10-05",
+  "evaluation_end": "2027-10-02",
+  "primary_hypothesis": "Net Mean R for entries with benchmark above EMA200 exceeds entries below EMA200.",
+  "primary_outcomes": ["net_mean_r_difference", "benchmark_matched_trade_excess_return"],
+  "primary_inference": "Entry-month cluster bootstrap, fixed seed 20261002, 2000 draws, 95% interval; descriptive and inconclusive if either group has fewer than 20 trades or fewer than 6 observed months.",
+  "secondary_observational_hypotheses": [
+    "63-session relative-strength deciles, ranked before setup selection among the available liquid universe",
+    "252-session relative-strength deciles and distance above EMA200 bins 0-10%, 10-20%, 20-40%, 40%+",
+    "Leave-one-out sector-peer 63-session RS positive versus nonpositive; at least two peers",
+    "Breadth above EMA50 and EMA200 bins 0-20%, 20-40%, 40-60%, 60-80%, 80-100%",
+    "ATR20 percentile quintiles, ATR20 divided by prior-20-session mean, and expanding Bollinger bandwidth",
+    "Known upcoming earnings within five exchange sessions, only with historically observed event times and auditable coverage"
+  ],
+  "research_exit_policies": [
+    {"mode": "FIXED", "initial_stop_and_time_limit": "unchanged"},
+    {"mode": "ATR_TRAIL", "anchor": "highest held close", "atr_multiple": 2, "effective": "next session after completed close", "fixed_target": false},
+    {"mode": "CHANDELIER", "anchor": "highest held high", "atr_multiple": 3, "effective": "next session after completed close", "fixed_target": false},
+    {"mode": "SCALE_OUT", "first_exit": "floor(50% initial shares) at 1R", "remaining_exit": "3R", "stop_and_time_limit": "unchanged"}
+  ],
+  "controls": [
+    "No new live entry filters or parameter winner selected from retrospective tables",
+    "No favorable-excursion inference from unknown same-day stop/target ordering",
+    "No overlapping secondary tests presented as confirmed alpha",
+    "Preserve first-observed features and strategy version in append-only paper signals",
+    "No historical or backdated fills counted as prospective observations",
+    "Record unfilled, no-trade and operational-failure days; do not remove unfavorable outcomes",
+    "Keep every prespecified policy and subgroup in the report; missing groups mean missing evidence",
+    "No performance-dependent stopping or automatic deployment; changes require a new protocol version"
+  ],
+  "required_data": ["full point-in-time membership baseline and dated additions/removals", "delisted/renamed security price histories", "point-in-time sector mappings", "as-of earnings schedules with coverage provenance", "observed fills and costs"]
+}

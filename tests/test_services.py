@@ -773,6 +773,7 @@ def test_scan_service_scan_production_path_end_to_end_unmocked(tmp_path):
             "entry": 105.0,
             "shares": 10,
             "stop": 115.0,  # Current candle Low=109.0 <= stop=115.0 -> Breached!
+            "opened_at": "2024-01-01T10:00:00+05:30",
             "t1": 130.0,
             "prob_win": 0.49,
             "composite": 0.63,
@@ -792,6 +793,9 @@ def test_scan_service_scan_production_path_end_to_end_unmocked(tmp_path):
     assert output.candidates[0].ticker == "HELD"
     assert output.candidates[0].is_held is True
     assert "HeldPos" in output.candidates[0].reasons
+    assert output.candidates[0].entry == 105.0
+    assert output.candidates[0].stop == 90.0
+    assert output.candidates[0].shares == 10
 
     # 3. Portfolio selection: HELD seated
     assert len(output.portfolio) == 1

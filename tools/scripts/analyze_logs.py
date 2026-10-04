@@ -19,7 +19,7 @@ def analyze_scores() -> None:
 
                     if size > 0 and mean_prob >= 0.55:
                         print(f"Time: {ts} | Mean Prob: {mean_prob:.4f} | Size: {size} | Tickers: {tickers}")
-            except Exception:
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
                 continue
 
 if __name__ == "__main__":

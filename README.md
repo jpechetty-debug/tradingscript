@@ -1,17 +1,21 @@
 # Sovereign Engine v14.6-Modular 🏛️
 
 [![Security Scan](https://img.shields.io/badge/Security-Verified-success?style=flat-square)](#)
-[![Lint Compliance](https://img.shields.io/badge/Lint-Ruff%20%7C%20Mypy%20Strict-blue?style=flat-square)](#)
-[![Test Suite](https://img.shields.io/badge/Tests-653%20Passed-brightgreen?style=flat-square)](#)
+[![Lint Compliance](https://img.shields.io/badge/Lint-Ruff%20%7C%20Mypy-blue?style=flat-square)](#)
+[![Test Suite](https://img.shields.io/badge/Tests-735%20Passed-brightgreen?style=flat-square)](#)
 [![Version](https://img.shields.io/badge/Version-14.6--Modular-indigo?style=flat-square)](#)
 
-**Institutional-Grade Quantitative Trading Intelligence & Portfolio Optimization for NSE India.**
+**Quantitative research, paper trading and portfolio screening for NSE India.**
 
 Sovereign Engine is a modular, high-performance quantitative screener and trading engine designed for systematic Indian cash equity markets. Built with mathematical rigor, the platform incorporates continuous $C^0/C^1$ factor scoring curves, Bayesian-shrunk IC weight calibration, a Two-Pass Cohort Scan pipeline with cross-sectional percentile ranking, and signal position hysteresis backed by SQLite persistence.
+
+The execution ledger accepts explicit fill events; it does not submit broker orders. Current performance evidence does not establish a profitable live strategy.
 
 ---
 
 ## 🚀 Key Architectural Pillars
+
+The diagram below describes the legacy scoring policy. The opt-in swing policy uses explicit daily setups, structural stops and fixed fractional sizing, described next.
 
 ```mermaid
 graph TD
@@ -34,6 +38,46 @@ graph TD
 4. **Bayesian Shrinkage IC Calibration**: Eliminates overlapping-sample bias via independent 5-bar steps, shrinking noisy empirical ICIR weights toward the macro regime prior with a 5% floor simplex projection.
 5. **Position Hysteresis & SQLite Persistence**: Signal edge churn is mitigated through asymmetric entry/holding thresholds ($P \ge 0.52$ for new entries vs. $P \ge 0.47$ for open positions), synchronized to SQLite `open_positions`.
 6. **Dual-Provider Resilience**: Thread-safe async fetching prioritizing Fyers API v3 with automatic, circuit-broken fallback to yfinance.
+
+---
+
+## Swing rules — opt-in research policy
+
+Run `python run.py --swing-rules --no-telegram` for the versioned long-only swing policy. `SWING_SETUP_ENABLED=true` also enables it for API scans. It remains disabled by default because the observed validation period does not establish positive net expectancy.
+
+- **Completed daily bars:** unfinished candles are excluded before indicators, breadth, sector strength and setup detection. Live intraday prices, session score multipliers and legacy fitted calibration do not alter new swing entries.
+- **Two explicit setups:** `SWING_BREAKOUT_V1` requires a 20-session breakout with relative volume confirmation; `SWING_PULLBACK_V1` requires a bullish reclaim following an EMA20 pullback. Both require a rising EMA stack, strength versus the benchmark and a benchmark above its EMA50.
+- **Bounded entry plans:** preserve the structural stop and resistance-aware target. Reject next-session opening gaps outside the entry bounds or with reward/risk below 1.5. Replay signals expire after that session; recommendations do not submit an order.
+- **Fixed risk:** default maximum initial risk is 0.25% of sizing capital, further limited by `RISK_PER_TRADE_INR`; maximum position notional is 10%. Zero-size positions are rejected. Probabilities carry `HEURISTIC_UNVALIDATED` status and do not drive Kelly sizing.
+- **Daily replay:** next-session fills, cash funding, held-position risk, sector and correlation caps, conservative same-bar stops, transaction costs and 10/15-session time exits. Missing correlation evidence blocks an additional position when the correlation cap is active.
+
+Reproduce the fixed comparison with `python scripts/compare_swing.py --snapshot artifacts/performance_validation/historical.pkl`. This uses the snapshot produced by `scripts/validate_performance.py`. Results are written under `artifacts/swing_comparison/`; see the [swing report](docs/swing-improvements-2026-10-02.md).
+
+The rules had fewer trades and lower portfolio drawdown in this snapshot, but the previously viewed recent period lost money. This is an improvement to strategy definition and validation controls, with profitability still unproven. Earnings/event exclusions, point-in-time constituents and prospective paper evidence remain pending.
+
+### Quarterly validation, attribution and sensitivity
+
+Run `python scripts/research_swing.py` to generate expanding-history / nonoverlapping quarterly validation, plus a continuous portfolio across those quarters. Parameters remain fixed: prior data supplies causal indicator and regime context, with no fitting or parameter selection. Already viewed historical dates remain retrospective. The final partial quarter is explicitly flagged.
+
+Reports include setup and entry-regime attribution, win rate, holding time, net-R distribution, stop frequency, exposure, CAGR, benchmark returns, beta, descriptive daily-regression alpha and information ratios. Exposure-normalized return ratios are descriptive and are not investable fully deployed returns. Holding-period trade excess returns and the portfolio exposure-matched benchmark both use documented daily-bar proxies. Portfolio decision CSVs separate sector, correlation, position, risk, cash and expiry constraints.
+
+The prespecified development-only grid covers breakout lookbacks 15/20/25, relative volume 1.1/1.2/1.3, time exits 10/15/20, and separate 0.5/1.0/1.5 ATR stop variants alongside the structural default. All variants are reported, with no winner selected. See [the research report](docs/swing-research-2026-10-02.md).
+
+### API runtime isolation
+
+`server.create_app(paths=..., auto_scan=...)` creates an independent engine, persistence service, SSE broadcaster, cancellation event and rate limiter. SQLite opens during validated startup; API tests must enter the application lifespan. Killswitch read/reset failures keep scans blocked. Configuration and eligibility refactors preserve the trading rules. See [architecture fixes and instance setup](docs/architecture-fixes-2026-10-02.md).
+
+### Independent V2 alpha experiments
+
+`python scripts/research_v2.py --model SECTOR` runs the separate sector-leadership model; `--model PEAD` evaluates earnings surprises against consensus observed before the announcement. `--mode replay` uses the existing cash/risk book with next-session surveillance checks. Missing index, mapping, surveillance or earnings feeds produce explicit rejections. Delivery and regime gates are optional individual experiments; no new policy is activated in application scans. See [V2 commands and timestamped feed schemas](docs/swing-v2.md) and [the separate V2 protocol](docs/swing-v2-protocol.json). The current snapshot cannot establish V2 profitability without the required genuine data.
+
+### Append-only prospective paper journal
+
+Structural research is reproducible with `python scripts/research_structural_edge.py`: MAE/MFE bounds, liquid-universe RS deciles, leave-one-out sector strength, breadth percentages, volatility expansion and separate exit portfolios. The tested ATR trail, Chandelier and scale-out alternatives all lost more than the fixed policy in this snapshot; no new entry filter or exit is activated. See [structural research](docs/swing-structural-research-2026-10-02.md) and [as-of input formats / future protocol](docs/research-input-formats.md).
+
+Swing scans record operational observations, including zero-signal days, and preserve each signal's first observed timestamp, parameter fingerprint, factor snapshot and entry plan. Confirmed paper fill/exit events append to the same SQLite journal atomically with the trade book. Historical rows cannot be updated, deleted or replaced through normal SQL operations.
+
+Read with authenticated `GET /api/paper/events?after=0&limit=1000`; append new events to `state/paper_ledger.jsonl` with `python scripts/export_paper_ledger.py`. Export verifies the existing prefix and refuses to rewrite altered history. Use `source=SIMULATED`, the strategy ID and `signal_event_id` when recording paper fills. Supplied event timestamps remain separate from recording timestamps; backdated and future-dated entries are flagged. Fees/slippage and whether costs are observed or modeled are retained. The new journal starts empty and contains no fabricated historical evidence. [Paper workflow and event fields](docs/paper-trading-ledger.md).
 
 ---
 
@@ -123,10 +167,10 @@ Positions are sized via NAV-aware, kurtosis-corrected fractional Kelly criterion
 
 ### Out-of-Sample Platt Probability Calibration
 Composite factor scores are mapped to win probabilities using a logistic sigmoid (Option B convention):
-$$P(\text{win}) = \frac{1}{1 + \exp(-(A \cdot \text{score} + B))}$$
+$$P(\text{win}) = \frac{1}{1 + \exp(A \cdot \text{score} + B)}$$
 
 - **Cold-Start Heuristic ($N < 80$ trades)**: Engine defaults to $A=-4.0, B=2.0$ ($\text{sigmoid}(4 \cdot \text{score} - 2)$), where $P \ge 0.52$ gates scores $\ge 0.505$.
-- **Empirical Calibration ($N \ge 80$ trades)**: Once $\ge 80$ trade records accumulate in SQLite (`state/state.db`), maximum-likelihood estimation (MLE) fits parameters $A$ and $B$ on an out-of-sample validation slice (`IC_CALIB_OFFSET = 60`). The calibrated coefficients are saved to `state/platt_calibration.json` and loaded by both live scans and `walk_forward` backtests.
+- **Empirical Calibration ($N \ge 80$ trades)**: Once $\ge 80$ trade records accumulate in SQLite (`state/state.db`), maximum-likelihood estimation (MLE) fits parameters $A$ and $B$ on an out-of-sample validation slice (`IC_CALIB_OFFSET = 60`). The calibrated coefficients are saved to `state/platt_calibration.json` for live scans. Historical backtests use explicitly supplied coefficients and never load the latest live calibration, preventing future-outcome leakage. Paper outcomes are excluded from executed-trade calibration.
 
 ### Realistic Transaction Cost Friction
 The **TransactionCostModel** (`core/backtest.py`) incorporates real-world execution drag into all backtests:
@@ -162,6 +206,14 @@ Walk-forward backtest executed across the 504 NSE cash equity universe across ro
 ---
 
 ## 🖥️ Command Center & Unified API Server
+
+### Fill registration and closure
+
+Recommendations never create or resize positions. Record confirmed fills with authenticated `POST /api/trades/fills`; provide a stable `trade_id`, ticker, direction, horizon, actual entry price/time, shares, stop, target, composite, probability and factor snapshot. Use `source=EXECUTED` for confirmed fills or `source=SIMULATED` for paper fills. This endpoint records an event and does not send a broker order. One active position per instrument is supported; partial fills and scaling require aggregation before registration.
+
+Record a full exit with `POST /api/trades/{trade_id}/close`, supplying `exit_price`, timezone-aware `exit_ts`, total round-trip `costs` in INR, and `exit_reason`. Registration and closure atomically update the execution ledger and open-position book; identical retries are idempotent, and conflicting events are rejected. Confirmed fills require explicit exits; only paper fills are closed automatically from post-entry candles. Net P&L and realized R include recorded costs. Paper outcomes are excluded from empirical calibration.
+
+`GET /api/positions` returns the held book; `GET /api/trades/executed` returns the execution ledger. All trade endpoints require `X-API-Key`. Alert deduplication records only successfully sent picks, so failed sends can be retried.
 
 The engine includes an asynchronous FastAPI server (`server.py`) and dynamic monitoring dashboard (`dashboard.html`):
 
@@ -206,26 +258,49 @@ All parameters can be set in `.env` or passed via system environment variables:
 | `MAX_CORR` | `0.70` | Portfolio | Maximum pairwise correlation permitted between portfolio holdings. |
 | `SLIPPAGE_BPS` | `8` | Execution | Slippage friction in basis points per side for backtesting. |
 | `COMMISSION_INR` | `20` | Execution | Brokerage fee in INR per order execution. |
+| `SWING_SETUP_ENABLED` | `false` | Swing | Opt-in versioned long-only daily research policy. |
+| `SWING_MIN_RR` | `1.5` | Swing | Minimum reward/risk at the actual proposed fill. |
+| `SWING_MAX_GAP_ATR` | `0.5` | Swing | Maximum entry extension above signal close, in ATR units. |
+| `SWING_RISK_FRACTION` | `0.0025` | Swing | Maximum initial risk as a fraction of sizing capital. |
+| `SWING_MAX_EXPOSURE_FRACTION` | `0.10` | Swing | Maximum per-position notional as a fraction of sizing capital. |
 
 ---
 
 ## 🛡️ Repository Verification & Quality Gates
 
-The codebase enforces strict institutional validation standards:
+### Larger chronological evaluation — 2 October 2026
+
+The [performance report](docs/performance-validation-2026-10-02.md) evaluates five years of adjusted daily data for 60 stocks selected by sector rotation, plus the benchmark. Default heuristic calibration is fixed; training uses 120 sessions and test windows use 20 sessions without overlap. The last 252 sessions are held out, with monthly block bootstrap confidence intervals and 2×/3× slippage stress.
+
+| Sample | Trades | Mean net R | Profit factor | 95% mean-R interval |
+|---|---:|---:|---:|---|
+| Development | 116 | -0.2319 | 0.633 | [-0.4585, +0.0043] |
+| Final holdout | 34 | +0.1830 | 1.405 | [-0.3401, +0.6858] |
+| Holdout, 2× slippage | 34 | +0.1493 | 1.320 | [-0.4054, +0.6453] |
+| Holdout, 3× slippage | 34 | +0.1156 | 1.240 | [-0.4283, +0.6251] |
+
+These results do **not** establish positive net expectancy: every interval includes losses, and the development sample has negative mean R. Current constituents introduce survivorship bias; fold-boundary entries do not reproduce daily portfolio execution. Point-in-time membership and prospective paper evidence remain necessary before a live profitability claim.
+
+Reproduce with `python scripts/validate_performance.py`; use `--offline` to reuse its saved snapshot. CSVs, the historical snapshot and JSON metrics are saved under `artifacts/performance_validation/`.
+
+The repository includes automated lint, type and regression checks:
 
 ```bash
-# Run the complete test suite (653 unit & integration tests)
+# Install the pinned runtime and development dependencies in the project virtualenv
+python -m pip install -r requirements-dev.txt
+
+# Run the complete test suite (735 unit & integration tests)
 python -m pytest tests/ -v
 
-# Run strict code quality & lint verification
+# Run configured code quality & lint verification
 python -m ruff check core/ tests/ run.py screener_v14_modular.py server.py scripts/ tools/ utils/
 
 # Run static type checking
 python -m mypy core/ run.py screener_v14_modular.py server.py scripts/ tools/ utils/ --ignore-missing-imports --disallow-untyped-defs --warn-return-any --warn-unused-ignores
 ```
 
-- **Static Analysis**: 100% compliant with Ruff and Mypy strict typing.
-- **Regression Safety**: 653/653 tests passing with zero failures.
+- **Static Analysis**: Ruff and Mypy pass with the repository's configured rules; Mypy strict mode is not enabled.
+- **Regression Safety**: 735/735 tests passing with zero failures; 93.23% core coverage.
 
 ---
 

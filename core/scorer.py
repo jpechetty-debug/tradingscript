@@ -28,6 +28,7 @@ from .factors import FactorScores, compute_factors, true_volume_profile, get_reg
 from .portfolio import compute_targets, calculate_kelly_size
 from .regime import MarketRegime, MarketRegimeType, compute_rs
 from .universe import TICKER_TO_SECTOR, N_SECTORS
+from .swing import SwingPlan, completed_daily_bars, detect_swing_setup, swing_fill_size
 
 log = logging.getLogger("sovereign.scorer")
 
@@ -105,6 +106,12 @@ class TickerResult:
     reasons: list[str] = field(default_factory=list)
     is_watchlist: bool = False
     is_held: bool = False
+    strategy_id: str = "LEGACY"
+    signal_time: str = ""
+    entry_min: float = 0.
+    entry_max: float = 0.
+    probability_status: str = "UNVERIFIED"
+    research_context: dict[str, Any] = field(default_factory=dict)
 
     def display_score(self) -> int:
         return int(self.composite * 100)
@@ -302,6 +309,108 @@ class CandidateContext:
     capital_fraction: float
     intraday: dict
     row: pd.Series
+    swing_plan: Optional[SwingPlan] = None
+
+
+def _compute_factor_rank_pcts(
+    factor_vals: dict[str, list[float]], n: int
+) -> tuple[dict[str, np.ndarray], dict[str, float]]:
+    factor_rank_pcts: dict[str, np.ndarray] = {}
+    tape_multipliers: dict[str, float] = {}
+    for f in FACTOR_NAMES:
+        raw_arr = np.array(factor_vals[f], dtype=float)
+        r_min = float(np.min(raw_arr))
+        r_max = float(np.max(raw_arr))
+        if r_max - r_min <= 1e-6:
+            factor_rank_pcts[f] = raw_arr.copy()
+        else:
+            ranks = rankdata(raw_arr, method="average")
+            rank_pcts = (ranks - 1.0) / (n - 1.0)
+            factor_rank_pcts[f] = rank_pcts
+        cohort_mean = float(np.mean(raw_arr))
+        tape_multipliers[f] = min(1.0, max(0.0, cohort_mean / 0.50))
+    return factor_rank_pcts, tape_multipliers
+
+
+def _blend_and_update_candidate_scores(
+    candidate: Any,
+    idx: int,
+    factor_vals: dict[str, list[float]],
+    factor_rank_pcts: dict[str, np.ndarray],
+    tape_multipliers: dict[str, float],
+    effective_weight: float,
+    get_factors_fn: Any,
+) -> None:
+    fs = get_factors_fn(candidate)
+    weights = fs.ic_weights if (fs is not None and fs.ic_weights) else dict(DEFAULT_WEIGHTS)
+    w_sum = sum(weights.get(f, 1 / 7) for f in FACTOR_NAMES)
+    norm_weights = {f: weights.get(f, 1 / 7) / w_sum for f in FACTOR_NAMES}
+
+    blended_scores: dict[str, float] = {}
+    for f in FACTOR_NAMES:
+        raw_v = factor_vals[f][idx]
+        rank_p = float(factor_rank_pcts[f][idx])
+        b_val = raw_v + effective_weight * (rank_p - raw_v) * tape_multipliers[f]
+        blended_scores[f] = float(np.clip(b_val, 0.0, 1.0))
+
+    new_composite = sum(norm_weights[f] * blended_scores[f] for f in FACTOR_NAMES)
+
+    new_fs = FactorScores(
+        trend=round(blended_scores["trend"], 4),
+        momentum=round(blended_scores["momentum"], 4),
+        volume=round(blended_scores["volume"], 4),
+        volatility=round(blended_scores["volatility"], 4),
+        rs=round(blended_scores["rs"], 4),
+        breakout=round(blended_scores["breakout"], 4),
+        quality=round(blended_scores["quality"], 4),
+        composite=round(new_composite, 4),
+        ic_weights=weights,
+        volume_profile=getattr(fs, "volume_profile", None),
+    )
+
+    if isinstance(candidate, dict):
+        candidate["factors"] = new_fs
+        if "composite" in candidate:
+            candidate["composite"] = round(new_composite, 4)
+    else:
+        candidate.factors = new_fs
+        if hasattr(candidate, "composite"):
+            candidate.composite = round(new_composite, 4)
+
+
+def _process_directional_cohort(
+    cohort: list[Any],
+    cohort_rank_weight: float,
+    cohort_min_obs: int,
+    cohort_full_obs: int,
+    get_factors_fn: Any,
+) -> None:
+    n = len(cohort)
+    if n < cohort_min_obs or n <= 1:
+        return
+
+    ramp = (
+        min(1.0, max(0.0, (n - cohort_min_obs) / float(cohort_full_obs - cohort_min_obs)))
+        if cohort_full_obs > cohort_min_obs
+        else 1.0
+    )
+    effective_weight = cohort_rank_weight * ramp
+    if effective_weight <= 0.0:
+        return
+
+    factor_vals: dict[str, list[float]] = {f: [] for f in FACTOR_NAMES}
+    for c in cohort:
+        fs = get_factors_fn(c)
+        for f in FACTOR_NAMES:
+            val = float(getattr(fs, f, 0.5) if fs is not None else 0.5)
+            factor_vals[f].append(val)
+
+    factor_rank_pcts, tape_multipliers = _compute_factor_rank_pcts(factor_vals, n)
+
+    for idx, c in enumerate(cohort):
+        _blend_and_update_candidate_scores(
+            c, idx, factor_vals, factor_rank_pcts, tape_multipliers, effective_weight, get_factors_fn
+        )
 
 
 def apply_cohort_factor_ranking(
@@ -338,77 +447,9 @@ def apply_cohort_factor_ranking(
     cohort_short = [c for c in candidates if _get_dir(c) == "SHORT"]
 
     for cohort in (cohort_long, cohort_short):
-        n = len(cohort)
-        if n < cohort_min_obs or n <= 1:
-            continue
-
-        ramp = (
-            min(1.0, max(0.0, (n - cohort_min_obs) / float(cohort_full_obs - cohort_min_obs)))
-            if cohort_full_obs > cohort_min_obs
-            else 1.0
+        _process_directional_cohort(
+            cohort, cohort_rank_weight, cohort_min_obs, cohort_full_obs, _get_factors
         )
-        effective_weight = cohort_rank_weight * ramp
-        if effective_weight <= 0.0:
-            continue
-
-        factor_vals: dict[str, list[float]] = {f: [] for f in FACTOR_NAMES}
-        for c in cohort:
-            fs = _get_factors(c)
-            for f in FACTOR_NAMES:
-                val = float(getattr(fs, f, 0.5) if fs is not None else 0.5)
-                factor_vals[f].append(val)
-
-        factor_rank_pcts: dict[str, np.ndarray] = {}
-        tape_multipliers: dict[str, float] = {}
-        for f in FACTOR_NAMES:
-            raw_arr = np.array(factor_vals[f], dtype=float)
-            r_min = float(np.min(raw_arr))
-            r_max = float(np.max(raw_arr))
-            if r_max - r_min <= 1e-6:
-                factor_rank_pcts[f] = raw_arr.copy()
-            else:
-                ranks = rankdata(raw_arr, method="average")
-                rank_pcts = (ranks - 1.0) / (n - 1.0)
-                factor_rank_pcts[f] = rank_pcts
-            cohort_mean = float(np.mean(raw_arr))
-            tape_multipliers[f] = min(1.0, max(0.0, cohort_mean / 0.50))
-
-        for idx, c in enumerate(cohort):
-            fs = _get_factors(c)
-            weights = fs.ic_weights if (fs is not None and fs.ic_weights) else dict(DEFAULT_WEIGHTS)
-            w_sum = sum(weights.get(f, 1 / 7) for f in FACTOR_NAMES)
-            norm_weights = {f: weights.get(f, 1 / 7) / w_sum for f in FACTOR_NAMES}
-
-            blended_scores: dict[str, float] = {}
-            for f in FACTOR_NAMES:
-                raw_v = factor_vals[f][idx]
-                rank_p = float(factor_rank_pcts[f][idx])
-                b_val = raw_v + effective_weight * (rank_p - raw_v) * tape_multipliers[f]
-                blended_scores[f] = float(np.clip(b_val, 0.0, 1.0))
-
-            new_composite = sum(norm_weights[f] * blended_scores[f] for f in FACTOR_NAMES)
-
-            new_fs = FactorScores(
-                trend=round(blended_scores["trend"], 4),
-                momentum=round(blended_scores["momentum"], 4),
-                volume=round(blended_scores["volume"], 4),
-                volatility=round(blended_scores["volatility"], 4),
-                rs=round(blended_scores["rs"], 4),
-                breakout=round(blended_scores["breakout"], 4),
-                quality=round(blended_scores["quality"], 4),
-                composite=round(new_composite, 4),
-                ic_weights=weights,
-                volume_profile=getattr(fs, "volume_profile", None),
-            )
-
-            if isinstance(c, dict):
-                c["factors"] = new_fs
-                if "composite" in c:
-                    c["composite"] = round(new_composite, 4)
-            else:
-                c.factors = new_fs
-                if hasattr(c, "composite"):
-                    c.composite = round(new_composite, 4)
 
     return candidates
 
@@ -448,6 +489,302 @@ def _classify_trade_horizon(
 # MAIN SCORER
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _regime_gate_long(
+    ticker: str, regime: MarketRegime, row: pd.Series,
+    close: float, ema20: float, ema200: float, is_open_position: bool, debug: bool,
+) -> bool:
+    if regime.allows_long():
+        return True
+
+    # In confirmed RANGE, allow mean-reversion LONG if setup is not overbought
+    rsi_val = float(row.get("RSI", 50))
+    if regime.allows_mean_reversion() and rsi_val <= 55:
+        return True
+
+    # In TREND_DOWN, allow preliminary pass for candidates with full EMA
+    # alignment and healthy RSI; strict RS gate (MIN_COUNTER_TREND_RS) is verified post-factor evaluation.
+    if (regime.regime == MarketRegimeType.TREND_DOWN
+            and regime.confirmed
+            and not is_open_position):
+        ema50 = float(row.get("EMA_50", 0.0) or 0.0)
+        ema_stack = (close > ema20 > ema50 > ema200) if ema50 > 0 else (close > ema20 > ema200)
+        if ema_stack and rsi_val <= 72:
+            return True  # preliminary pass; MIN_COUNTER_TREND_RS enforced after compute_factors
+        if debug:
+            log.debug("%s: regime blocks LONG (%s) — lacks full EMA stack or RSI > 72", ticker, regime.regime)
+        return False
+
+    if is_open_position:
+        log.info("%s: Held position exited via regime structural veto (%s blocks LONG)", ticker, regime.regime)
+    elif debug:
+        log.debug("%s: regime blocks LONG (%s)", ticker, regime.regime)
+    return False
+
+
+def _regime_gate_short(
+    ticker: str, regime: MarketRegime, row: pd.Series,
+    is_open_position: bool, debug: bool,
+) -> bool:
+    if regime.allows_short():
+        return True
+
+    # In confirmed RANGE, allow mean-reversion SHORT if setup is not oversold
+    rsi_val = float(row.get("RSI", 50))
+    if regime.allows_mean_reversion() and rsi_val >= 45:
+        return True
+
+    if is_open_position:
+        log.info("%s: Held position exited via regime structural veto (%s blocks SHORT)", ticker, regime.regime)
+    elif debug:
+        log.debug("%s: regime blocks SHORT (%s)", ticker, regime.regime)
+    return False
+
+
+def _regime_gate(
+    ticker: str, direction: str, regime: MarketRegime, row: pd.Series,
+    close: float, ema20: float, ema200: float, is_open_position: bool, debug: bool,
+) -> bool:
+    """Preserve RANGE/countertrend exceptions and held-position structural vetoes."""
+    if direction == "LONG":
+        return _regime_gate_long(ticker, regime, row, close, ema20, ema200, is_open_position, debug)
+    if direction == "SHORT":
+        return _regime_gate_short(ticker, regime, row, is_open_position, debug)
+    return True
+
+
+def _ema_gate(ticker: str, direction: str, config: SystemConfig, close: float,
+              ema200: float, is_open_position: bool, debug: bool) -> bool:
+    if config.USE_EMA200_FILTER:
+        above200 = close > ema200
+        if direction == "LONG"  and not above200:
+            if is_open_position:
+                log.info("%s: Held position exited via EMA-200 structural breakdown (LONG below 200)", ticker)
+            elif debug:
+                log.debug("%s: EMA-200 VETO (LONG below 200)", ticker)
+            return False
+        if direction == "SHORT" and above200:
+            if is_open_position:
+                log.info("%s: Held position exited via EMA-200 structural breakdown (SHORT above 200)", ticker)
+            elif debug:
+                log.debug("%s: EMA-200 VETO (SHORT above 200)", ticker)
+            return False
+
+    return True
+
+
+def _determine_direction(
+    ticker: str,
+    row: pd.Series,
+    close: float,
+    intraday: dict,
+    force_score: bool,
+    is_open_position: bool,
+    held_direction: Optional[str],
+    debug: bool,
+) -> Optional[str]:
+    has_intraday_vwap = "above_vwap" in intraday
+    above_vwap = intraday.get("above_vwap", close > float(row["EMA_20"]))
+    super_up = bool(row["Super_Up"])
+    ema20 = float(row["EMA_20"])
+
+    if has_intraday_vwap:
+        bull_signals = (1 if super_up else 0) + (1 if close > ema20 else 0) + (1 if above_vwap else 0)
+        bear_signals = (1 if not super_up else 0) + (1 if close < ema20 else 0) + (1 if not above_vwap else 0)
+        is_bull = bull_signals >= 2
+        is_bear = bear_signals >= 2
+    else:
+        is_bull = super_up and close > ema20
+        is_bear = (not super_up) and close < ema20
+
+    if force_score:
+        return "LONG"
+    if is_open_position:
+        if held_direction:
+            return held_direction
+        if is_bull:
+            return "LONG"
+        if is_bear:
+            return "SHORT"
+        return "LONG"
+    if not is_bull and not is_bear:
+        if debug:
+            log.debug("%s: NEUTRAL — no directional bias", ticker)
+        return None
+    return "LONG" if is_bull else "SHORT"
+
+
+def _check_intraday_freeze(
+    ticker: str,
+    session: str,
+    trade_horizon: str,
+    config: SystemConfig,
+    now: Optional[datetime],
+    force_score: bool,
+    is_open_position: bool,
+    no_intraday: bool,
+    debug: bool,
+) -> bool:
+    if no_intraday and trade_horizon == "INTRADAY":
+        return False
+
+    if trade_horizon == "INTRADAY" and not force_score and not is_open_position:
+        current_dt = now.astimezone(IST) if now is not None else datetime.now(IST)
+        current_time = current_dt.time()
+        cutoff_time_str = getattr(config, "INTRADAY_ENTRY_CUTOFF", "14:30")
+        t_cutoff = datetime.strptime(cutoff_time_str, "%H:%M").time()
+        if session == "CLOSING_TREND" and current_time >= t_cutoff:
+            if debug:
+                log.debug("%s: INTRADAY_CUTOFF veto (time %s >= cutoff %s)", ticker, current_time, t_cutoff)
+            return False
+
+    return True
+
+
+def _resolve_swing_plan_and_weights(
+    daily_df: pd.DataFrame,
+    bench: pd.Series,
+    config: SystemConfig,
+    trade_horizon: str,
+    direction: str,
+    is_open_position: bool,
+    factor_weights: Optional[dict[str, float]],
+    regime_label: str,
+) -> tuple[Optional[SwingPlan], Optional[dict[str, float]], bool]:
+    swing_plan = None
+    if config.SWING_SETUP_ENABLED and trade_horizon == "SWING" and not is_open_position:
+        if direction != "LONG":
+            return None, None, False
+        swing_plan = detect_swing_setup(daily_df, bench, config)
+        if swing_plan is None:
+            return None, None, False
+
+    effective_weights = None if swing_plan is not None else factor_weights
+    if not effective_weights:
+        effective_weights = get_regime_factor_weights(regime_label)
+
+    return swing_plan, effective_weights, True
+
+
+def _check_counter_trend_rs(
+    ticker: str,
+    direction: str,
+    regime: MarketRegime,
+    factors: FactorScores,
+    is_open_position: bool,
+    config: SystemConfig,
+    debug: bool,
+) -> bool:
+    if (
+        direction == "LONG"
+        and regime.regime == MarketRegimeType.TREND_DOWN
+        and not is_open_position
+    ):
+        min_rs = float(getattr(config, "MIN_COUNTER_TREND_RS", 0.70))
+        if factors.rs < min_rs:
+            if debug:
+                log.debug(
+                    "%s: counter-trend LONG vetoed — RS factor %.2f < %.2f threshold",
+                    ticker, factors.rs, min_rs,
+                )
+            return False
+    return True
+
+
+def _prepare_scoring_data(
+    daily_df: pd.DataFrame,
+    bench: pd.Series,
+    config: SystemConfig,
+    now: Optional[datetime],
+    is_open_position: bool,
+    intraday: Optional[dict],
+    mtf_60m: Optional[dict],
+) -> Optional[tuple[pd.DataFrame, pd.Series, dict, dict, pd.Series]]:
+    if daily_df.empty:
+        return None
+
+    if config.SWING_SETUP_ENABLED and not is_open_position:
+        daily_df = completed_daily_bars(daily_df, config, now)
+        if daily_df.empty:
+            return None
+
+    intraday = intraday or {}
+    mtf_60m = mtf_60m or {}
+    if config.SWING_SETUP_ENABLED and not is_open_position:
+        intraday, mtf_60m = {}, {}
+        bench = bench.loc[bench.index <= daily_df.index[-1]]
+
+    return daily_df, bench, intraday, mtf_60m, daily_df.iloc[-1]
+
+
+def _check_data_and_liquidity(
+    row: pd.Series,
+    ticker: str,
+    config: SystemConfig,
+    is_open_position: bool,
+    debug: bool,
+) -> bool:
+    if not is_open_position:
+        ok, msg = passes_liquidity(row, config)
+        if not ok:
+            if debug:
+                log.debug("%s: LIQUIDITY — %s", ticker, msg)
+            return False
+
+    ok, msg = passes_data_quality(row, ticker)
+    if not ok:
+        if debug:
+            log.debug("%s: DATA_QUALITY — %s", ticker, msg)
+        return False
+
+    return True
+
+
+def _check_direction_and_regime_gates(
+    ticker: str,
+    direction: str,
+    regime: MarketRegime,
+    row: pd.Series,
+    close: float,
+    ema20: float,
+    ema200: float,
+    config: SystemConfig,
+    force_score: bool,
+    is_open_position: bool,
+    debug: bool,
+) -> bool:
+    if not force_score and not _regime_gate(ticker, direction, regime, row, close, ema20, ema200, is_open_position, debug):
+        return False
+    if not _ema_gate(ticker, direction, config, close, ema200, is_open_position, debug):
+        return False
+    return True
+
+
+def _resolve_trade_horizon(
+    ticker: str,
+    row: pd.Series,
+    config: SystemConfig,
+    direction: str,
+    session: str,
+    intraday: dict,
+    now: Optional[datetime],
+    force_score: bool,
+    is_open_position: bool,
+    no_intraday: bool,
+    debug: bool,
+) -> Optional[str]:
+    adx_now = float(row.get("ADX", 0) or 0)
+    trade_horizon = "SWING" if config.SWING_SETUP_ENABLED and not is_open_position else _classify_trade_horizon(
+        config=config,
+        direction=direction,
+        session=session,
+        adx=adx_now,
+        intraday=intraday,
+    )
+    if not _check_intraday_freeze(ticker, session, trade_horizon, config, now, force_score, is_open_position, no_intraday, debug):
+        return None
+    return trade_horizon
+
+
 def score_candidate_pass1(
     ticker:       str,
     daily_df:     pd.DataFrame,
@@ -473,161 +810,46 @@ def score_candidate_pass1(
     Evaluates liquidity, data quality, directional bias, regime veto, EMA200 filter,
     and calculates raw FactorScores. Returns CandidateContext or None.
     """
-    if daily_df.empty:
+    prep = _prepare_scoring_data(daily_df, bench, config, now, is_open_position, intraday, mtf_60m)
+    if prep is None:
+        return None
+    daily_df, bench, intraday, mtf_60m, row = prep
+
+    # 1. Liquidity & Data-quality gates
+    if not _check_data_and_liquidity(row, ticker, config, is_open_position, debug):
         return None
 
-    intraday = intraday or {}
-    mtf_60m  = mtf_60m  or {}
-    row = daily_df.iloc[-1]
-
-    # ── 1. Liquidity gate ────────────────────────────────────────────────────
-    if not is_open_position:
-        ok, msg = passes_liquidity(row, config)
-        if not ok:
-            if debug:
-                log.debug("%s: LIQUIDITY — %s", ticker, msg)
-            return None
-
-    # ── 1b. Data-quality gate (FIX 4) ────────────────────────────────────────
-    # Reject tickers with NaN ATR_Pctile or ATR_50_mean.  These arise when
-    # a ticker has fewer than 50 bars of history.  Without this gate,
-    # factor_volatility silently treats them as mid-range (fallback=50),
-    # which hides data-sparse tickers and biases the composite score.
-    ok, msg = passes_data_quality(row, ticker)
-    if not ok:
-        if debug:
-            log.debug("%s: DATA_QUALITY — %s", ticker, msg)
-        return None
-
-    # ── 2. Direction ─────────────────────────────────────────────────────────
-    live_price  = intraday.get("live_price", 0.0)
-    close       = live_price if live_price > 0 else float(row["Close"])
-    has_intraday_vwap = "above_vwap" in intraday
-    above_vwap  = intraday.get("above_vwap", close > float(row["EMA_20"]))
-
-    super_up = bool(row["Super_Up"])
-    ema20    = float(row["EMA_20"])
-    ema200   = float(row["EMA_200"])
-
-    if has_intraday_vwap:
-        bull_signals = (1 if super_up else 0) + (1 if close > ema20 else 0) + (1 if above_vwap else 0)
-        bear_signals = (1 if not super_up else 0) + (1 if close < ema20 else 0) + (1 if not above_vwap else 0)
-        is_bull = bull_signals >= 2
-        is_bear = bear_signals >= 2
-    else:
-        is_bull = super_up and close > ema20
-        is_bear = (not super_up) and close < ema20
-
-    if force_score:
-        direction = "LONG"
-    elif is_open_position:
-        # For held positions, retain established direction unconditionally if provided; otherwise infer from directional bias
-        if held_direction:
-            direction = held_direction
-        elif is_bull:
-            direction = "LONG"
-        elif is_bear:
-            direction = "SHORT"
-        else:
-            direction = "LONG"
-    elif not is_bull and not is_bear:
-        if debug:
-            log.debug("%s: NEUTRAL — no directional bias", ticker)
-        return None
-    else:
-        direction = "LONG" if is_bull else "SHORT"
-
-    # ── 3. Regime gate ───────────────────────────────────────────────────────
-    if not force_score:
-        if direction == "LONG":
-            if not regime.allows_long():
-                # In confirmed RANGE, allow mean-reversion LONG if setup is not overbought
-                rsi_val = float(row.get("RSI", 50))
-                if regime.allows_mean_reversion() and rsi_val <= 55:
-                    pass
-                # In TREND_DOWN, allow preliminary pass for candidates with full EMA
-                # alignment and healthy RSI; strict RS gate (MIN_COUNTER_TREND_RS) is verified post-factor evaluation.
-                elif (regime.regime == MarketRegimeType.TREND_DOWN
-                      and regime.confirmed
-                      and not is_open_position):
-                    ema50 = float(row.get("EMA_50", 0.0) or 0.0)
-                    ema_stack = (close > ema20 > ema50 > ema200) if ema50 > 0 else (close > ema20 > ema200)
-                    if ema_stack and rsi_val <= 72:
-                        pass  # preliminary pass; MIN_COUNTER_TREND_RS enforced after compute_factors
-                    else:
-                        if debug:
-                            log.debug("%s: regime blocks LONG (%s) — lacks full EMA stack or RSI > 72", ticker, regime.regime)
-                        return None
-                else:
-                    if is_open_position:
-                        log.info("%s: Held position exited via regime structural veto (%s blocks LONG)", ticker, regime.regime)
-                    elif debug:
-                        log.debug("%s: regime blocks LONG (%s)", ticker, regime.regime)
-                    return None
-        if direction == "SHORT":
-            if not regime.allows_short():
-                # In confirmed RANGE, allow mean-reversion SHORT if setup is not oversold
-                rsi_val = float(row.get("RSI", 50))
-                if regime.allows_mean_reversion() and rsi_val >= 45:
-                    pass
-                else:
-                    if is_open_position:
-                        log.info("%s: Held position exited via regime structural veto (%s blocks SHORT)", ticker, regime.regime)
-                    elif debug:
-                        log.debug("%s: regime blocks SHORT (%s)", ticker, regime.regime)
-                    return None
-
-    # ── 4. EMA-200 structural filter ─────────────────────────────────────────
-    if config.USE_EMA200_FILTER:
-        above200 = close > ema200
-        if direction == "LONG"  and not above200:
-            if is_open_position:
-                log.info("%s: Held position exited via EMA-200 structural breakdown (LONG below 200)", ticker)
-            elif debug:
-                log.debug("%s: EMA-200 VETO (LONG below 200)", ticker)
-            return None
-        if direction == "SHORT" and above200:
-            if is_open_position:
-                log.info("%s: Held position exited via EMA-200 structural breakdown (SHORT above 200)", ticker)
-            elif debug:
-                log.debug("%s: EMA-200 VETO (SHORT above 200)", ticker)
-            return None
-
-    # ── 5a. Trade horizon classification & Cutoff Gate ───────────────────────
-    adx_now = float(row.get("ADX", 0) or 0)
-    trade_horizon = _classify_trade_horizon(
-        config=config,
-        direction=direction,
-        session=session,
-        adx=adx_now,
-        intraday=intraday,
+    # 2. Direction
+    live_price = intraday.get("live_price", 0.0)
+    close = live_price if live_price > 0 else float(row["Close"])
+    direction = _determine_direction(
+        ticker, row, close, intraday, force_score, is_open_position, held_direction, debug
     )
-
-    # Suppress intraday candidates when --no-intraday is passed or when
-    # INTRADAY_ENABLED is False (which already forces SWING above, but
-    # this is a safety net for any future code path).
-    if no_intraday and trade_horizon == "INTRADAY":
+    if direction is None:
         return None
 
-    # Intraday Hard Entry Freeze: Veto new MIS entries past INTRADAY_ENTRY_CUTOFF (14:30)
-    # because broker auto-square-off occurs at 15:15 (less than 45 min runway).
-    # Existing held positions are exempt since they are already active.
-    if trade_horizon == "INTRADAY" and not force_score and not is_open_position:
-        current_dt = now.astimezone(IST) if now is not None else datetime.now(IST)
-        current_time = current_dt.time()
-        cutoff_time_str = getattr(config, "INTRADAY_ENTRY_CUTOFF", "14:30")
-        t_cutoff = datetime.strptime(cutoff_time_str, "%H:%M").time()
-        if session == "CLOSING_TREND" and current_time >= t_cutoff:
-            if debug:
-                log.debug("%s: INTRADAY_CUTOFF veto (time %s >= cutoff %s)", ticker, current_time, t_cutoff)
-            return None
+    ema20 = float(row["EMA_20"])
+    ema200 = float(row["EMA_200"])
+    if not _check_direction_and_regime_gates(
+        ticker, direction, regime, row, close, ema20, ema200, config, force_score, is_open_position, debug
+    ):
+        return None
 
-    # ── 5b. Regime-conditional weights (fallback when IC not calibrated) ──────
-    effective_weights = factor_weights
-    if not effective_weights:
-        effective_weights = get_regime_factor_weights(regime.label)
+    # Trade horizon classification & Cutoff Gate
+    trade_horizon = _resolve_trade_horizon(
+        ticker, row, config, direction, session, intraday, now, force_score, is_open_position, no_intraday, debug
+    )
+    if trade_horizon is None:
+        return None
 
-    # ── 5c. Factor model ─────────────────────────────────────────────────────
+    # Regime-conditional weights / Swing plan
+    swing_plan, effective_weights, ok = _resolve_swing_plan_and_weights(
+        daily_df, bench, config, trade_horizon, direction, is_open_position, factor_weights, regime.label
+    )
+    if not ok:
+        return None
+
+    # Factor model
     sector = TICKER_TO_SECTOR.get(ticker, "")
     factors = compute_factors(
         ticker=ticker,
@@ -650,22 +872,9 @@ def score_candidate_pass1(
         rs_lookback=config.RS_LOOKBACK,
     )
 
-    # ── 5d. Counter-trend RS gate ─────────────────────────────────────────────
-    # In confirmed TREND_DOWN, LONG setups must demonstrate top-tier relative strength
-    # leadership against the benchmark tape (factors.rs >= MIN_COUNTER_TREND_RS).
-    if (
-        direction == "LONG"
-        and regime.regime == MarketRegimeType.TREND_DOWN
-        and not is_open_position
-    ):
-        min_rs = float(getattr(config, "MIN_COUNTER_TREND_RS", 0.70))
-        if factors.rs < min_rs:
-            if debug:
-                log.debug(
-                    "%s: counter-trend LONG vetoed — RS factor %.2f < %.2f threshold",
-                    ticker, factors.rs, min_rs,
-                )
-            return None
+    # Counter-trend RS gate
+    if not _check_counter_trend_rs(ticker, direction, regime, factors, is_open_position, config, debug):
+        return None
 
     return CandidateContext(
         ticker=ticker,
@@ -683,7 +892,210 @@ def score_candidate_pass1(
         capital_fraction=capital_fraction,
         intraday=intraday,
         row=row,
+        swing_plan=swing_plan,
     )
+
+
+def _compute_candidate_targets(
+    candidate: CandidateContext,
+    config: SystemConfig,
+    close: float,
+    atr: float,
+    atr_pctile: float,
+    daily_df: pd.DataFrame,
+    factors: FactorScores,
+) -> tuple[Any, tuple[float, float, float]]:
+    direction = candidate.direction
+    trade_horizon = candidate.trade_horizon
+
+    cached_vp = getattr(factors, "volume_profile", None)
+    if cached_vp is not None:
+        poc, val, vah = cached_vp
+    else:
+        poc, val, vah = true_volume_profile(
+            daily_df,
+            lookback=config.VPROFILE_LOOKBACK,
+            bins=config.VPROFILE_BINS,
+        )
+
+    targets = compute_targets(
+        direction, close, atr, config, trade_horizon=trade_horizon, atr_pctile=atr_pctile
+    )
+
+    if config.USE_VALUE_AREA_RR and trade_horizon != "INTRADAY" and candidate.swing_plan is None:
+        sl_dist = config.STOP_ATR_MULT * atr
+        if direction == "LONG":
+            rr_va = (vah - close) / sl_dist if sl_dist > 0 else 0
+            if rr_va >= config.VA_MIN_RR:
+                targets = targets.__class__(
+                    stop=targets.stop,
+                    t1=round(vah, 2),
+                    t2=targets.t2,
+                    rr=round(rr_va, 2),
+                )
+        else:
+            rr_va = (close - val) / sl_dist if sl_dist > 0 else 0
+            if rr_va >= config.VA_MIN_RR:
+                targets = targets.__class__(
+                    stop=targets.stop,
+                    t1=round(val, 2),
+                    t2=targets.t2,
+                    rr=round(rr_va, 2),
+                )
+
+    if candidate.swing_plan is not None:
+        plan = candidate.swing_plan
+        targets = targets.__class__(
+            stop=plan.stop,
+            t1=plan.target,
+            t2=plan.target2,
+            rr=round((plan.target - close) / (close - plan.stop), 2),
+        )
+
+    return targets, (poc, val, vah)
+
+
+def _compute_sizing_and_expectancy(
+    candidate: CandidateContext,
+    targets: Any,
+    prob_win: float,
+    close: float,
+    config: SystemConfig,
+    capital_fraction: float,
+) -> Optional[tuple[int, float, float, float, float]]:
+    from dataclasses import replace
+    from .backtest import DEFAULT_COST_MODEL, SWING_COST_MODEL
+
+    trade_horizon = candidate.trade_horizon
+    if candidate.swing_plan is not None:
+        shares, risk_inr = swing_fill_size(candidate.swing_plan, close, config, capital_fraction)
+        kelly_f, kurt_corr = 0.0, 1.0
+        if shares == 0:
+            return None
+    else:
+        shares, risk_inr, kelly_f, kurt_corr = calculate_kelly_size(
+            entry=close, stop=targets.stop, prob_win=prob_win, rr=targets.rr,
+            daily_df=candidate.daily_df, config=config, capital_fraction=capital_fraction,
+        )
+
+    costs = SWING_COST_MODEL if trade_horizon == "SWING" else DEFAULT_COST_MODEL
+    costs = replace(costs, slippage_pct=config.SLIPPAGE_BPS / 10_000.0)
+    if trade_horizon == "INTRADAY":
+        costs = replace(costs, commission_inr=float(config.COMMISSION_INR))
+    exp_r = round(
+        prob_win * targets.rr - (1 - prob_win)
+        - costs.friction_r(close, abs(close - targets.stop), shares), 3,
+    )
+    return shares, risk_inr, kelly_f, kurt_corr, exp_r
+
+
+def _check_probability_gates(
+    candidate: CandidateContext,
+    prob_win: float,
+    exp_r: float,
+    config: SystemConfig,
+    is_open_position: bool,
+    allow_watchlist: bool,
+    debug: bool,
+) -> tuple[bool, bool]:
+    ticker = candidate.ticker
+    session = candidate.session
+    regime = candidate.regime
+
+    min_prob = config.PROB_HOLD_FLOOR if is_open_position else config.MIN_PROB_WIN
+
+    # Midday Chop Gate (10:30–13:30)
+    if session == "MIDDAY_CHOP" and not regime.allows_mean_reversion() and not is_open_position and candidate.swing_plan is None:
+        midday_hurdle = getattr(config, "MIDDAY_BREAKOUT_MIN_PROB", 0.55)
+        min_prob = max(min_prob, midday_hurdle)
+
+    watchlist_floor = getattr(config, "WATCHLIST_MIN_PROB", 0.45)
+    is_watchlist = False
+
+    if prob_win < min_prob:
+        if allow_watchlist and prob_win >= watchlist_floor and exp_r >= 0.0:
+            is_watchlist = True
+        else:
+            if debug:
+                log.debug("%s: prob %.2f < gate %.2f (open_pos=%s)", ticker, prob_win, min_prob, is_open_position)
+            return False, False
+
+    if exp_r < config.MIN_EXPECTANCY_R and not is_watchlist:
+        if debug:
+            log.debug("%s: E(R) %.3f < gate %.3f", ticker, exp_r, config.MIN_EXPECTANCY_R)
+        return False, False
+
+    return True, is_watchlist
+
+
+def _build_factor_reasons(
+    factors: FactorScores, rsi: float, rvol: float, sec_rank: int, sec_rs: float
+) -> list[str]:
+    reasons: list[str] = []
+    if factors.trend > 0.7:
+        reasons.append("Trend✅")
+    if factors.momentum > 0.6:
+        reasons.append(f"Mom✅RSI{rsi:.0f}")
+    if factors.volume > 0.6:
+        reasons.append(f"Vol✅×{rvol:.1f}")
+    if factors.volatility > 0.6:
+        reasons.append("Coiled")
+    if factors.rs > 0.6:
+        reasons.append(f"RS✅#{sec_rank}/{sec_rs:+.1f}")
+    if factors.quality > 0.6:
+        reasons.append("Qual✅")
+    return reasons
+
+
+def _build_signal_reasons(
+    factors: FactorScores,
+    targets: Any,
+    regime: MarketRegime,
+    direction: str,
+    rsi: float,
+    rvol: float,
+    sec_rank: int,
+    sec_rs: float,
+    adx: float,
+    mtf_full: bool,
+    is_watchlist: bool,
+    is_open_position: bool,
+    swing_plan: Optional[SwingPlan],
+    excess_kurt: float,
+    kurt_corr: float,
+) -> list[str]:
+    reasons = _build_factor_reasons(factors, rsi, rvol, sec_rank, sec_rs)
+    if adx >= 25:
+        reasons.append(f"ADX{adx:.0f}")
+    if mtf_full:
+        reasons.append("MTF✅")
+    if regime.allows_mean_reversion():
+        reasons.append("MeanRev✅")
+    if direction == "LONG" and regime.regime == MarketRegimeType.TREND_DOWN:
+        reasons.append("CounterTrend⚡")
+        if factors.rs >= 0.70:
+            reasons.append("RSLeader🏆")
+    if is_watchlist:
+        reasons.append("Watchlist")
+    if is_open_position:
+        reasons.append("HeldPos")
+    reasons.append(f"Regime:{regime.label}")
+    reasons.append(f"RR:{targets.rr:.1f}x")
+    if swing_plan is not None:
+        reasons.extend([swing_plan.strategy_id, "Probability:heuristic", "Risk:fixed_fraction"])
+    else:
+        reasons.append(f"Kurt:k={excess_kurt:.1f}->{kurt_corr:.0%}Kelly")
+    return reasons
+
+
+def _calculate_streak(values: np.ndarray) -> int:
+    streak = 0
+    for v in reversed(values):
+        if v == 1:
+            streak += 1
+        else:
+            break
+    return streak
 
 
 def score_candidate_pass2(
@@ -716,170 +1128,101 @@ def score_candidate_pass2(
     intraday = candidate.intraday
     row = candidate.row
 
-    # ── 6. Session + regime composite adjustment ──────────────────────────────
+    # 6. Session + regime composite adjustment
     sess_mult = _SESSION_MULT.get(session, 1.0)
+    if candidate.swing_plan is not None:
+        sess_mult = 1.0  # A daily swing setup does not depend on scan time.
     if regime.regime == MarketRegimeType.RANGE:
         sess_mult *= 0.88
-    # Counter-trend penalty: longs in TREND_DOWN must overcome higher bar
     if direction == "LONG" and regime.regime == MarketRegimeType.TREND_DOWN:
         sess_mult *= 0.90
     adj_composite = float(np.clip(factors.composite * sess_mult, 0.0, 1.0))
 
-    # ── 7. Platt probability ─────────────────────────────────────────────────
+    # 7. Platt probability
     prob_win = composite_to_prob(adj_composite, config.PLATT_A, config.PLATT_B)
+    if candidate.swing_plan is not None:
+        prob_win = composite_to_prob(adj_composite, -4., 2.)
 
-    # ── 8. Targets & expectancy ───────────────────────────────────────────────
+    # 8. Targets & expectancy
     atr = float(row["ATR"])
-    cached_vp = getattr(factors, "volume_profile", None)
-    if cached_vp is not None:
-        poc, val, vah = cached_vp
-    else:
-        poc, val, vah = true_volume_profile(
-            daily_df,
-            lookback=config.VPROFILE_LOOKBACK,
-            bins=config.VPROFILE_BINS,
-        )
+    atr_pctile = float(row.get("ATR_Pctile", 50) or 50)
+    targets, (poc, val, vah) = _compute_candidate_targets(
+        candidate, config, close, atr, atr_pctile, daily_df, factors
+    )
 
-    targets = compute_targets(direction, close, atr, config, trade_horizon=trade_horizon,
-                              atr_pctile=float(row.get("ATR_Pctile", 50) or 50))
+    sizing_result = _compute_sizing_and_expectancy(
+        candidate, targets, prob_win, close, config, capital_fraction
+    )
+    if sizing_result is None:
+        return None
+    shares, risk_inr, kelly_f, kurt_corr, exp_r = sizing_result
 
-    # Use value-area T1 if RR qualifies (only for SWING trades; INTRADAY preserves tight ATR targets)
-    if config.USE_VALUE_AREA_RR and trade_horizon != "INTRADAY":
-        sl_dist = config.STOP_ATR_MULT * atr
-        if direction == "LONG":
-            rr_va = (vah - close) / sl_dist if sl_dist > 0 else 0
-            if rr_va >= config.VA_MIN_RR:
-                targets = targets.__class__(
-                    stop=targets.stop,
-                    t1=round(vah, 2),
-                    t2=targets.t2,
-                    rr=round(rr_va, 2),
-                )
-        else:
-            rr_va = (close - val) / sl_dist if sl_dist > 0 else 0
-            if rr_va >= config.VA_MIN_RR:
-                targets = targets.__class__(
-                    stop=targets.stop,
-                    t1=round(val, 2),
-                    t2=targets.t2,
-                    rr=round(rr_va, 2),
-                )
-
-    exp_r = round(prob_win * targets.rr - (1 - prob_win) * 1.0, 3)
-
-    # ── 9. Probability & expectancy gates ────────────────────────────────────
-    min_prob = config.PROB_HOLD_FLOOR if is_open_position else config.MIN_PROB_WIN
-
-    # Midday Chop Gate (10:30–13:30): Require higher hurdle (0.55) for directional breakouts
-    # to protect against false breakouts, while allowing mean-reversion pullbacks
-    if session == "MIDDAY_CHOP" and not regime.allows_mean_reversion() and not is_open_position:
-        midday_hurdle = getattr(config, "MIDDAY_BREAKOUT_MIN_PROB", 0.55)
-        min_prob = max(min_prob, midday_hurdle)
-
-    watchlist_floor = getattr(config, "WATCHLIST_MIN_PROB", 0.45)
-    is_watchlist = False
-
-    if prob_win < min_prob:
-        if allow_watchlist and prob_win >= watchlist_floor and exp_r >= 0.0:
-            is_watchlist = True
-        else:
-            if debug:
-                log.debug("%s: prob %.2f < gate %.2f (open_pos=%s)", ticker, prob_win, min_prob, is_open_position)
-            return None
-    if exp_r < config.MIN_EXPECTANCY_R and not is_watchlist:
-        if debug:
-            log.debug("%s: E(R) %.3f < gate %.3f", ticker, exp_r, config.MIN_EXPECTANCY_R)
+    # 9. Probability & expectancy gates
+    passed, is_watchlist = _check_probability_gates(
+        candidate, prob_win, exp_r, config, is_open_position, allow_watchlist, debug
+    )
+    if not passed:
         return None
 
-    # ── 10. Kelly position sizing ─────────────────────────────────────────────
-    shares, risk_inr, kelly_f, kurt_corr = calculate_kelly_size(
-        entry=close,
-        stop=targets.stop,
-        prob_win=prob_win,
-        rr=targets.rr,
-        daily_df=daily_df,
-        config=config,
-        capital_fraction=capital_fraction,
-    )
+    # Auxiliary metrics
     from .portfolio import _ticker_excess_kurtosis
     excess_kurt = _ticker_excess_kurtosis(daily_df, config)
 
-    # ── 11. Auxiliary metrics ─────────────────────────────────────────────────
-    rvol_20      = float(row.get("RVol_20", 0.20) or 0.20)
-    sharpe_rank  = exp_r / rvol_20 if rvol_20 > 0 else exp_r
-    sl_dist      = abs(close - targets.stop)
-    breakeven    = (round(close + sl_dist, 2)
-                    if direction == "LONG"
-                    else round(close - sl_dist, 2))
+    rvol_20 = float(row.get("RVol_20", 0.20) or 0.20)
+    sharpe_rank = exp_r / rvol_20 if rvol_20 > 0 else exp_r
+    sl_dist = abs(close - targets.stop)
+    breakeven = round(close + sl_dist, 2) if direction == "LONG" else round(close - sl_dist, 2)
 
-    atr_pctile   = float(row.get("ATR_Pctile", 50) or 50)
     trail_stop, time_stop = compute_trade_management(direction, close, atr, atr_pctile)
+    if candidate.swing_plan is not None:
+        trail_stop, time_stop = candidate.swing_plan.stop, candidate.swing_plan.time_stop_bars
 
-    rsi    = float(row["RSI"])
-    adx    = float(row["ADX"])
-    mh     = float(row["MACD_Hist"])
-    sk     = float(row.get("StochRSI_K", 50) or 50)
+    rsi = float(row["RSI"])
+    adx = float(row["ADX"])
+    mh = float(row["MACD_Hist"])
+    sk = float(row.get("StochRSI_K", 50) or 50)
     vol_avg = float(row["Vol_Avg_20"])
     vol_today = intraday.get("vol_today", int(vol_avg))
-    rvol   = round(vol_today / vol_avg, 2) if vol_avg > 0 else 1.0
+    rvol = round(vol_today / vol_avg, 2) if vol_avg > 0 else 1.0
     atr50m = float(row.get("ATR_50_mean", atr) or atr)
-    vol_c  = (atr < config.VOL_CONTRACT_RATIO * atr50m) if atr50m > 0 else False
+    vol_c = (atr < config.VOL_CONTRACT_RATIO * atr50m) if atr50m > 0 else False
 
-    h52    = float(daily_df["High"].max())
+    h52 = float(daily_df["High"].max())
     dist52 = ((h52 - close) / h52 * 100) if h52 > 0 else 100.0
     super_up = bool(row["Super_Up"])
-    ema20  = float(row["EMA_20"])
-    ema50  = float(row["EMA_50"])
+    ema20 = float(row["EMA_20"])
+    ema50 = float(row["EMA_50"])
     ema200 = float(row["EMA_200"])
     mtf_full = (ema20 > ema50 > ema200) if direction == "LONG" else (ema20 < ema50 < ema200)
     ema200_al = (close > ema200) if direction == "LONG" else (close < ema200)
 
     col = "Up_Day" if direction == "LONG" else "Dn_Day"
-    streak = 0
-    for v in reversed(daily_df[col].values[-10:]):
-        if v == 1:
-            streak += 1
-        else:
-            break
+    streak = _calculate_streak(daily_df[col].values[-10:])
 
-    tick_rs  = compute_rs(daily_df["Close"], bench, lookback=config.RS_LOOKBACK)
+    tick_rs = compute_rs(daily_df["Close"], bench, lookback=config.RS_LOOKBACK)
     sec_rank = sector_ranks.get(sector, N_SECTORS)
     sec_rs = sector_rs.get(sector, 0.0)
 
     change_pct = ((close - float(daily_df["Open"].iloc[-1]))
                   / float(daily_df["Open"].iloc[-1])) * 100
 
-    # ── 12. Signal reasons (human-readable) ───────────────────────────────────
-    reasons: list[str] = []
-    if factors.trend > 0.7:
-        reasons.append("Trend✅")
-    if factors.momentum > 0.6:
-        reasons.append(f"Mom✅RSI{rsi:.0f}")
-    if factors.volume > 0.6:
-        reasons.append(f"Vol✅×{rvol:.1f}")
-    if factors.volatility > 0.6:
-        reasons.append("Coiled")
-    if factors.rs > 0.6:
-        reasons.append(f"RS✅#{sec_rank}/{sec_rs:+.1f}")
-    if factors.quality > 0.6:
-        reasons.append("Qual✅")
-    if adx >= 25:
-        reasons.append(f"ADX{adx:.0f}")
-    if mtf_full:
-        reasons.append("MTF✅")
-    if regime.allows_mean_reversion():
-        reasons.append("MeanRev✅")
-    if direction == "LONG" and regime.regime == MarketRegimeType.TREND_DOWN:
-        reasons.append("CounterTrend⚡")
-        if factors.rs >= 0.70:
-            reasons.append("RSLeader🏆")
-    if is_watchlist:
-        reasons.append("Watchlist")
-    if is_open_position:
-        reasons.append("HeldPos")
-    reasons.append(f"Regime:{regime.label}")
-    reasons.append(f"RR:{targets.rr:.1f}x")
-    reasons.append(f"Kurt:k={excess_kurt:.1f}->{kurt_corr:.0%}Kelly")
+    reasons = _build_signal_reasons(
+        factors=factors,
+        targets=targets,
+        regime=regime,
+        direction=direction,
+        rsi=rsi,
+        rvol=rvol,
+        sec_rank=sec_rank,
+        sec_rs=sec_rs,
+        adx=adx,
+        mtf_full=mtf_full,
+        is_watchlist=is_watchlist,
+        is_open_position=is_open_position,
+        swing_plan=candidate.swing_plan,
+        excess_kurt=excess_kurt,
+        kurt_corr=kurt_corr,
+    )
 
     return TickerResult(
         ticker=ticker.replace(".NS", ""),
@@ -935,6 +1278,11 @@ def score_candidate_pass2(
         reasons=reasons,
         is_watchlist=is_watchlist,
         is_held=is_open_position,
+        strategy_id=candidate.swing_plan.strategy_id if candidate.swing_plan else "LEGACY",
+        signal_time=candidate.swing_plan.signal_time if candidate.swing_plan else "",
+        entry_min=candidate.swing_plan.entry_min if candidate.swing_plan else 0.,
+        entry_max=candidate.swing_plan.entry_max if candidate.swing_plan else 0.,
+        probability_status="HEURISTIC_UNVALIDATED" if candidate.swing_plan else "UNVERIFIED",
     )
 
 

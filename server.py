@@ -20,17 +20,19 @@ import ipaddress
 import json
 import logging
 import os
+import sqlite3
 from pathlib import Path
 import threading
 from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Optional
 
 import secrets
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -41,10 +43,12 @@ import screener_v14_modular as svm
 from core.application import ApplicationRuntime, build_application_runtime
 from core.config import CONFIG, MarketRegimeType
 from core.regime import RegimeTracker
+from core.runtime_paths import RuntimePaths
 from core.scorer import TickerResult
 from core.services import PersistenceService, ScanCancelled
 from core.snapshots import build_scan_snapshot, format_ticker, write_json_atomic
 from core.universe import SECTORS, TICKER_TO_SECTOR
+from core.trades import TradeExit, TradeFill, TradeLifecycle
 
 load_dotenv()
 
@@ -109,13 +113,12 @@ def get_client_ip(request: Request) -> str:
 
 log = logging.getLogger("sovereign.server")
 
-limiter = Limiter(key_func=get_client_ip)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Validate server security config and trigger initial non-blocking market scan."""
-    BROADCASTER.set_loop(asyncio.get_running_loop())
+    app.state.broadcaster.set_loop(asyncio.get_running_loop())
     current_key = os.environ.get("API_KEY") or API_KEY
     if not current_key:
         raise RuntimeError(
@@ -143,56 +146,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "Permitted on loopback only. Set a strong key before exposing to any network.",
             current_key,
         )
-    # Re-hydrate state from disk and sync persistent killswitch flag
-    STATE.load_persisted_state(PERSISTENCE)
-    STATE.is_killed = PERSISTENCE.get_killswitch()
-    runtime = build_application_runtime(version=svm.VERSION, persistence=PERSISTENCE)
+    if app.state.persistence is None:
+        app.state.persistence = PersistenceService(paths=app.state.paths or RuntimePaths.discover())
+    # Re-hydrate state from disk and verify persistent killswitch flag
+    app.state.engine.load_persisted_state(_persistence(app))
+    runtime = build_application_runtime(version=svm.VERSION, persistence=_persistence(app))
     app.state.runtime = runtime
 
     # Trigger initial scan in non-blocking background task unless killswitch is active
     scan_task = None
-    if not STATE.is_killed:
-        scan_task = _start_scan_task()
+    if app.state.auto_scan and not app.state.engine.is_killed:
+        scan_task = _start_scan_task(app)
     try:
         yield
     finally:
-        SCAN_CANCEL_EVENT.set()
-        if scan_task and not scan_task.done():
+        app.state.scan_cancel_event.set()
+        active_task = app.state.scan_task or scan_task
+        if active_task and not active_task.done():
             try:
-                await asyncio.wait_for(scan_task, timeout=10.0)
+                await asyncio.wait_for(active_task, timeout=10.0)
             except (asyncio.TimeoutError, ScanCancelled):
                 log.warning("Scan did not stop before server shutdown timeout.")
         runtime.close()
+        app.state.runtime = None
 
 
-app = FastAPI(
-    title="Sovereign Engine API Server",
-    description="Real-time quantitative scanner and market regime API server",
-    version=svm.VERSION,
-    lifespan=lifespan,
-)
-
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
-
-# Explicit CORS allowlist
-cors_env = os.environ.get("CORS_ORIGINS", "")
-custom_origins = [o.strip() for o in cors_env.split(",") if o.strip()]
-DEFAULT_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:8000",
-    "http://127.0.0.1:8000",
-]
-ALLOWED_ORIGINS = list(dict.fromkeys(DEFAULT_ORIGINS + custom_origins))
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+router = APIRouter()
 
 class AsyncEngineLock(asyncio.Lock):
     """Asyncio lock that also supports synchronous context manager protocol in tests."""
@@ -203,7 +182,7 @@ class AsyncEngineLock(asyncio.Lock):
         pass
 
 
-# Global Engine State
+# State owned by each application instance
 class EngineState:
     def __init__(self) -> None:
         self.regime_tracker = RegimeTracker()
@@ -232,35 +211,44 @@ class EngineState:
             )
             write_json_atomic(target, payload)
             log.info("Persisted latest scan snapshot to %s", target)
-        except Exception as exc:
+        except (OSError, TypeError, ValueError) as exc:
             log.warning("Could not persist latest scan state: %s", exc)
 
     def load_persisted_state(self, persistence: PersistenceService) -> bool:
         """Re-hydrate state from state/latest_scan.json if it exists."""
+        target = persistence.paths.state_dir / "latest_scan.json"
         try:
             self.is_killed = persistence.get_killswitch()
-            target = persistence.paths.state_dir / "latest_scan.json"
+        except (sqlite3.Error, OSError) as exc:
+            self.is_killed = True
+            self.scan_error = "Could not verify persisted killswitch; scans blocked"
+            log.error("Could not restore killswitch: %s", exc)
+            raise RuntimeError(self.scan_error) from exc
+        try:
             if not target.exists():
                 return False
             data = json.loads(target.read_text(encoding="utf-8"))
-            self.last_scan_time = data.get("scan_time")
+            if not isinstance(data, dict):
+                raise ValueError("Scan snapshot must be an object")
             raw_cands = data.get("candidates") or []
             raw_port = data.get("portfolio") or []
-
-            self.last_candidates = [format_ticker(c, CONFIG) for c in raw_cands]
-            self.last_portfolio = [format_ticker(p, CONFIG) for p in raw_port]
+            if not isinstance(raw_cands, list) or not isinstance(raw_port, list) or any(
+                    not isinstance(row, dict) for row in [*raw_cands, *raw_port]):
+                raise ValueError("Scan candidates and portfolio must contain objects")
+            candidates = [format_ticker(c, CONFIG) for c in raw_cands]
+            portfolio = [format_ticker(p, CONFIG) for p in raw_port]
+            self.last_scan_time = data.get("scan_time")
+            self.last_candidates = candidates
+            self.last_portfolio = portfolio
             self.last_sector_rs = data.get("sector_rs") or {}
             self.last_regime_info = data.get("regime_info")
             log.info("Re-hydrated EngineState from %s (%d candidates, %d portfolio)",
                      target, len(self.last_candidates), len(self.last_portfolio))
             return True
-        except Exception as exc:
+        except (OSError, ValueError, TypeError, KeyError) as exc:
             log.warning("Failed to re-hydrate state from %s: %s", target, exc)
             return False
 
-STATE = EngineState()
-PERSISTENCE = PersistenceService()
-STATE.load_persisted_state(PERSISTENCE)
 
 
 
@@ -307,7 +295,7 @@ class SSEBroadcaster:
                 try:
                     q.get_nowait()
                     q.put_nowait(message)
-                except Exception:
+                except asyncio.QueueEmpty:
                     pass
 
     async def broadcast(self, event: str, data: dict[str, Any]) -> None:
@@ -335,14 +323,10 @@ class SSEBroadcaster:
             self._push_to_queues(message)
 
 
-BROADCASTER = SSEBroadcaster()
-SCAN_CANCEL_EVENT = threading.Event()
 
 BASE_DIR = Path(__file__).parent.resolve()
 FRONTEND_DIST_DIR = BASE_DIR / "frontend" / "dist"
 FRONTEND_ASSETS_DIR = FRONTEND_DIST_DIR / "assets"
-if FRONTEND_ASSETS_DIR.exists():
-    app.mount("/assets", StaticFiles(directory=str(FRONTEND_ASSETS_DIR)), name="frontend_assets")
 
 
 def _format_ticker_result(res: TickerResult) -> Dict[str, Any]:
@@ -350,40 +334,47 @@ def _format_ticker_result(res: TickerResult) -> Dict[str, Any]:
 
 
 
-async def _run_scan_task_async(*, claimed: bool = False) -> None:
+async def _run_scan_task_async(application: FastAPI | None = None, *, claimed: bool = False) -> None:
+    application = application or app
+    state: EngineState = application.state.engine
+    persistence = _persistence(application)
+    broadcaster: SSEBroadcaster = application.state.broadcaster
+    cancel_event: threading.Event = application.state.scan_cancel_event
+    runtime: ApplicationRuntime | None = application.state.runtime
+    if runtime is None:
+        raise RuntimeError("Engine runtime has not started")
     if not claimed:
-        async with STATE._lock:
-            if STATE.is_killed:
+        async with state._lock:
+            if state.is_killed:
                 log.warning("Scan aborted: Emergency Killswitch is active.")
                 return
-            if STATE.is_scanning:
+            if state.is_scanning:
                 return
-            SCAN_CANCEL_EVENT.clear()
-            STATE.is_scanning = True
-            STATE.scan_error = None
+            cancel_event.clear()
+            state.is_scanning = True
+            state.scan_error = None
 
     try:
-        await BROADCASTER.broadcast("scan_started", {"timestamp": datetime.now(timezone.utc).isoformat()})
-        runtime: ApplicationRuntime | None = getattr(app.state, "runtime", None)
+        await broadcaster.broadcast("scan_started", {"timestamp": datetime.now(timezone.utc).isoformat()})
         scan_output = await asyncio.to_thread(
             svm.run_scan,
             config=CONFIG,
-            regime_tracker=STATE.regime_tracker,
-            regime_override=STATE.regime_override,
-            services=runtime.services if runtime is not None else None,
-            cancel_requested=SCAN_CANCEL_EVENT.is_set,
+            regime_tracker=state.regime_tracker,
+            regime_override=state.regime_override,
+            services=runtime.services,
+            cancel_requested=cancel_event.is_set,
         )
-        if SCAN_CANCEL_EVENT.is_set() or STATE.is_killed:
+        if cancel_event.is_set() or state.is_killed:
             raise ScanCancelled("scan cancelled by emergency killswitch")
         candidates, portfolio, regime = scan_output[0], scan_output[1], scan_output[2]
 
-        async with STATE._lock:
-            STATE.last_scan_time = datetime.now(timezone.utc).isoformat()
-            STATE.last_candidates = [_format_ticker_result(c) for c in candidates]
-            STATE.last_portfolio = [_format_ticker_result(p) for p in portfolio]
-            STATE.last_sector_rs = getattr(scan_output, "sector_rs", None) or svm.get_last_sector_rs()
+        async with state._lock:
+            state.last_scan_time = datetime.now(timezone.utc).isoformat()
+            state.last_candidates = [_format_ticker_result(c) for c in candidates]
+            state.last_portfolio = [_format_ticker_result(p) for p in portfolio]
+            state.last_sector_rs = getattr(scan_output, "sector_rs", None) or svm.get_last_sector_rs(services=runtime.services)
             if regime:
-                STATE.last_regime_info = {
+                state.last_regime_info = {
                     "regime": regime.regime.value if isinstance(regime.regime, MarketRegimeType) else str(regime.regime),
                     "breadth": regime.breadth,
                     "adx_median": regime.adx_median,
@@ -397,36 +388,36 @@ async def _run_scan_task_async(*, claimed: bool = False) -> None:
                     "strategy_hint": regime.strategy_hint(),
                     "is_tradeable": regime.is_tradeable(),
                 }
-            STATE.is_scanning = False
+            state.is_scanning = False
 
         # Route disk I/O off the event loop without holding the state lock
-        await asyncio.to_thread(STATE.persist_state, PERSISTENCE)
+        await asyncio.to_thread(state.persist_state, persistence)
 
-        await BROADCASTER.broadcast("scan_completed", {
-            "candidates_count": len(STATE.last_candidates),
-            "portfolio_count": len(STATE.last_portfolio),
-            "regime": STATE.last_regime_info,
+        await broadcaster.broadcast("scan_completed", {
+            "candidates_count": len(state.last_candidates),
+            "portfolio_count": len(state.last_portfolio),
+            "regime": state.last_regime_info,
         })
     except ScanCancelled as exc:
         log.warning("Scan cancelled: %s", exc)
-        async with STATE._lock:
-            STATE.is_scanning = False
-            STATE.scan_error = str(exc)
-        await BROADCASTER.broadcast("scan_cancelled", {"error": str(exc)})
+        async with state._lock:
+            state.is_scanning = False
+            state.scan_error = str(exc)
+        await broadcaster.broadcast("scan_cancelled", {"error": str(exc)})
     except Exception as exc:
         log.exception("Error executing scan task")
-        async with STATE._lock:
-            STATE.is_scanning = False
-            STATE.scan_error = str(exc)
-        await BROADCASTER.broadcast("scan_failed", {"error": str(exc)})
+        async with state._lock:
+            state.is_scanning = False
+            state.scan_error = str(exc)
+        await broadcaster.broadcast("scan_failed", {"error": str(exc)})
     finally:
-        if getattr(app.state, "scan_task", None) is asyncio.current_task():
-            app.state.scan_task = None
+        if getattr(application.state, "scan_task", None) is asyncio.current_task():
+            application.state.scan_task = None
 
 
-def _start_scan_task(*, claimed: bool = False) -> asyncio.Task[None]:
-    task = asyncio.create_task(_run_scan_task_async(claimed=claimed))
-    app.state.scan_task = task
+def _start_scan_task(application: FastAPI, *, claimed: bool = False) -> asyncio.Task[None]:
+    task = asyncio.create_task(_run_scan_task_async(application, claimed=claimed))
+    application.state.scan_task = task
     return task
 
 
@@ -455,7 +446,41 @@ class OverrideRequest(BaseModel):
 
 # --- API Routes ---
 
-@app.get("/")
+@router.post("/api/trades/fills", dependencies=[Depends(verify_api_key)])
+def register_trade_fill(request: Request, req: TradeFill) -> Dict[str, Any]:
+    """Record a confirmed or paper fill; never submit a broker order."""
+    try:
+        return TradeLifecycle(_persistence(request.app).db).register(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/api/trades/{trade_id}/close", dependencies=[Depends(verify_api_key)])
+def close_trade_fill(request: Request, trade_id: str, req: TradeExit) -> Dict[str, Any]:
+    try:
+        return TradeLifecycle(_persistence(request.app).db).close(trade_id, req)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/api/trades/executed", dependencies=[Depends(verify_api_key)])
+def get_executed_trades(request: Request, limit: int = Query(default=100, ge=1, le=1000)) -> Dict[str, Any]:
+    return {"trades": _persistence(request.app).db.fetch_executed_trades(limit=limit)}
+
+
+@router.get("/api/positions", dependencies=[Depends(verify_api_key)])
+def get_open_positions(request: Request) -> Dict[str, Any]:
+    return {"positions": _persistence(request.app).load_open_positions()}
+
+
+@router.get("/api/paper/events", dependencies=[Depends(verify_api_key)])
+def get_paper_events(request: Request, after: int = Query(default=0, ge=0), limit: int = Query(default=1000, ge=1, le=1000)) -> Dict[str, Any]:
+    events = _persistence(request.app).db.fetch_paper_events(after=after, limit=limit)
+    return {"events": events, "next_after": events[-1]["sequence"] if events else after}
+
+@router.get("/")
 def read_root() -> FileResponse:
     dist_index = FRONTEND_DIST_DIR / "index.html"
     if dist_index.exists():
@@ -466,8 +491,8 @@ def read_root() -> FileResponse:
     return FileResponse(str(dashboard_path), media_type="text/html")
 
 
-@app.get("/api/status", dependencies=[Depends(verify_api_key)])
-async def get_status() -> Dict[str, Any]:
+@router.get("/api/status", dependencies=[Depends(verify_api_key)])
+async def get_status(request: Request) -> Dict[str, Any]:
     rg_settings = CONFIG.as_regime()
     session = rg_settings.session_from_time()
     locked = rg_settings.is_regime_locked()
@@ -475,8 +500,8 @@ async def get_status() -> Dict[str, Any]:
     mins_to_sq = rg_settings.minutes_to_squareoff()
     phase_val = phase.value if hasattr(phase, "value") else str(phase)
     cutoff_active = phase_val in ("INTRADAY_FREEZE", "SWING_CLOSING", "POST_MARKET")
-    platt_a, platt_b, platt_calibrated = PERSISTENCE.load_platt(CONFIG)
-    async with STATE._lock:
+    platt_a, platt_b, platt_calibrated = _persistence(request.app).load_platt(CONFIG)
+    async with request.app.state.engine._lock:
         return {
             "status": "online",
             "version": svm.VERSION,
@@ -485,12 +510,12 @@ async def get_status() -> Dict[str, Any]:
             "minutes_to_squareoff": mins_to_sq,
             "intraday_cutoff_active": cutoff_active,
             "regime_locked": locked,
-            "regime_override": STATE.regime_override,
-            "is_scanning": STATE.is_scanning,
-            "last_scan_time": STATE.last_scan_time,
-            "scan_error": STATE.scan_error,
-            "last_known_regime": STATE.last_regime_info,
-            "killswitch_active": STATE.is_killed,
+            "regime_override": request.app.state.engine.regime_override,
+            "is_scanning": request.app.state.engine.is_scanning,
+            "last_scan_time": request.app.state.engine.last_scan_time,
+            "scan_error": request.app.state.engine.scan_error,
+            "last_known_regime": request.app.state.engine.last_regime_info,
+            "killswitch_active": request.app.state.engine.is_killed,
             "platt_calibration": {
                 "a": platt_a,
                 "b": platt_b,
@@ -500,64 +525,64 @@ async def get_status() -> Dict[str, Any]:
         }
 
 
-@app.get("/api/scan", dependencies=[Depends(verify_api_key)])
-async def get_scan_results() -> Dict[str, Any]:
+@router.get("/api/scan", dependencies=[Depends(verify_api_key)])
+async def get_scan_results(request: Request) -> Dict[str, Any]:
     rg_settings = CONFIG.as_regime()
     phase = rg_settings.get_market_phase()
     mins_to_sq = rg_settings.minutes_to_squareoff()
     phase_val = phase.value if hasattr(phase, "value") else str(phase)
     cutoff_active = phase_val in ("INTRADAY_FREEZE", "SWING_CLOSING", "POST_MARKET")
-    async with STATE._lock:
+    async with request.app.state.engine._lock:
         return {
-            "last_scan_time": STATE.last_scan_time,
-            "is_scanning": STATE.is_scanning,
-            "scan_error": STATE.scan_error,
+            "last_scan_time": request.app.state.engine.last_scan_time,
+            "is_scanning": request.app.state.engine.is_scanning,
+            "scan_error": request.app.state.engine.scan_error,
             "market_phase": phase_val,
             "minutes_to_squareoff": mins_to_sq,
             "intraday_cutoff_active": cutoff_active,
-            "regime": STATE.last_regime_info,
-            "portfolio": STATE.last_portfolio,
-            "candidates_count": len(STATE.last_candidates),
-            "candidates": STATE.last_candidates,
+            "regime": request.app.state.engine.last_regime_info,
+            "portfolio": request.app.state.engine.last_portfolio,
+            "candidates_count": len(request.app.state.engine.last_candidates),
+            "candidates": request.app.state.engine.last_candidates,
         }
 
 
-@app.post("/api/scan/trigger", dependencies=[Depends(verify_api_key)])
-@limiter.limit("5/minute")
+@router.post("/api/scan/trigger", dependencies=[Depends(verify_api_key)])
 async def trigger_scan(request: Request) -> Dict[str, Any]:
-    async with STATE._lock:
-        if STATE.is_killed:
+    if request.app.state.runtime is None:
+        raise HTTPException(status_code=503, detail="Engine startup has not completed")
+    async with request.app.state.engine._lock:
+        if request.app.state.engine.is_killed:
             raise HTTPException(
                 status_code=403,
                 detail="Emergency Killswitch is active. Clear killswitch before initiating scans.",
             )
-        if STATE.is_scanning:
+        if request.app.state.engine.is_scanning:
             return {"status": "already_running", "message": "Scan execution already in progress"}
-        SCAN_CANCEL_EVENT.clear()
-        STATE.is_scanning = True
-        STATE.scan_error = None
+        request.app.state.scan_cancel_event.clear()
+        request.app.state.engine.is_scanning = True
+        request.app.state.engine.scan_error = None
 
-    _start_scan_task(claimed=True)
+    _start_scan_task(request.app, claimed=True)
     return {"status": "triggered", "message": "Market scan started in background worker"}
 
 
-@app.post("/api/regime/override", dependencies=[Depends(verify_api_key)])
-@limiter.limit("10/minute")
+@router.post("/api/regime/override", dependencies=[Depends(verify_api_key)])
 async def set_regime_override(request: Request, req: OverrideRequest) -> Dict[str, Any]:
     valid_regimes = {"PANIC", "TREND_UP", "TREND_DOWN", "RANGE", "EXPANSION"}
-    async with STATE._lock:
+    async with request.app.state.engine._lock:
         if req.regime is None or req.regime.upper() in ("CLEAR", "NONE", "AUTO"):
-            STATE.regime_override = None
+            request.app.state.engine.regime_override = None
             msg = "Market regime override cleared (Auto Mode)"
         elif req.regime.upper() in valid_regimes:
-            STATE.regime_override = req.regime.upper()
-            msg = f"Market regime override set to {STATE.regime_override}"
+            request.app.state.engine.regime_override = req.regime.upper()
+            msg = f"Market regime override set to {request.app.state.engine.regime_override}"
         else:
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid regime. Must be one of: {sorted(valid_regimes)} or null/CLEAR",
             )
-        current_override = STATE.regime_override
+        current_override = request.app.state.engine.regime_override
 
     return {
         "status": "ok",
@@ -568,18 +593,17 @@ async def set_regime_override(request: Request, req: OverrideRequest) -> Dict[st
 
 # --- Emergency Kill-Switch Endpoints ---
 
-@app.post("/api/killswitch", dependencies=[Depends(verify_api_key)])
-async def activate_killswitch() -> Dict[str, Any]:
+@router.post("/api/killswitch", dependencies=[Depends(verify_api_key)])
+async def activate_killswitch(request: Request) -> Dict[str, Any]:
     """Emergency Kill-Switch: aborts active scans and halts execution."""
-    async with STATE._lock:
-        STATE.is_killed = True
-        STATE.scan_error = "Emergency Killswitch Activated; cancellation requested"
-        PERSISTENCE.set_killswitch(True)
-
-    SCAN_CANCEL_EVENT.set()
+    async with request.app.state.engine._lock:
+        request.app.state.engine.is_killed = True
+        request.app.state.engine.scan_error = "Emergency Killswitch Activated; cancellation requested"
+        request.app.state.scan_cancel_event.set()
+        _persistence(request.app).set_killswitch(True)
 
     log.critical("EMERGENCY KILLSWITCH ACTIVATED: Active scans cancelled.")
-    await BROADCASTER.broadcast("killswitch_engaged", {"status": "killed"})
+    await request.app.state.broadcaster.broadcast("killswitch_engaged", {"status": "killed"})
     return {
         "status": "killed",
         "message": "Emergency killswitch engaged. In-flight scan cancellation requested.",
@@ -587,22 +611,22 @@ async def activate_killswitch() -> Dict[str, Any]:
     }
 
 
-@app.post("/api/killswitch/reset", dependencies=[Depends(verify_api_key)])
-async def reset_killswitch() -> Dict[str, Any]:
+@router.post("/api/killswitch/reset", dependencies=[Depends(verify_api_key)])
+async def reset_killswitch(request: Request) -> Dict[str, Any]:
     """Reset Emergency Kill-Switch to resume normal operations."""
-    async with STATE._lock:
-        if STATE.is_scanning:
+    async with request.app.state.engine._lock:
+        if request.app.state.engine.is_scanning:
             raise HTTPException(
                 status_code=409,
                 detail="Wait for the cancelled scan to stop before resetting the killswitch.",
             )
-        STATE.is_killed = False
-        STATE.scan_error = None
-        PERSISTENCE.set_killswitch(False)
-        SCAN_CANCEL_EVENT.clear()
+        _persistence(request.app).set_killswitch(False)
+        request.app.state.engine.is_killed = False
+        request.app.state.engine.scan_error = None
+        request.app.state.scan_cancel_event.clear()
 
     log.info("Emergency killswitch cleared. Normal operations resumed.")
-    await BROADCASTER.broadcast("killswitch_reset", {"status": "reset"})
+    await request.app.state.broadcaster.broadcast("killswitch_reset", {"status": "reset"})
     return {
         "status": "reset",
         "message": "Emergency killswitch reset. Normal operations resumed.",
@@ -610,20 +634,20 @@ async def reset_killswitch() -> Dict[str, Any]:
     }
 
 
-@app.get("/api/killswitch/status", dependencies=[Depends(verify_api_key)])
-async def get_killswitch_status() -> Dict[str, Any]:
+@router.get("/api/killswitch/status", dependencies=[Depends(verify_api_key)])
+async def get_killswitch_status(request: Request) -> Dict[str, Any]:
     """Check current emergency kill-switch status."""
-    async with STATE._lock:
+    async with request.app.state.engine._lock:
         return {
-            "killswitch_active": STATE.is_killed,
-            "is_scanning": STATE.is_scanning,
-            "scan_error": STATE.scan_error,
+            "killswitch_active": request.app.state.engine.is_killed,
+            "is_scanning": request.app.state.engine.is_scanning,
+            "scan_error": request.app.state.engine.scan_error,
         }
 
 
 # --- Server-Sent Events (SSE) Endpoint ---
 
-@app.get("/api/events", dependencies=[Depends(verify_api_key)])
+@router.get("/api/events", dependencies=[Depends(verify_api_key)])
 async def sse_events(
     request: Request,
     limit: Optional[int] = Query(default=None, ge=1, description="Optional max events to receive before closing"),
@@ -632,7 +656,7 @@ async def sse_events(
     Real-time Server-Sent Events (SSE) stream for market scan progress, regime shifts,
     and emergency killswitch state transitions. Eliminates client-side polling.
     """
-    queue = await BROADCASTER.subscribe()
+    queue = await request.app.state.broadcaster.subscribe()
 
     async def event_generator() -> AsyncGenerator[str, None]:
         yielded_count = 0
@@ -641,18 +665,18 @@ async def sse_events(
             "event": "connected",
             "data": {
                 "version": svm.VERSION,
-                "killswitch_active": STATE.is_killed,
-                "is_scanning": STATE.is_scanning,
-                "last_scan_time": STATE.last_scan_time,
-                "candidates_count": len(STATE.last_candidates),
-                "portfolio_count": len(STATE.last_portfolio),
+                "killswitch_active": request.app.state.engine.is_killed,
+                "is_scanning": request.app.state.engine.is_scanning,
+                "last_scan_time": request.app.state.engine.last_scan_time,
+                "candidates_count": len(request.app.state.engine.last_candidates),
+                "portfolio_count": len(request.app.state.engine.last_portfolio),
             },
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         yield f"data: {json.dumps(initial_payload)}\n\n"
         yielded_count += 1
         if limit is not None and yielded_count >= limit:
-            await BROADCASTER.unsubscribe(queue)
+            await request.app.state.broadcaster.unsubscribe(queue)
             return
 
         try:
@@ -676,7 +700,7 @@ async def sse_events(
                     if limit is not None and yielded_count >= limit:
                         break
         finally:
-            await BROADCASTER.unsubscribe(queue)
+            await request.app.state.broadcaster.unsubscribe(queue)
 
     return StreamingResponse(
         event_generator(),
@@ -689,13 +713,13 @@ async def sse_events(
     )
 
 
-@app.get("/api/sectors", dependencies=[Depends(verify_api_key)])
-async def get_sectors() -> Dict[str, Any]:
+@router.get("/api/sectors", dependencies=[Depends(verify_api_key)])
+async def get_sectors(request: Request) -> Dict[str, Any]:
     sector_summary: Dict[str, List[str]] = {
         sec: tickers for sec, tickers in SECTORS.items()
     }
-    async with STATE._lock:
-        rs = dict(STATE.last_sector_rs)
+    async with request.app.state.engine._lock:
+        rs = dict(request.app.state.engine.last_sector_rs)
     return {
         "total_sectors": len(SECTORS),
         "total_tickers": len(TICKER_TO_SECTOR),
@@ -704,13 +728,14 @@ async def get_sectors() -> Dict[str, Any]:
     }
 
 
-@app.get("/api/trades", dependencies=[Depends(verify_api_key)])
+@router.get("/api/trades", dependencies=[Depends(verify_api_key)])
 def get_trades(
+    request: Request,
     ticker: Optional[str] = None,
     limit: int = Query(default=100, ge=1, le=1000, description="Max number of trades to return (1-1000)"),
 ) -> Dict[str, Any]:
     """Fetch trade execution logs from SQLite persistence."""
-    trades = PERSISTENCE.load_trade_log()
+    trades = _persistence(request.app).load_trade_log()
     if ticker:
         trades = [t for t in trades if t.get("ticker") == ticker]
     sliced = trades[-limit:] if limit > 0 else []
@@ -720,7 +745,7 @@ def get_trades(
     }
 
 
-@app.get("/api/config", dependencies=[Depends(verify_api_key)])
+@router.get("/api/config", dependencies=[Depends(verify_api_key)])
 def get_config() -> Dict[str, Any]:
     rg = CONFIG.as_regime()
     return {
@@ -739,6 +764,50 @@ def get_config() -> Dict[str, Any]:
             "regime_breadth_panic": rg.regime_breadth_panic,
         },
     }
+
+
+def _persistence(application: FastAPI) -> PersistenceService:
+    persistence: PersistenceService | None = application.state.persistence
+    if persistence is None:
+        raise HTTPException(status_code=503, detail="Engine startup has not completed")
+    return persistence
+
+
+def create_app(*, paths: RuntimePaths | None = None,
+               persistence: PersistenceService | None = None, auto_scan: bool = True) -> FastAPI:
+    """Independent engine, journal, cancellation and SSE state; no database opened here."""
+    application = FastAPI(title="Sovereign Engine API Server",
+                          description="Real-time quantitative scanner and market regime API server",
+                          version=svm.VERSION, lifespan=lifespan)
+    application.state.engine = EngineState()
+    application.state.broadcaster = SSEBroadcaster()
+    application.state.scan_cancel_event = threading.Event()
+    application.state.persistence = persistence
+    application.state.paths = paths
+    application.state.auto_scan = auto_scan
+    application.state.scan_task = None
+    application.state.runtime = None
+    limiter = Limiter(key_func=get_client_ip)
+    application.state.limiter = limiter
+    application.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+    origins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8000", "http://127.0.0.1:8000"]
+    origins += [value.strip() for value in os.environ.get("CORS_ORIGINS", "").split(",") if value.strip()]
+    application.add_middleware(CORSMiddleware, allow_origins=list(dict.fromkeys(origins)),
+                               allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+    limits = {"trigger_scan": "5/minute", "set_regime_override": "10/minute"}
+    for route in router.routes:
+        if isinstance(route, APIRoute):
+            endpoint = limiter.limit(limits[route.name])(route.endpoint) if route.name in limits else route.endpoint
+            application.add_api_route(route.path, endpoint, methods=list(route.methods),
+                                      dependencies=route.dependencies, response_model=route.response_model,
+                                      name=route.name)
+    assets = FRONTEND_DIST_DIR / "assets"
+    if assets.exists():
+        application.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+    return application
+
+
+app = create_app()
 
 
 def main() -> None:

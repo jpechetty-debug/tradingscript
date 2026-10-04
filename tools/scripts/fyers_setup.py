@@ -76,7 +76,7 @@ def generate_access_token() -> None:
             print(f"Updated {env_path} with FYERS_ACCESS_TOKEN.")
         else:
             print(f"? Failed to generate access token: {response}")
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError, KeyError) as e:
         print(f"? Error during token generation: {e}")
 
 

@@ -16,7 +16,7 @@ def test_fetch_single() -> None:
         else:
             logger.info(f"Data for {ticker_symbol} fetched successfully! Shape: {df.shape}")
             print(df.head())
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError, KeyError) as e:
         logger.error(f"Fetch failed with exception: {type(e).__name__}: {e}")
 
 if __name__ == "__main__":

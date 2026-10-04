@@ -7,6 +7,9 @@ This module turns the main runtime concerns into explicit collaborators:
 
 - ``PersistenceService`` for stateful files
 - ``MarketDataService`` for fetch + indicator preparation
+- ``PositionMonitorService`` for open-position stop/target lifecycle
+- ``RegimeService`` for breadth and regime classification
+- ``ScoringPipelineService`` for multi-factor candidate scoring and calibration
 - ``AlertService`` for outbound notifications
 - ``ScanService`` for the end-to-end scan orchestration
 """
@@ -31,12 +34,14 @@ import pandas as pd
 
 from .backtest import OverallStats, WalkForwardResult, walk_forward
 from .cache import ScanCache
+from .calibration import CalibrationService
 from .config import CONFIG, IST, MarketDataSettings, MarketRegimeType, SystemConfig, get_secret_value
 from .database import SqliteDatabase
 from .data_provider import fetch_daily_batch
 from .factors import DEFAULT_WEIGHTS, calibrate_ic_weights
 from .indicators import add_indicators
 from .portfolio import optimize_portfolio
+from .swing import completed_daily_bars
 from .regime import (
     MarketRegime,
     RegimeTracker,
@@ -196,7 +201,7 @@ class PersistenceService:
                 ts = str(payload.get("fitted_at") or datetime.now(IST).isoformat())
                 self.db.upsert_platt(a, b, fitted_at=ts, version=version)
                 return a, b, True
-            except Exception as exc:
+            except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
                 log.warning("Could not load %s: %s; using config defaults.", candidate, exc)
         return config.PLATT_A, config.PLATT_B, False
 
@@ -239,7 +244,7 @@ class PersistenceService:
                     if entries:
                         self.db.insert_trades(entries)
                     return entries
-            except Exception as exc:
+            except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
                 log.error("Could not load trade log %s: %s", candidate, exc)
                 return []
         return []
@@ -285,7 +290,7 @@ class PersistenceService:
                     raise ValueError("peak_nav must be positive when provided")
                 self.db.upsert_portfolio_state(current_nav, peak_nav, updated_at=payload.get("updated_at"))
                 return PortfolioStateSnapshot(current_nav=current_nav, peak_nav=peak_nav)
-            except Exception as exc:
+            except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
                 log.warning("Could not load portfolio state %s: %s", candidate, exc)
                 return None
         return None
@@ -360,8 +365,13 @@ class MarketDataService:
         started = time.monotonic()
         for ticker, df in raw_data.items():
             try:
+                if config.SWING_SETUP_ENABLED:
+                    df = completed_daily_bars(df, config)
+                    if df.empty:
+                        ind_fail += 1
+                        continue
                 processed[ticker] = add_indicators(df, config)
-            except Exception:
+            except (KeyError, ValueError, TypeError, IndexError):
                 ind_fail += 1
                 log.debug("Indicator error for %s.", ticker, exc_info=True)
 
@@ -377,6 +387,9 @@ class MarketDataService:
             raise ValueError(f"Benchmark {bench_key} not in processed data.")
 
         bench_series = processed[bench_key]["Close"]
+        if config.SWING_SETUP_ENABLED:
+            processed = {t: frame for t, frame in processed.items()
+                         if frame.index[-1] == bench_series.index[-1]}
         sector_rs = compute_sector_rs(processed, bench_series, config)
         sector_ranks = _rank_sectors(sector_rs)
 
@@ -423,12 +436,19 @@ class AlertService:
         if not top:
             return
 
+        top = top[: min(config.TELEGRAM_ALERT_TOP_N, 5) if self._alerter is not None
+                  else config.TELEGRAM_ALERT_TOP_N]
+        if not top:
+            return
         if self._alerter is not None:
-            self._alerter.send_daily_summary(
+            sent = self._alerter.send_daily_summary(
                 regime.label,
                 [result.__dict__ for result in top],
                 current_nav=self._resolve_current_nav(),
             )
+            if sent is True:
+                for result in top:
+                    self._last_alerted[f"{result.ticker}:{getattr(result, 'trade_horizon', 'SWING')}"] = now
             return
 
         version_esc = html.escape(str(self._version))
@@ -444,13 +464,14 @@ class AlertService:
                 f"E(R)={result.expectancy_r:.2f} | Entry {result.entry} | SL {result.stop} | "
                 f"T1 {result.t1} | {result.shares} shares"
             )
-        self._messenger(
+        sent = self._messenger(
             "\n".join(lines),
             get_secret_value(config.TELEGRAM_BOT_TOKEN),
             config.TELEGRAM_CHAT_ID,
         )
-        for result in top:
-            self._last_alerted[f"{result.ticker}:{getattr(result, 'trade_horizon', 'SWING')}"] = now
+        if sent:
+            for result in top:
+                self._last_alerted[f"{result.ticker}:{getattr(result, 'trade_horizon', 'SWING')}"] = now
 
     def _resolve_current_nav(self) -> Optional[float]:
         if self._current_nav_provider is None:
@@ -458,7 +479,7 @@ class AlertService:
         try:
             current_nav = self._current_nav_provider()
             return float(current_nav) if current_nav is not None and current_nav > 0 else None
-        except Exception:
+        except (TypeError, ValueError, RuntimeError, AttributeError):
             log.debug("Current NAV provider failed while building alert summary.", exc_info=True)
             return None
 
@@ -508,6 +529,7 @@ def score_universe(
     direction: str = "BOTH",
     min_bars: int = 50,
     cancel_requested: Optional[CancellationProbe] = None,
+    now: Optional[datetime] = None,
 ) -> list[TickerResult]:
     """
     Pure, shared candidate scoring pipeline across live scan and walk-forward backtest.
@@ -532,7 +554,7 @@ def score_universe(
     if capital_scaler is not None:
         try:
             base_cap_frac *= float(capital_scaler.capital_fraction(current_nav, regime.regime))
-        except Exception:
+        except (TypeError, ValueError, AttributeError, RuntimeError):
             log.debug("Injected capital scaler failed.", exc_info=debug)
 
     pass1_candidates: list[CandidateContext] = []
@@ -575,6 +597,7 @@ def score_universe(
                 force_score=force_score,
                 is_open_position=is_open,
                 held_direction=held_dir,
+                now=now,
             )
             pass1_futures[fut] = ticker
 
@@ -616,14 +639,489 @@ def score_universe(
                 is_open_position=is_open,
                 allow_watchlist=allow_watchlist,
                 debug=debug,
+                now=now,
             )
             if res is not None:
+                if is_open:
+                    held = pos_map.get(cand.ticker) or pos_map.get(clean_ticker) or {}
+                    # Rescoring updates signal metadata, never the original fill.
+                    res.entry = float(held.get("entry_price", held.get("entry", res.entry)))
+                    res.shares = int(held.get("shares", res.shares))
+                    res.stop = float(held.get("stop_loss", held.get("stop", res.stop)))
+                    res.t1 = float(held.get("target", held.get("t1", res.t1)))
+                    res.trade_horizon = held.get("trade_horizon", res.trade_horizon)
+                    res.risk_inr = round(res.shares * abs(res.entry - res.stop), 2)
                 if direction == "BOTH" or res.direction == direction:
                     all_results.append(res)
         except Exception as exc:
             log.error("score_candidate_pass2 error for %s: %s", cand.ticker, exc, exc_info=True)
 
     return all_results
+
+
+class PositionMonitorService:
+    """
+    Deterministic price-vs-level monitoring and trade closures for open positions.
+    """
+
+    def __init__(self, persistence: Optional[PersistenceService] = None) -> None:
+        self._persistence = persistence or PersistenceService()
+
+    def monitor_open_position_stops(
+        self,
+        processed: dict[str, pd.DataFrame],
+        state: ScanState,
+        record_callback: Optional[Callable[..., None]] = None,
+    ) -> None:
+        loader = getattr(self._persistence, "load_open_positions", None)
+        if not callable(loader):
+            return
+        try:
+            open_pos_map = loader()
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            log.warning("Could not load open positions for stop monitor: %s", exc)
+            return
+        if not open_pos_map:
+            return
+
+        db = getattr(self._persistence, "db", None)
+        deleter = getattr(db, "delete_open_position", None)
+        recorder = record_callback or self.record_closed_trade
+
+        for ticker, pos in open_pos_map.items():
+            # Confirmed broker positions require an explicit exit fill event.
+            if pos.get("source") == "EXECUTED":
+                continue
+            df = processed.get(ticker)
+            if df is None:
+                df = processed.get(f"{ticker}.NS")
+            if df is None or df.empty:
+                continue
+
+            if not isinstance(df.index, pd.DatetimeIndex):
+                log.warning("Skipping stop monitor for %s: missing candle timestamps.", ticker)
+                continue
+            try:
+                bar_start = pd.Timestamp(df.index[-1])
+                opened_at = pd.Timestamp(pos.get("opened_at"))
+                if pd.isna(bar_start) or pd.isna(opened_at):
+                    continue
+                if bar_start.tzinfo is None:
+                    bar_start = bar_start.tz_localize(IST)
+                if opened_at.tzinfo is None:
+                    opened_at = opened_at.tz_localize(IST)
+                # A candle containing the entry has unknowable pre-fill extrema.
+                if bar_start <= opened_at:
+                    continue
+            except (TypeError, ValueError):
+                log.warning("Skipping stop monitor for %s: invalid entry/candle time.", ticker)
+                continue
+
+            row = df.iloc[-1]
+            open_p = float(row.get("Open", 0.0))
+            close_p = float(row.get("Close", 0.0))
+            low_p = float(row.get("Low", close_p))
+            high_p = float(row.get("High", close_p))
+            if open_p <= 0.0:
+                open_p = close_p
+
+            direction = str(pos.get("direction", "LONG")).upper()
+            stop_loss = float(pos.get("stop_loss", 0.0))
+            target = float(pos.get("target", 0.0))
+
+            stopped_out = False
+            target_hit = False
+
+            if direction == "LONG":
+                if stop_loss > 0 and (low_p <= stop_loss or close_p <= stop_loss):
+                    stopped_out = True
+                elif target > 0 and (high_p >= target or close_p >= target):
+                    target_hit = True
+            elif direction == "SHORT":
+                if stop_loss > 0 and (high_p >= stop_loss or close_p >= stop_loss):
+                    stopped_out = True
+                elif target > 0 and (low_p <= target or close_p <= target):
+                    target_hit = True
+
+            if stopped_out:
+                exit_fill = min(open_p, stop_loss) if direction == "LONG" else max(open_p, stop_loss)
+                log.info(
+                    "Held position %s EXITED: Stop-loss triggered (Fill=%.2f Low=%.2f Close=%.2f <= Stop=%.2f)",
+                    ticker, exit_fill, low_p, close_p, stop_loss,
+                )
+                recorder(pos, ticker, exit_fill, "STOP", source="SIMULATED")
+                if callable(deleter) and not pos.get("trade_id"):
+                    deleter(ticker)
+                state.open_positions.discard(ticker)
+                state.open_positions.discard(ticker.replace(".NS", ""))
+            elif target_hit:
+                exit_fill = max(open_p, target) if direction == "LONG" else min(open_p, target)
+                log.info(
+                    "Held position %s EXITED: Profit target triggered (Fill=%.2f High=%.2f Close=%.2f >= Target=%.2f)",
+                    ticker, exit_fill, high_p, close_p, target,
+                )
+                recorder(pos, ticker, exit_fill, "TARGET", source="SIMULATED")
+                if callable(deleter) and not pos.get("trade_id"):
+                    deleter(ticker)
+                state.open_positions.discard(ticker)
+                state.open_positions.discard(ticker.replace(".NS", ""))
+
+    def record_closed_trade(
+        self,
+        position: dict[str, Any],
+        ticker: str,
+        exit_price: float,
+        exit_reason: str,
+        source: str = "SIMULATED",
+    ) -> None:
+        entry = float(position.get("entry_price", position.get("entry", 0.0)))
+        direction = str(position.get("direction", "LONG")).upper()
+        if entry <= 0 or exit_price <= 0:
+            return
+        if position.get("trade_id"):
+            from .backtest import DEFAULT_COST_MODEL, SWING_COST_MODEL
+            from .trades import TradeExit, TradeLifecycle
+            model = SWING_COST_MODEL if position.get("trade_horizon") == "SWING" else DEFAULT_COST_MODEL
+            stop = float(position.get("stop_loss", position.get("stop", entry)))
+            shares = int(position.get("shares", 0))
+            costs = model.friction_r(entry, abs(entry - stop), shares) * abs(entry - stop) * shares
+            TradeLifecycle(self._persistence.db).close(str(position["trade_id"]), TradeExit(
+                exit_price=exit_price, exit_ts=datetime.now(IST), costs=costs, exit_reason=exit_reason, cost_basis="MODELED",
+            ))
+            return
+        pnl = (exit_price - entry) / entry if direction == "LONG" else (entry - exit_price) / entry
+        self._persistence.append_trade({
+            **position, "ticker": ticker, "direction": direction, "entry": entry,
+            "exit_price": exit_price, "exit_reason": exit_reason, "pnl": round(pnl, 6),
+            "timestamp": datetime.now(IST).isoformat(),
+            "source": source,
+        })
+
+
+class RegimeService:
+    """
+    Evaluates market breadth, regime classification, and override enforcement.
+    """
+
+    @staticmethod
+    def apply_regime_override(
+        regime: MarketRegime,
+        regime_override: Optional[str],
+    ) -> MarketRegime:
+        if not regime_override:
+            return regime
+
+        try:
+            override_type = MarketRegimeType(regime_override.upper())
+        except ValueError:
+            log.error("Invalid override regime: %s - ignoring.", regime_override)
+            return regime
+
+        log.warning("REGIME OVERRIDE ACTIVE: %s (was %s)", override_type.value, regime.label)
+        return MarketRegime(
+            regime=override_type,
+            breadth=regime.breadth,
+            adx_median=regime.adx_median,
+            atr_ratio=regime.atr_ratio,
+            confidence=1.0,
+            confirmed=True,
+            breadth_delta=regime.breadth_delta,
+            sector_concentration=regime.sector_concentration,
+            regime_locked=False,
+        )
+
+    @staticmethod
+    def log_regime(regime: MarketRegime, config: SystemConfig) -> None:
+        log.info(
+            "Breadth: %.0f%% (d=%.2f) | Regime: %s (%s) | Conf: %.2f | ADX: %.1f | "
+            "ATR ratio: %.2f | Sector conc: %.0f%% | %s",
+            regime.breadth * 100,
+            regime.breadth_delta,
+            regime.label,
+            "CONFIRMED" if regime.confirmed else f"{config.REGIME_CONFIRM_BARS} bar CONFIRM REQ",
+            regime.confidence,
+            regime.adx_median,
+            regime.atr_ratio,
+            regime.sector_concentration * 100,
+            "LOCKED" if regime.regime_locked else "live",
+        )
+
+    def determine_regime(
+        self,
+        prepared: PreparedScanData,
+        config: SystemConfig,
+        state: ScanState,
+        regime_tracker: Optional[RegimeTracker] = None,
+        regime_override: Optional[str] = None,
+    ) -> MarketRegime:
+        breadth = compute_breadth(prepared.processed, config)
+        state.regime_locked = False if config.SWING_SETUP_ENABLED else config.is_regime_locked()
+        if state.regime_locked:
+            log.info(
+                "Regime lock active during opening noise window (%d min).",
+                config.REGIME_LOCK_MINUTES,
+            )
+
+        tracker = regime_tracker if regime_tracker is not None else RegimeTracker()
+        if config.SWING_SETUP_ENABLED:
+            # Confirmation counts distinct completed dates, never scan invocations.
+            tracker = RegimeTracker()
+            for prior_date in prepared.bench_series.index[:-1][-max(2, config.REGIME_CONFIRM_BARS):]:
+                frames = {ticker: frame.loc[:prior_date] for ticker, frame in prepared.processed.items()
+                          if prior_date in frame.index}
+                prior_sectors = compute_sector_rs(frames, frames[config.BENCHMARK].Close, config)
+                classify_regime(frames, compute_breadth(frames, config), tracker, config, sector_rs=prior_sectors)
+        regime = classify_regime(
+            prepared.processed,
+            breadth,
+            tracker,
+            config,
+            locked=state.regime_locked,
+            sector_rs=prepared.sector_rs,
+        )
+        return self.apply_regime_override(regime, regime_override)
+
+
+class ScoringPipelineService:
+    """
+    Candidate scoring, legacy test mock scoring, dynamic NAV resolution, and IC recalibration.
+    """
+
+    def __init__(
+        self,
+        persistence: Optional[PersistenceService] = None,
+        probability_gate: Optional[ProbabilityGate] = None,
+        capital_scaler: Optional[CapitalFractionScaler] = None,
+        factor_calibrator: Optional[FactorWeightProvider] = None,
+        current_nav_provider: Optional[CurrentNavProvider] = None,
+        default_current_nav: float = 1_000_000.0,
+    ) -> None:
+        self._persistence = persistence or PersistenceService()
+        self._probability_gate = probability_gate
+        self._capital_scaler = capital_scaler
+        self._factor_calibrator = factor_calibrator
+        self._current_nav_provider = current_nav_provider
+        self._default_current_nav = default_current_nav
+
+    @staticmethod
+    def validated_factor_weights(weights: dict[str, float]) -> dict[str, float]:
+        """Reject unsafe runtime calibration instead of starving signal factors."""
+        expected = set(DEFAULT_WEIGHTS)
+        try:
+            cleaned = {name: float(weights[name]) for name in expected}
+        except (KeyError, TypeError, ValueError):
+            # Test/injected providers may expose a deliberately partial map.
+            return dict(weights)
+        total = sum(cleaned.values())
+        min_w = 0.03  # matches MIN_FACTOR_WEIGHT config default
+        if total <= 0 or any(value < min_w or value > 0.40 for value in cleaned.values()):
+            log.warning("Discarding unsafe dynamic factor weights; using balanced defaults.")
+            return dict(DEFAULT_WEIGHTS)
+        return {name: value / total for name, value in cleaned.items()}
+
+    def resolve_current_nav(self) -> float:
+        if self._current_nav_provider is not None:
+            try:
+                current_nav = self._current_nav_provider()
+                if current_nav is not None and current_nav > 0:
+                    return float(current_nav)
+            except (TypeError, ValueError, AttributeError, RuntimeError):
+                log.warning("Current NAV provider failed; using default NAV %.0f.", self._default_current_nav)
+
+        loader = getattr(self._persistence, "load_portfolio_state", None)
+        if callable(loader):
+            snapshot = loader()
+            if snapshot is not None:
+                return float(snapshot.current_nav)
+
+        return self._default_current_nav
+
+    def apply_regime_probability_gate(
+        self,
+        config: SystemConfig,
+        regime: MarketRegime,
+        *,
+        debug: bool,
+    ) -> SystemConfig:
+        if self._probability_gate is None:
+            return config
+
+        try:
+            threshold = float(self._probability_gate.threshold(regime.regime))
+            log.info("Regime probability gate active: %s -> P(win) >= %.2f", regime.label, threshold)
+            return replace(config, MIN_PROB_WIN=threshold)
+        except (TypeError, ValueError, AttributeError, RuntimeError):
+            log.warning("Regime probability gate failed; using static threshold.", exc_info=debug)
+            return config
+
+    def maybe_recalibrate_ic_weights(
+        self,
+        *,
+        all_results: list[TickerResult],
+        prepared: PreparedScanData,
+        config: SystemConfig,
+        state: ScanState,
+        regime_label: Optional[str] = None,
+    ) -> None:
+        if len(all_results) < config.ICIR_MIN_OBS:
+            return
+
+        try:
+            new_weights = calibrate_ic_weights(
+                results=all_results,
+                processed=prepared.processed,
+                bench=prepared.bench_series,
+                sector_ranks=prepared.sector_ranks,
+                n_sectors=N_SECTORS,
+                config=config,
+                regime_label=regime_label,
+            )
+            state.factor_weights = self.validated_factor_weights(new_weights)
+            state.weights_calibrated = True
+            log.info("IC weights optimized: %s", {key: round(value, 4) for key, value in new_weights.items()})
+        except (ValueError, TypeError, KeyError, ZeroDivisionError, RuntimeError) as exc:
+            log.warning("IC calibration failed: %s", exc)
+
+    def score_candidates_legacy_mock(
+        self,
+        *,
+        prepared: PreparedScanData,
+        regime: MarketRegime,
+        config: SystemConfig,
+        state: ScanState,
+        session: str,
+        debug: bool,
+        no_intraday: bool = False,
+        force_score: bool,
+        current_nav: float,
+        cancel_requested: Optional[CancellationProbe] = None,
+    ) -> list[TickerResult]:
+        mock_results: list[TickerResult] = []
+        open_pos: set[str] = getattr(state, "open_positions", set())
+        loader = getattr(self._persistence, "load_open_positions", None)
+        pos_map: dict[str, dict[str, Any]] = loader() if callable(loader) else {}
+
+        try:
+            sig = inspect.signature(passes_static_filters)
+            accepts_min_bars = "min_bars" in sig.parameters
+        except (TypeError, ValueError):
+            accepts_min_bars = False
+
+        with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
+            futures: dict[Any, str] = {}
+            for ticker, df in prepared.processed.items():
+                _check_cancelled(cancel_requested)
+                clean_ticker = ticker.replace(".NS", "")
+                is_open = (ticker in open_pos) or (clean_ticker in open_pos)
+                passes_static = (
+                    passes_static_filters(df, config, min_bars=50)
+                    if accepts_min_bars
+                    else passes_static_filters(df, config)
+                )
+
+                if ticker == config.BENCHMARK or (not is_open and not passes_static):
+                    continue
+
+                pos_info = pos_map.get(ticker) or pos_map.get(clean_ticker) or {}
+                held_dir = pos_info.get("direction")
+
+                capital_fraction = confidence_position_scale(regime.confidence)
+                if self._capital_scaler is not None:
+                    try:
+                        capital_fraction *= float(
+                            self._capital_scaler.capital_fraction(current_nav, regime.regime)
+                        )
+                    except (TypeError, ValueError, AttributeError, RuntimeError):
+                        log.debug("Injected capital scaler failed for %s.", ticker, exc_info=debug)
+
+                call_kwargs: dict[str, Any] = {
+                    "ticker": ticker,
+                    "daily_df": df,
+                    "bench": prepared.bench_series,
+                    "sector_ranks": prepared.sector_ranks,
+                    "sector_rs": prepared.sector_rs,
+                    "session": session,
+                    "regime": regime,
+                    "config": config,
+                    "factor_weights": state.factor_weights,
+                    "allow_watchlist": getattr(config, "ENABLE_WATCHLIST", True),
+                    "capital_fraction": capital_fraction,
+                    "debug": debug,
+                    "no_intraday": no_intraday,
+                    "force_score": force_score,
+                    "is_open_position": is_open,
+                    "held_direction": held_dir,
+                }
+
+                future = executor.submit(score_ticker, **call_kwargs)
+                futures[future] = ticker
+
+            for future in as_completed(futures):
+                _check_cancelled(cancel_requested)
+                ticker = futures[future]
+                try:
+                    res = future.result()
+                    if res is not None:
+                        mock_results.append(res)
+                except Exception as exc:
+                    log.error("score_ticker mock error for %s: %s", ticker, exc, exc_info=True)
+        return mock_results
+
+    def score_candidates(
+        self,
+        *,
+        prepared: PreparedScanData,
+        regime: MarketRegime,
+        config: SystemConfig,
+        state: ScanState,
+        session: str,
+        debug: bool,
+        no_intraday: bool = False,
+        force_score: bool,
+        cancel_requested: Optional[CancellationProbe] = None,
+    ) -> tuple[list[TickerResult], float]:
+        started = time.monotonic()
+        current_nav = self.resolve_current_nav()
+
+        # Backward compatibility for tests that monkeypatch services.score_ticker
+        if score_ticker is not _DEFAULT_SCORE_TICKER:
+            mock_results = self.score_candidates_legacy_mock(
+                prepared=prepared,
+                regime=regime,
+                config=config,
+                state=state,
+                session=session,
+                debug=debug,
+                no_intraday=no_intraday,
+                force_score=force_score,
+                current_nav=current_nav,
+                cancel_requested=cancel_requested,
+            )
+            return mock_results, time.monotonic() - started
+
+        all_results = score_universe(
+            processed=prepared.processed,
+            bench=prepared.bench_series,
+            sector_rs=prepared.sector_rs,
+            regime=regime,
+            config=config,
+            weights=state.factor_weights,
+            open_positions=state.open_positions,
+            open_pos_map=self._persistence.load_open_positions(),
+            session=session,
+            debug=debug,
+            no_intraday=no_intraday,
+            force_score=force_score,
+            allow_watchlist=getattr(config, "ENABLE_WATCHLIST", True),
+            capital_scaler=self._capital_scaler,
+            current_nav=current_nav,
+            sector_ranks=prepared.sector_ranks,
+            min_bars=50,
+            cancel_requested=cancel_requested,
+        )
+        elapsed = time.monotonic() - started
+        log.debug("Scoring completed in %.3fs.", elapsed)
+        return all_results, elapsed
 
 
 class ScanService:
@@ -639,6 +1137,9 @@ class ScanService:
         alerter: Optional[SummaryAlerter] = None,
         current_nav_provider: Optional[CurrentNavProvider] = None,
         default_current_nav: float = 1_000_000.0,
+        position_monitor: Optional[PositionMonitorService] = None,
+        regime_service: Optional[RegimeService] = None,
+        scoring_pipeline: Optional[ScoringPipelineService] = None,
     ) -> None:
         self._version = version
         self._data_service = data_service or MarketDataService()
@@ -649,25 +1150,34 @@ class ScanService:
         self._alerter = alerter
         self._current_nav_provider = current_nav_provider
         self._default_current_nav = default_current_nav
+
+        self._position_monitor = position_monitor or PositionMonitorService(self._persistence)
+        self._regime_service = regime_service or RegimeService()
+        self._scoring_pipeline = scoring_pipeline or ScoringPipelineService(
+            persistence=self._persistence,
+            probability_gate=self._probability_gate,
+            capital_scaler=self._capital_scaler,
+            factor_calibrator=self._factor_calibrator,
+            current_nav_provider=self._current_nav_provider,
+            default_current_nav=self._default_current_nav,
+        )
+
         self.last_sector_rs: dict[str, float] = {}
         self.last_regime_info: Optional[MarketRegime] = None
         self._recent_alerts: list[dict[str, float]] = []  # [{ticker: composite}, ...]
 
     @staticmethod
     def _validated_factor_weights(weights: dict[str, float]) -> dict[str, float]:
-        """Reject unsafe runtime calibration instead of starving signal factors."""
-        expected = set(DEFAULT_WEIGHTS)
-        try:
-            cleaned = {name: float(weights[name]) for name in expected}
-        except (KeyError, TypeError, ValueError):
-            # Test/injected providers may expose a deliberately partial map.
-            return dict(weights)
-        total = sum(cleaned.values())
-        min_w = 0.03  # matches MIN_FACTOR_WEIGHT config default
-        if total <= 0 or any(value < min_w or value > 0.40 for value in cleaned.values()):
-            log.warning("Discarding unsafe dynamic factor weights; using balanced defaults.")
-            return dict(DEFAULT_WEIGHTS)
-        return {name: value / total for name, value in cleaned.items()}
+        return ScoringPipelineService.validated_factor_weights(weights)
+
+    def _sync_subservices(self) -> None:
+        self._position_monitor._persistence = self._persistence
+        self._scoring_pipeline._persistence = self._persistence
+        self._scoring_pipeline._probability_gate = self._probability_gate
+        self._scoring_pipeline._capital_scaler = self._capital_scaler
+        self._scoring_pipeline._factor_calibrator = self._factor_calibrator
+        self._scoring_pipeline._current_nav_provider = self._current_nav_provider
+        self._scoring_pipeline._default_current_nav = self._default_current_nav
 
     def get_last_sector_rs(self) -> dict[str, float]:
         return dict(self.last_sector_rs)
@@ -723,35 +1233,27 @@ class ScanService:
         self.last_sector_rs = dict(prepared.sector_rs)
         self._monitor_open_position_stops(prepared.processed, state)
 
-        breadth = compute_breadth(prepared.processed, config)
-        state.regime_locked = config.is_regime_locked()
-        if state.regime_locked:
-            log.info(
-                "Regime lock active during opening noise window (%d min).",
-                config.REGIME_LOCK_MINUTES,
-            )
-
-        tracker = regime_tracker if regime_tracker is not None else RegimeTracker()
-        regime = classify_regime(
-            prepared.processed,
-            breadth,
-            tracker,
-            config,
-            locked=state.regime_locked,
-            sector_rs=prepared.sector_rs,
+        regime = self._determine_regime(
+            prepared=prepared,
+            config=config,
+            state=state,
+            regime_tracker=regime_tracker,
+            regime_override=regime_override,
         )
-        regime = self._apply_regime_override(regime, regime_override)
         self.last_regime_info = regime
         _check_cancelled(cancel_requested)
 
         session = config.session_from_time()
-        scoring_config = self._apply_regime_probability_gate(config, regime, debug=debug)
+        scoring_config = config if config.SWING_SETUP_ENABLED else self._apply_regime_probability_gate(config, regime, debug=debug)
 
         metrics.record_regime(regime)
         self._log_regime(regime, config)
 
         if not regime.is_tradeable():
             log.warning("PANIC regime - no new positions.")
+            if config.SWING_SETUP_ENABLED:
+                from .paper_ledger import PaperLedger
+                PaperLedger(self._persistence.db).record_scan(str(prepared.bench_series.index[-1]), regime.label, 0, 0)
             return ScanOutput([], [], regime, sector_rs=self.last_sector_rs)
 
         effective_config = scoring_config
@@ -792,36 +1294,6 @@ class ScanService:
         portfolio_candidates = [r for r in all_results if not getattr(r, "is_watchlist", False)]
         portfolio = optimize_portfolio(portfolio_candidates, config, corr_matrix)
 
-        # ── Duplicate alert suppression ───────────────────────────────────────
-        lookback = getattr(config, "DUPLICATE_LOOKBACK_SCANS", 5)
-        delta = getattr(config, "DUPLICATE_COMPOSITE_DELTA", 0.05)
-        if self._recent_alerts and portfolio:
-            filtered: list[TickerResult] = []
-            for r in portfolio:
-                ticker = getattr(r, "ticker", "")
-                composite = getattr(r, "composite", 0.0)
-                was_recent = any(
-                    ticker in scan and abs(composite - scan[ticker]) < delta
-                    for scan in self._recent_alerts[-lookback:]
-                )
-                if was_recent and not getattr(r, "is_held", False):
-                    log.debug(
-                        "%s: suppressed duplicate alert (composite %.3f, delta < %.3f)",
-                        ticker, composite, delta,
-                    )
-                else:
-                    filtered.append(r)
-            portfolio = filtered
-
-        # Record this scan's portfolio for future dedup checks
-        current_scan_map: dict[str, float] = {
-            getattr(r, "ticker", ""): getattr(r, "composite", 0.0)
-            for r in portfolio
-        }
-        self._recent_alerts.append(current_scan_map)
-        if len(self._recent_alerts) > lookback + 1:
-            self._recent_alerts = self._recent_alerts[-(lookback + 1):]
-
         metrics.record_portfolio(portfolio)
         metrics.emit_summary()
         state.cache.log_stats()
@@ -838,117 +1310,20 @@ class ScanService:
                 result.risk_inr,
             )
 
-        # Synchronize open_positions with current portfolio selections
-        # Retain all selected portfolio items + any surviving held positions from all_results
-        retained_tickers = {getattr(r, "ticker", "") for r in portfolio}
-        for r in all_results:
-            if getattr(r, "is_held", False) or "HeldPos" in getattr(r, "reasons", []):
-                retained_tickers.add(getattr(r, "ticker", ""))
-
-        open_pos_payload: list[dict[str, Any]] = [
-            {
-                "ticker": getattr(result, "ticker", ""),
-                "direction": getattr(result, "direction", "LONG"),
-                "entry": getattr(result, "entry", getattr(result, "close", 0.0)),
-                "shares": getattr(result, "shares", 0),
-                "stop": getattr(result, "stop", 0.0),
-                "t1": getattr(result, "t1", 0.0),
-                "prob_win": getattr(result, "prob_win", 0.0),
-                "composite": getattr(result, "composite", 0.0),
-                "trade_horizon": getattr(result, "trade_horizon", "SWING"),
-                "factors": getattr(getattr(result, "factors", None), "as_dict", lambda: {})(),
-            }
-            for result in all_results
-            if getattr(result, "ticker", "") in retained_tickers
-        ]
-
-        seen_t: set[str] = set()
-        deduped_payload: list[dict[str, Any]] = []
-        for p in open_pos_payload:
-            t = str(p.get("ticker", ""))
-            if t and t not in seen_t:
-                seen_t.add(t)
-                seen_t.add(t.replace(".NS", ""))
-                deduped_payload.append(p)
-
-        # Distinguish between evaluated held positions and those not evaluated due to data/fetch issues
-        evaluated_tickers = {t.replace(".NS", "") for t in prepared.processed}.union(set(prepared.processed.keys()))
-        loader = getattr(self._persistence, "load_open_positions", None)
-        open_pos_map: dict[str, dict[str, Any]] = loader() if callable(loader) else {}
-
-        for old_t in list(state.open_positions):
-            clean_old_t = old_t.replace(".NS", "")
-            if clean_old_t not in seen_t and old_t not in seen_t:
-                was_evaluated = (old_t in evaluated_tickers) or (clean_old_t in evaluated_tickers)
-                if not was_evaluated:
-                    prior_record = open_pos_map.get(old_t) or open_pos_map.get(clean_old_t)
-                    if prior_record:
-                        deduped_payload.append(prior_record)
-                        seen_t.add(old_t)
-                        seen_t.add(clean_old_t)
-                        log.warning(
-                            "Held position %s was NOT evaluated this scan (data unavailable/fetch error); preserving open position.",
-                            old_t,
-                        )
-                else:
-                    log.info("Held position %s EXITED: Evaluated and fell below holding threshold or structural criteria.", old_t)
-
-        saver = getattr(self._persistence, "save_open_positions", None)
-        if callable(saver):
-            try:
-                _check_cancelled(cancel_requested)
-                saver(deduped_payload)
-            except Exception as exc:
-                log.warning("Could not sync open positions: %s", exc)
+        if config.SWING_SETUP_ENABLED:
+            from .paper_ledger import PaperLedger
+            from .swing_research import leadership_snapshot
+            observations = leadership_snapshot(prepared.processed, config, prepared.bench_series.index[-1])
+            for result in all_results:
+                result.research_context = observations.get(f"{result.ticker}.NS", {})
+            ledger = PaperLedger(self._persistence.db)
+            ledger.record_signals(all_results, portfolio, config)
+            ledger.record_scan(str(prepared.bench_series.index[-1]), regime.label, len(all_results), len(portfolio))
 
         return ScanOutput(all_results, portfolio, regime, sector_rs=self.last_sector_rs)
 
     def run_calibration(self, calib_offset: int = 60) -> None:
-        # Prefer executed_trades (proper lifecycle) over legacy trade_log
-        composites, outcomes = self._persistence.db.fetch_calibration_trades(min_samples=80)
-        if composites and outcomes:
-            log.info(
-                "Calibrating from %d closed executed trades.",
-                len(composites),
-            )
-            a, b = calibrate_platt(composites, outcomes, calib_offset=calib_offset)
-            self._persistence.save_platt(a, b)
-            return
-
-        # Fallback: legacy trade_log (but warn that it's not validated)
-        trades = self._persistence.load_trade_log()
-        if not trades:
-            log.warning(
-                "No executed trades and no legacy trade log found. "
-                "Using config-default Platt coefficients (A=%.1f, B=%.1f). "
-                "Record real trades with outcomes to enable calibration.",
-                -4.0, 2.0,
-            )
-            return
-
-        composites_legacy: list[float] = []
-        outcomes_legacy: list[int] = []
-        for trade in trades:
-            factors = trade.get("factors")
-            pnl = trade.get("pnl")
-            if not isinstance(factors, dict) or pnl is None:
-                continue
-
-            composite = trade.get("composite")
-            if composite is None:
-                composite = sum(
-                    float(factors.get(key, 0.0)) * DEFAULT_WEIGHTS.get(key, 0.0)
-                    for key in DEFAULT_WEIGHTS
-                )
-            composites_legacy.append(float(composite))
-            outcomes_legacy.append(1 if float(pnl) > 0 else 0)
-
-        if len(composites_legacy) < 5:
-            log.warning("Insufficient data for calibration (%d samples).", len(composites_legacy))
-            return
-
-        a, b = calibrate_platt(composites_legacy, outcomes_legacy, calib_offset=calib_offset)
-        self._persistence.save_platt(a, b)
+        CalibrationService(self._persistence, calibrate_platt).run_platt(calib_offset)
 
     def run_backtest(
         self,
@@ -966,12 +1341,6 @@ class ScanService:
         from .backtest import DEFAULT_COST_MODEL
 
         resolved_cost = cost_model if cost_model is not None else DEFAULT_COST_MODEL
-
-        # Load persisted Platt calibration to match live scan behavior
-        platt_a, platt_b, from_file = self._persistence.load_platt(config)
-        if from_file:
-            log.info("Backtest using persisted Platt parameters: A=%.4f B=%.4f", platt_a, platt_b)
-            config = replace(config, PLATT_A=platt_a, PLATT_B=platt_b)
 
         if debug:
             logging.getLogger("sovereign").setLevel(logging.DEBUG)
@@ -1018,85 +1387,18 @@ class ScanService:
         else:
             log.warning("No trades generated - check thresholds and data quality.")
         return results
+
     def _monitor_open_position_stops(
         self,
         processed: dict[str, pd.DataFrame],
         state: ScanState,
     ) -> None:
-        """
-        Deterministic price-vs-level check for active open positions.
-        If current bar breaches stop_loss or reaches target, execute trade exit,
-        remove from DB and state.open_positions.
-        """
-        loader = getattr(self._persistence, "load_open_positions", None)
-        if not callable(loader):
-            return
-        try:
-            open_pos_map = loader()
-        except Exception as exc:
-            log.warning("Could not load open positions for stop monitor: %s", exc)
-            return
-        if not open_pos_map:
-            return
-
-        db = getattr(self._persistence, "db", None)
-        deleter = getattr(db, "delete_open_position", None)
-
-        for ticker, pos in open_pos_map.items():
-            df = processed.get(ticker)
-            if df is None:
-                df = processed.get(f"{ticker}.NS")
-            if df is None or df.empty:
-                continue
-
-            row = df.iloc[-1]
-            open_p = float(row.get("Open", 0.0))
-            close_p = float(row.get("Close", 0.0))
-            low_p = float(row.get("Low", close_p))
-            high_p = float(row.get("High", close_p))
-            if open_p <= 0.0:
-                open_p = close_p
-
-            direction = str(pos.get("direction", "LONG")).upper()
-            stop_loss = float(pos.get("stop_loss", 0.0))
-            target = float(pos.get("target", 0.0))
-
-            stopped_out = False
-            target_hit = False
-
-            if direction == "LONG":
-                if stop_loss > 0 and (low_p <= stop_loss or close_p <= stop_loss):
-                    stopped_out = True
-                elif target > 0 and (high_p >= target or close_p >= target):
-                    target_hit = True
-            elif direction == "SHORT":
-                if stop_loss > 0 and (high_p >= stop_loss or close_p >= stop_loss):
-                    stopped_out = True
-                elif target > 0 and (low_p <= target or close_p <= target):
-                    target_hit = True
-
-            if stopped_out:
-                exit_fill = min(open_p, stop_loss) if direction == "LONG" else max(open_p, stop_loss)
-                log.info(
-                    "Held position %s EXITED: Stop-loss triggered (Fill=%.2f Low=%.2f Close=%.2f <= Stop=%.2f)",
-                    ticker, exit_fill, low_p, close_p, stop_loss,
-                )
-                if callable(deleter):
-                    deleter(ticker)
-                self._record_closed_trade(pos, ticker, exit_fill, "STOP", source="SIMULATED")
-                state.open_positions.discard(ticker)
-                state.open_positions.discard(ticker.replace(".NS", ""))
-            elif target_hit:
-                exit_fill = max(open_p, target) if direction == "LONG" else min(open_p, target)
-                log.info(
-                    "Held position %s EXITED: Profit target triggered (Fill=%.2f High=%.2f Close=%.2f >= Target=%.2f)",
-                    ticker, exit_fill, high_p, close_p, target,
-                )
-                if callable(deleter):
-                    deleter(ticker)
-                self._record_closed_trade(pos, ticker, exit_fill, "TARGET", source="SIMULATED")
-                state.open_positions.discard(ticker)
-                state.open_positions.discard(ticker.replace(".NS", ""))
+        self._sync_subservices()
+        self._position_monitor.monitor_open_position_stops(
+            processed,
+            state,
+            record_callback=self._record_closed_trade,
+        )
 
     def _record_closed_trade(
         self,
@@ -1106,17 +1408,14 @@ class ScanService:
         exit_reason: str,
         source: str = "SIMULATED",
     ) -> None:
-        entry = float(position.get("entry_price", position.get("entry", 0.0)))
-        direction = str(position.get("direction", "LONG")).upper()
-        if entry <= 0 or exit_price <= 0:
-            return
-        pnl = (exit_price - entry) / entry if direction == "LONG" else (entry - exit_price) / entry
-        self._persistence.append_trade({
-            **position, "ticker": ticker, "direction": direction, "entry": entry,
-            "exit_price": exit_price, "exit_reason": exit_reason, "pnl": round(pnl, 6),
-            "timestamp": datetime.now(IST).isoformat(),
-            "source": source,
-        })
+        self._sync_subservices()
+        self._position_monitor.record_closed_trade(
+            position,
+            ticker,
+            exit_price,
+            exit_reason,
+            source=source,
+        )
 
     def _score_candidates_legacy_mock(
         self,
@@ -1132,76 +1431,19 @@ class ScanService:
         current_nav: float,
         cancel_requested: Optional[CancellationProbe] = None,
     ) -> list[TickerResult]:
-        mock_results: list[TickerResult] = []
-        open_pos: set[str] = getattr(state, "open_positions", set())
-        loader = getattr(self._persistence, "load_open_positions", None)
-        pos_map: dict[str, dict[str, Any]] = loader() if callable(loader) else {}
-
-        try:
-            sig = inspect.signature(passes_static_filters)
-            accepts_min_bars = "min_bars" in sig.parameters
-        except Exception:
-            accepts_min_bars = False
-
-        with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
-            futures: dict[Any, str] = {}
-            for ticker, df in prepared.processed.items():
-                _check_cancelled(cancel_requested)
-                clean_ticker = ticker.replace(".NS", "")
-                is_open = (ticker in open_pos) or (clean_ticker in open_pos)
-                passes_static = (
-                    passes_static_filters(df, config, min_bars=50)
-                    if accepts_min_bars
-                    else passes_static_filters(df, config)
-                )
-
-                if ticker == config.BENCHMARK or (not is_open and not passes_static):
-                    continue
-
-                pos_info = pos_map.get(ticker) or pos_map.get(clean_ticker) or {}
-                held_dir = pos_info.get("direction")
-
-                capital_fraction = confidence_position_scale(regime.confidence)
-                if self._capital_scaler is not None:
-                    try:
-                        capital_fraction *= float(
-                            self._capital_scaler.capital_fraction(current_nav, regime.regime)
-                        )
-                    except Exception:
-                        log.debug("Injected capital scaler failed for %s.", ticker, exc_info=debug)
-
-                call_kwargs: dict[str, Any] = {
-                    "ticker": ticker,
-                    "daily_df": df,
-                    "bench": prepared.bench_series,
-                    "sector_ranks": prepared.sector_ranks,
-                    "sector_rs": prepared.sector_rs,
-                    "session": session,
-                    "regime": regime,
-                    "config": config,
-                    "factor_weights": state.factor_weights,
-                    "allow_watchlist": getattr(config, "ENABLE_WATCHLIST", True),
-                    "capital_fraction": capital_fraction,
-                    "debug": debug,
-                    "no_intraday": no_intraday,
-                    "force_score": force_score,
-                    "is_open_position": is_open,
-                    "held_direction": held_dir,
-                }
-
-                future = executor.submit(score_ticker, **call_kwargs)
-                futures[future] = ticker
-
-            for future in as_completed(futures):
-                _check_cancelled(cancel_requested)
-                ticker = futures[future]
-                try:
-                    res = future.result()
-                    if res is not None:
-                        mock_results.append(res)
-                except Exception as exc:
-                    log.error("score_ticker mock error for %s: %s", ticker, exc, exc_info=True)
-        return mock_results
+        self._sync_subservices()
+        return self._scoring_pipeline.score_candidates_legacy_mock(
+            prepared=prepared,
+            regime=regime,
+            config=config,
+            state=state,
+            session=session,
+            debug=debug,
+            no_intraday=no_intraday,
+            force_score=force_score,
+            current_nav=current_nav,
+            cancel_requested=cancel_requested,
+        )
 
     def _score_candidates(
         self,
@@ -1216,65 +1458,22 @@ class ScanService:
         force_score: bool,
         cancel_requested: Optional[CancellationProbe] = None,
     ) -> tuple[list[TickerResult], float]:
-        started = time.monotonic()
-        current_nav = self._resolve_current_nav()
-
-        # Backward compatibility for tests that monkeypatch services.score_ticker
-        if score_ticker is not _DEFAULT_SCORE_TICKER:
-            mock_results = self._score_candidates_legacy_mock(
-                prepared=prepared,
-                regime=regime,
-                config=config,
-                state=state,
-                session=session,
-                debug=debug,
-                no_intraday=no_intraday,
-                force_score=force_score,
-                current_nav=current_nav,
-                cancel_requested=cancel_requested,
-            )
-            return mock_results, time.monotonic() - started
-
-        all_results = score_universe(
-            processed=prepared.processed,
-            bench=prepared.bench_series,
-            sector_rs=prepared.sector_rs,
+        self._sync_subservices()
+        return self._scoring_pipeline.score_candidates(
+            prepared=prepared,
             regime=regime,
             config=config,
-            weights=state.factor_weights,
-            open_positions=state.open_positions,
-            open_pos_map=self._persistence.load_open_positions(),
+            state=state,
             session=session,
             debug=debug,
             no_intraday=no_intraday,
             force_score=force_score,
-            allow_watchlist=getattr(config, "ENABLE_WATCHLIST", True),
-            capital_scaler=self._capital_scaler,
-            current_nav=current_nav,
-            sector_ranks=prepared.sector_ranks,
-            min_bars=50,
             cancel_requested=cancel_requested,
         )
-        elapsed = time.monotonic() - started
-        log.debug("Scoring completed in %.3fs.", elapsed)
-        return all_results, elapsed
 
     def _resolve_current_nav(self) -> float:
-        if self._current_nav_provider is not None:
-            try:
-                current_nav = self._current_nav_provider()
-                if current_nav is not None and current_nav > 0:
-                    return float(current_nav)
-            except Exception:
-                log.warning("Current NAV provider failed; using default NAV %.0f.", self._default_current_nav)
-
-        loader = getattr(self._persistence, "load_portfolio_state", None)
-        if callable(loader):
-            snapshot = loader()
-            if snapshot is not None:
-                return float(snapshot.current_nav)
-
-        return self._default_current_nav
+        self._sync_subservices()
+        return self._scoring_pipeline.resolve_current_nav()
 
     def _maybe_recalibrate_ic_weights(
         self,
@@ -1285,24 +1484,14 @@ class ScanService:
         state: ScanState,
         regime_label: Optional[str] = None,
     ) -> None:
-        if len(all_results) < config.ICIR_MIN_OBS:
-            return
-
-        try:
-            new_weights = calibrate_ic_weights(
-                results=all_results,
-                processed=prepared.processed,
-                bench=prepared.bench_series,
-                sector_ranks=prepared.sector_ranks,
-                n_sectors=N_SECTORS,
-                config=config,
-                regime_label=regime_label,
-            )
-            state.factor_weights = self._validated_factor_weights(new_weights)
-            state.weights_calibrated = True
-            log.info("IC weights optimized: %s", {key: round(value, 4) for key, value in new_weights.items()})
-        except Exception as exc:
-            log.warning("IC calibration failed: %s", exc)
+        self._sync_subservices()
+        self._scoring_pipeline.maybe_recalibrate_ic_weights(
+            all_results=all_results,
+            prepared=prepared,
+            config=config,
+            state=state,
+            regime_label=regime_label,
+        )
 
     def _apply_regime_probability_gate(
         self,
@@ -1311,57 +1500,40 @@ class ScanService:
         *,
         debug: bool,
     ) -> SystemConfig:
-        if self._probability_gate is None:
-            return config
-
-        try:
-            threshold = float(self._probability_gate.threshold(regime.regime))
-            log.info("Regime probability gate active: %s -> P(win) >= %.2f", regime.label, threshold)
-            return replace(config, MIN_PROB_WIN=threshold)
-        except Exception:
-            log.warning("Regime probability gate failed; using static threshold.", exc_info=debug)
-            return config
+        self._sync_subservices()
+        return self._scoring_pipeline.apply_regime_probability_gate(
+            config,
+            regime,
+            debug=debug,
+        )
 
     def _apply_regime_override(
         self,
         regime: MarketRegime,
         regime_override: Optional[str],
     ) -> MarketRegime:
-        if not regime_override:
-            return regime
-
-        try:
-            override_type = MarketRegimeType(regime_override.upper())
-        except ValueError:
-            log.error("Invalid override regime: %s - ignoring.", regime_override)
-            return regime
-
-        log.warning("REGIME OVERRIDE ACTIVE: %s (was %s)", override_type.value, regime.label)
-        return MarketRegime(
-            regime=override_type,
-            breadth=regime.breadth,
-            adx_median=regime.adx_median,
-            atr_ratio=regime.atr_ratio,
-            confidence=1.0,
-            confirmed=True,
-            breadth_delta=regime.breadth_delta,
-            sector_concentration=regime.sector_concentration,
-            regime_locked=False,
+        return self._regime_service.apply_regime_override(
+            regime,
+            regime_override,
         )
 
     def _log_regime(self, regime: MarketRegime, config: SystemConfig) -> None:
-        log.info(
-            "Breadth: %.0f%% (d=%.2f) | Regime: %s (%s) | Conf: %.2f | ADX: %.1f | "
-            "ATR ratio: %.2f | Sector conc: %.0f%% | %s",
-            regime.breadth * 100,
-            regime.breadth_delta,
-            regime.label,
-            "CONFIRMED" if regime.confirmed else f"{config.REGIME_CONFIRM_BARS} bar CONFIRM REQ",
-            regime.confidence,
-            regime.adx_median,
-            regime.atr_ratio,
-            regime.sector_concentration * 100,
-            "LOCKED" if regime.regime_locked else "live",
+        self._regime_service.log_regime(regime, config)
+
+    def _determine_regime(
+        self,
+        prepared: PreparedScanData,
+        config: SystemConfig,
+        state: ScanState,
+        regime_tracker: Optional[RegimeTracker] = None,
+        regime_override: Optional[str] = None,
+    ) -> MarketRegime:
+        return self._regime_service.determine_regime(
+            prepared=prepared,
+            config=config,
+            state=state,
+            regime_tracker=regime_tracker,
+            regime_override=regime_override,
         )
 
 

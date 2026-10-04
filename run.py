@@ -24,6 +24,7 @@ import atexit
 import logging
 import sys
 import time
+from dataclasses import replace
 from core.application import build_application_runtime
 from core.regime import RegimeTracker
 from core.runtime_components import create_runtime_components
@@ -72,6 +73,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
     parser.add_argument("--regime-override", type=str, default=None, help="Force a specific regime (TREND_UP, RANGE, etc.)")
     parser.add_argument("--no-ema-filter", action="store_true", help="Disable EMA200 structural filter for debugging")
     parser.add_argument("--force-score", action="store_true", help="Force scoring of all tickers (bypass BULL/BEAR directional gates)")
+    parser.add_argument("--swing-rules", action="store_true", help="Research explicit swing setups with bounded entries")
     args = parser.parse_args(args=argv)
 
     if args.version:
@@ -79,6 +81,8 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
         return
 
     config = CONFIG
+    if args.swing_rules:
+        config = replace(config, SWING_SETUP_ENABLED=True, INTRADAY_ENABLED=False)
     runtime = build_application_runtime(
         version=VERSION,
         component_factory=create_runtime_components,
@@ -124,7 +128,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
                 config=config,
             )
             write_json_atomic(target, payload)
-        except Exception as exc:
+        except (OSError, TypeError, ValueError, AttributeError) as exc:
             log.debug("Failed to persist latest_scan.json in run.py: %s", exc)
 
 
@@ -134,6 +138,8 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> None:
             trade_log = services.persistence.load_trade_log()
             if len(trade_log) > last_trade_count:
                 for trade in trade_log[last_trade_count:]:
+                    if trade.get("source", "EXECUTED") != "EXECUTED":
+                        continue
                     factors = trade.get("factors")
                     pnl = trade.get("pnl")
                     if isinstance(factors, dict) and pnl is not None:
