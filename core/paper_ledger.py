@@ -64,6 +64,16 @@ class PaperLedger:
                 events.append(self.db.append_paper_event(event_id, "SIGNAL", payload))
         return events
 
+    def record_pullback_signals(self, signals: Sequence[Any]) -> list[dict[str, Any]]:
+        """Idempotent per ticker/strategy/date; entry is next open, so no fill is recorded here."""
+        events = []
+        for s in signals:
+            event_id = "signal:" + hashlib.sha256(f"{s.ticker}|{s.strategy_id}|{s.signal_date}".encode()).hexdigest()
+            existing = self.db.get_paper_event(event_id)
+            events.append(existing if existing is not None else self.db.append_paper_event(
+                event_id, "SIGNAL", {**asdict(s), "mode": "PAPER_ONLY", "entry": "next_open", "fill": None}))
+        return events
+
     def record_research_scan(self, results: Sequence[ReplaySignal], market_date: str,
                              parameters: dict[str, Any], provenance: dict[str, Any]) -> list[dict[str, Any]]:
         """Freeze V2 observations with their own protocol, without V1 calibration or selection."""

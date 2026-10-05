@@ -615,6 +615,8 @@ def score_universe(
             except Exception as exc:
                 log.error("score_candidate_pass1 error for %s: %s", ticker, exc, exc_info=True)
 
+    pass1_candidates.sort(key=lambda c: c.ticker)
+
     # Cross-sectional cohort factor ranking
     cohort_rank_weight = getattr(config, "COHORT_RANK_WEIGHT", 0.40)
     cohort_min_obs = getattr(config, "COHORT_MIN_OBS", 10)
@@ -1320,7 +1322,28 @@ class ScanService:
             ledger.record_signals(all_results, portfolio, config)
             ledger.record_scan(str(prepared.bench_series.index[-1]), regime.label, len(all_results), len(portfolio))
 
+        self._record_leader_pullback(prepared, config)
         return ScanOutput(all_results, portfolio, regime, sector_rs=self.last_sector_rs)
+
+    def _record_leader_pullback(self, prepared: Any, config: SystemConfig) -> None:
+        """Paper-only research setup; never affects the live portfolio and never fails the scan."""
+        if not config.LEADER_PULLBACK_ENABLED:
+            return
+        try:
+            from .leader_pullback import scan_leader_pullback
+            from .paper_ledger import PaperLedger
+            from .swing import completed_daily_bars
+            bench = completed_daily_bars(prepared.processed[config.BENCHMARK], config)
+            frames = {t: completed_daily_bars(df, config) for t, df in prepared.processed.items() if t != config.BENCHMARK}
+            signals = scan_leader_pullback(frames, bench["Close"], bench.index[-1], capital=config.CAPITAL_INR)
+            self.last_leader_pullback = signals
+            PaperLedger(self._persistence.db).record_pullback_signals(signals)
+            log.info("LEADER_PULLBACK_V1 (paper only): %d signal(s)", len(signals))
+            for s in signals:
+                log.info("  %s | close %.2f | stop -%.2f | %d sh | RS %.0f%% | RSI2 %.1f | %s",
+                         s.ticker, s.close, s.stop_offset, s.shares, s.rs_percentile, s.rsi2, s.exit_rule)
+        except Exception:
+            log.warning("LEADER_PULLBACK_V1 scan failed", exc_info=True)
 
     def run_calibration(self, calib_offset: int = 60) -> None:
         CalibrationService(self._persistence, calibrate_platt).run_platt(calib_offset)

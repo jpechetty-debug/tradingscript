@@ -945,11 +945,12 @@ def _compute_candidate_targets(
 
     if candidate.swing_plan is not None:
         plan = candidate.swing_plan
+        risk = close - plan.stop
         targets = targets.__class__(
             stop=plan.stop,
             t1=plan.target,
             t2=plan.target2,
-            rr=round((plan.target - close) / (close - plan.stop), 2),
+            rr=round((plan.target - close) / risk, 2) if risk > 0 else 0.0,
         )
 
     return targets, (poc, val, vah)
@@ -1020,9 +1021,11 @@ def _check_probability_gates(
                 log.debug("%s: prob %.2f < gate %.2f (open_pos=%s)", ticker, prob_win, min_prob, is_open_position)
             return False, False
 
-    if exp_r < config.MIN_EXPECTANCY_R and not is_watchlist:
+    # Held positions only need non-negative edge, mirroring PROB_HOLD_FLOOR hysteresis.
+    min_exp = min(config.MIN_EXPECTANCY_R, 0.0) if is_open_position else config.MIN_EXPECTANCY_R
+    if exp_r < min_exp and not is_watchlist:
         if debug:
-            log.debug("%s: E(R) %.3f < gate %.3f", ticker, exp_r, config.MIN_EXPECTANCY_R)
+            log.debug("%s: E(R) %.3f < gate %.3f", ticker, exp_r, min_exp)
         return False, False
 
     return True, is_watchlist
@@ -1187,8 +1190,13 @@ def score_candidate_pass2(
     atr50m = float(row.get("ATR_50_mean", atr) or atr)
     vol_c = (atr < config.VOL_CONTRACT_RATIO * atr50m) if atr50m > 0 else False
 
-    h52 = float(daily_df["High"].max())
-    dist52 = ((h52 - close) / h52 * 100) if h52 > 0 else 100.0
+    yr = daily_df.tail(252)
+    if direction == "LONG":
+        h52 = float(yr["High"].max())
+        dist52 = ((h52 - close) / h52 * 100) if h52 > 0 else 100.0
+    else:
+        l52 = float(yr["Low"].min())
+        dist52 = ((close - l52) / l52 * 100) if l52 > 0 else 100.0
     super_up = bool(row["Super_Up"])
     ema20 = float(row["EMA_20"])
     ema50 = float(row["EMA_50"])

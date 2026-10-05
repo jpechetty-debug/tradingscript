@@ -323,7 +323,7 @@ def calculate_kelly_size(
     )
 
     if np.isnan(risk_inr) or np.isnan(rps) or rps <= 0:
-        return config.KELLY_MIN_SHARES, 0.0, 0.0, 1.0
+        return 0, 0.0, 0.0, 1.0
 
     max_risk = config.RISK_PER_TRADE_INR * config.KELLY_MAX_MULT * capital_fraction
     if capital_fraction <= 0:

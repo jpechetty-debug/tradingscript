@@ -404,6 +404,7 @@ class SystemConfig:
     SWING_SETUP_ENABLED: bool = field(default_factory=lambda: os.getenv("SWING_SETUP_ENABLED", "false").lower() in ("true", "1", "yes"))
     SWING_MIN_BARS: int = 150
     SWING_MIN_RR: float = 1.5
+    LEADER_PULLBACK_ENABLED: bool = field(default_factory=lambda: os.getenv("LEADER_PULLBACK_ENABLED", "1") == "1")
     SWING_MAX_GAP_ATR: float = .5
     SWING_RISK_FRACTION: float = .0025
     SWING_MAX_EXPOSURE_FRACTION: float = .10
