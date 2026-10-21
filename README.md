@@ -43,6 +43,8 @@ graph TD
 
 ## Swing rules — opt-in research policy
 
+The separate LP/PEAD experiment now uses chronological cash accounting and prior-close sizing. Run `python scripts/swing_research2.py PRICES.pkl EARNINGS.pkl [MEMBERS.csv] --out PATH`, or explicitly use `--lp-only` when earnings evidence is unavailable. See the [standalone replay correction and matched local reruns](docs/standalone-replay-fix-2026-10-20.md).
+
 Run `python run.py --swing-rules --no-telegram` for the versioned long-only swing policy. `SWING_SETUP_ENABLED=true` also enables it for API scans. It remains disabled by default because the observed validation period does not establish positive net expectancy.
 
 - **Completed daily bars:** unfinished candles are excluded before indicators, breadth, sector strength and setup detection. Live intraday prices, session score multipliers and legacy fitted calibration do not alter new swing entries.
@@ -68,6 +70,14 @@ The prespecified development-only grid covers breakout lookbacks 15/20/25, relat
 `server.create_app(paths=..., auto_scan=...)` creates an independent engine, persistence service, SSE broadcaster, cancellation event and rate limiter. SQLite opens during validated startup; API tests must enter the application lifespan. Killswitch read/reset failures keep scans blocked. Configuration and eligibility refactors preserve the trading rules. See [architecture fixes and instance setup](docs/architecture-fixes-2026-10-02.md).
 
 ### Independent V2 alpha experiments
+
+Audit local inputs with `python scripts/audit_research_coverage.py --feeds FEED_DIRECTORY --out PATH`. It exports daily membership/price coverage, row-level ingestion diagnostics and unavailable intervals. See the [coverage audit and saved-input findings](docs/coverage-audit-2026-10-20.md); missing or stale evidence does not become trading permission.
+
+The dashboard labels heuristic and unverified model outputs, strategy identity, snapshot age, failed refreshes and saved historical feed gaps. See [dashboard evidence status and verification](docs/dashboard-evidence-2026-10-20.md).
+
+Worker jobs now preserve requested tickers, configuration, runtime paths, scan options and provenance across local/process dispatch. See the [worker contract and execution checks](docs/worker-contract-2026-10-21.md).
+
+Generate daily paper-journal reconciliation with `python scripts/reconcile_paper_trading.py --date YYYY-MM-DD`. It reports observed signals, linked fills/exits, missing costs and timing exceptions in Markdown, JSON and CSV. See [daily paper reconciliation](docs/paper-reconciliation-2026-10-21.md).
 
 `python scripts/research_v2.py --model SECTOR` runs the separate sector-leadership model; `--model PEAD` evaluates earnings surprises against consensus observed before the announcement. `--mode replay` uses the existing cash/risk book with next-session surveillance checks. Missing index, mapping, surveillance or earnings feeds produce explicit rejections. Delivery and regime gates are optional individual experiments; no new policy is activated in application scans. See [V2 commands and timestamped feed schemas](docs/swing-v2.md) and [the separate V2 protocol](docs/swing-v2-protocol.json). The current snapshot cannot establish V2 profitability without the required genuine data.
 

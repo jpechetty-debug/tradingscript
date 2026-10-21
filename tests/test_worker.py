@@ -7,6 +7,9 @@ Unit tests for core/worker.py (Scan worker and dispatching abstraction).
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
+import pytest
+
+from core import worker
 
 from core.worker import (
     ScanJob,
@@ -15,6 +18,15 @@ from core.worker import (
     execute_scan_task,
 )
 from core.scorer import TickerResult
+
+
+@pytest.fixture(autouse=True)
+def isolated_worker_runtime(monkeypatch, tmp_path):
+    """Legacy serializer tests mock scanning; keep runtime storage isolated as well."""
+    from core.runtime_paths import RuntimePaths
+    paths = RuntimePaths.discover(root=tmp_path)
+    monkeypatch.setattr(worker, "PersistenceService", lambda **kwargs: MagicMock(paths=paths))
+    monkeypatch.setattr(worker, "build_application_runtime", lambda **kwargs: MagicMock())
 
 
 def test_scan_job_and_payload_defaults() -> None:

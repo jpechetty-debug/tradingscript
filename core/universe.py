@@ -296,6 +296,24 @@ N_TICKERS = len(ALL_TICKERS)
 SECTOR_LIST = list(SECTORS.keys())
 
 
+def resolve_scan_tickers(tickers: list[str] | None, benchmark: str) -> list[str]:
+    """Resolve an explicit candidate universe without turning an empty request into a full scan."""
+    if tickers is None:
+        return list(ALL_TICKERS)
+    if not isinstance(tickers, list):
+        raise ValueError("tickers must be a list of nonempty symbols or None")
+    result: list[str] = []
+    for ticker in tickers:
+        if not isinstance(ticker, str) or not ticker.strip() or any(c.isspace() for c in ticker.strip()):
+            raise ValueError("tickers must contain nonempty symbols without embedded whitespace")
+        symbol = ticker.strip().upper()
+        if symbol != benchmark.upper() and symbol not in result:
+            result.append(symbol)
+    if not result:
+        raise ValueError("An explicit scan universe must contain at least one non-benchmark ticker")
+    return result
+
+
 def get_fyers_symbol(ticker: str) -> str:
     """Convert yfinance ticker (RELIANCE.NS) -> Fyers symbol (NSE:RELIANCE-EQ)."""
     if ":" in ticker:

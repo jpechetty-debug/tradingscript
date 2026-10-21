@@ -434,3 +434,21 @@ input:focus, select:focus {
   border-color: var(--green);
   box-shadow: 0 0 0 1px var(--green);
 }
+
+/* Evidence stays visible independently of the selected dashboard tab. */
+.evidence-panel { margin-bottom: 24px; border-top: 2px solid var(--amber); }
+.evidence-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+.evidence-grid > div { min-width: 0; }
+.evidence-grid h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 10px; }
+.evidence-status { font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+.evidence-detail { font-size: 12px; line-height: 1.55; color: var(--text-muted); margin-top: 6px; overflow-wrap: anywhere; }
+.evidence-status.amber, .probability-evidence.amber { color: var(--amber); }
+.evidence-status.cyan, .probability-evidence.cyan { color: var(--cyan); }
+.probability-evidence { display: flex; flex-direction: column; gap: 4px; min-width: 130px; }
+.probability-evidence strong { font-size: 14px; }
+.probability-evidence span { font-family: var(--sans); font-size: 10px; font-weight: 500; white-space: normal; }
+.probability-evidence.muted { color: var(--text-muted); }
+.strategy-evidence { display: block; font-size: 10px; line-height: 1.5; color: var(--text-muted); max-width: 190px; white-space: normal; overflow-wrap: anywhere; }
+.refresh-errors { margin-top: 16px; padding: 12px; background: var(--amber-dim); color: var(--amber); font-size: 12px; border-radius: var(--radius-sm); }
+.refresh-errors ul { margin: 6px 0 0 18px; line-height: 1.6; overflow-wrap: anywhere; }
+@media (max-width: 850px) { .evidence-grid { grid-template-columns: 1fr; gap: 20px; } }

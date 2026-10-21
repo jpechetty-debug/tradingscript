@@ -1,0 +1,21 @@
+# Source/documentation graph: exclude runtime state, environments and generated copies.
+/.git/
+/.venv/
+/.backup/
+/.agent/
+/.agents/
+/.codegraph/
+/.mypy_cache/
+/.pytest_cache/
+/.ruff_cache/
+/artifacts/
+/logs/
+/state/
+/tmp/
+/temp_check/
+/graphify-out/
+/frontend/node_modules/
+/frontend/dist/
+/tools/scratch/
+/scratch_universe.py
+**/__pycache__/

@@ -1,4 +1,5 @@
 import React from 'react';
+import ProbabilityEvidence, { StrategyEvidence } from './ProbabilityEvidence';
 import { X, TrendingUp, BarChart2, Zap, Activity, Award, ArrowUpRight, ArrowDownRight, Layers, ShieldCheck } from 'lucide-react';
 
 const FACTOR_METRICS = [
@@ -16,7 +17,6 @@ export default function FactorAttributionModal({ isOpen, onClose, tickerData }) 
 
   const factors = tickerData.factors || {};
   const isLong = tickerData.direction === 'LONG';
-  const probPct = ((tickerData.prob_win || 0) * 100).toFixed(0);
   const compositeScore = (tickerData.composite ?? tickerData.composite_score ?? 0).toFixed(2);
 
   const getScoreColor = (val) => {
@@ -44,10 +44,9 @@ export default function FactorAttributionModal({ isOpen, onClose, tickerData }) 
                 {isLong ? <ArrowUpRight size={12} style={{ verticalAlign: 'middle' }} /> : <ArrowDownRight size={12} style={{ verticalAlign: 'middle' }} />}
                 {' '}{tickerData.direction}
               </span>
-              <span className="metric-pill green" style={{ fontSize: '10px' }}>
-                P(WIN): {probPct}%
-              </span>
+              <ProbabilityEvidence item={tickerData} />
             </div>
+            <StrategyEvidence item={tickerData} />
             <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
               {tickerData.sector ? `${tickerData.sector} • ` : ''}7-Factor Quantitative Signal Model Attribution
             </p>

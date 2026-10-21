@@ -59,7 +59,7 @@ export default function Header({
         {/* SSE Stream Status Pill */}
         <div className={`metric-pill ${isSseConnected ? 'green' : 'amber'}`}>
           <Radio size={12} style={{ animation: isSseConnected ? 'pulse 2s infinite' : 'none' }} />
-          <span>{isSseConnected ? 'REAL-TIME SSE' : 'POLLING'}</span>
+          <span>{isSseConnected ? 'EVENT STREAM CONNECTED' : 'EVENT STREAM OFFLINE'}</span>
         </div>
 
         {/* Session Pill */}
@@ -69,9 +69,9 @@ export default function Header({
         </div>
 
         {/* Regime Lock Pill */}
-        <div className={`metric-pill ${status?.regime_locked ? 'amber' : 'green'}`}>
+        <div className={`metric-pill ${typeof status?.regime_locked !== 'boolean' || status.regime_locked ? 'amber' : 'green'}`}>
           <Zap size={13} />
-          <span>{status?.regime_locked ? 'REGIME LOCKED (NOISE WINDOW)' : 'LIVE ADAPTIVE'}</span>
+          <span>{typeof status?.regime_locked !== 'boolean' ? 'REGIME STATUS UNKNOWN' : status.regime_locked ? 'REGIME LOCKED (NOISE WINDOW)' : 'LIVE ADAPTIVE'}</span>
         </div>
 
         {/* Regime Override Pill if Active */}

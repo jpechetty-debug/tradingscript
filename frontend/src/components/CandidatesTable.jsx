@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
+import ProbabilityEvidence, { StrategyEvidence } from './ProbabilityEvidence';
+import { emptyScanState, probabilityEvidence } from '../evidence';
 import { Search, Layers, BarChart2, TrendingUp, TrendingDown, Clock, Zap } from 'lucide-react';
 import { getTradeAction, getTradeHorizon } from './PortfolioTable';
 
-export default function CandidatesTable({ candidates, onInspectFactors }) {
+export default function CandidatesTable({ candidates, onInspectFactors, emptyState = emptyScanState('candidates') }) {
   const [search, setSearch] = useState('');
   const [minProb, setMinProb] = useState(0);
   const [tierFilter, setTierFilter] = useState('ALL'); // 'ALL' | 'PRIMARY' | 'WATCHLIST' | 'MEANREV'
@@ -13,9 +15,9 @@ export default function CandidatesTable({ candidates, onInspectFactors }) {
     return (
       <div className="card" style={{ textAlign: 'center', padding: '40px 20px' }}>
         <Layers size={32} style={{ color: 'var(--text-faint)', marginBottom: '12px' }} />
-        <h3 style={{ fontSize: '16px', color: 'var(--text-muted)' }}>No Screened Candidates</h3>
+        <h3 style={{ fontSize: '16px', color: 'var(--text-muted)' }}>{emptyState.title}</h3>
         <p style={{ fontSize: '12px', color: 'var(--text-faint)', marginTop: '6px' }}>
-          Trigger a scan to populate universe signals and factor evaluations.
+          {emptyState.message}
         </p>
       </div>
     );
@@ -34,7 +36,8 @@ export default function CandidatesTable({ candidates, onInspectFactors }) {
   const filtered = candidates.filter(c => {
     const matchesSearch = c.ticker.toLowerCase().includes(search.toLowerCase()) ||
                           (c.sector && c.sector.toLowerCase().includes(search.toLowerCase()));
-    const matchesProb = (c.prob_win || 0) >= minProb / 100;
+    const score = probabilityEvidence(c).value;
+    const matchesProb = minProb === 0 || (score !== null && score >= minProb / 100);
     const isWatchlist = Boolean(c.is_watchlist);
     const isMeanRev = Boolean(c.reasons && c.reasons.some(r => r.includes('MeanRev')));
 
@@ -75,7 +78,7 @@ export default function CandidatesTable({ candidates, onInspectFactors }) {
             </div>
           </div>
           <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
-            Screened opportunities classified into BUY / SELL, SWING vs INTRADAY, and conviction tiers
+            Screened opportunities with direction, horizon, policy tier, and model evidence status
           </p>
         </div>
 
@@ -157,18 +160,18 @@ export default function CandidatesTable({ candidates, onInspectFactors }) {
 
           {/* Min Win Prob Filter */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Min P(Win):</span>
+            <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Min model output:</span>
             <select
               value={minProb}
               onChange={(e) => setMinProb(Number(e.target.value))}
               style={{ width: '75px', margin: 0, padding: '7px 8px' }}
             >
-              <option value="0">0%</option>
-              <option value="45">45%</option>
-              <option value="50">50%</option>
-              <option value="52">52%</option>
-              <option value="55">55%</option>
-              <option value="60">60%</option>
+              <option value="0">All</option>
+              <option value="45">0.45</option>
+              <option value="50">0.50</option>
+              <option value="52">0.52</option>
+              <option value="55">0.55</option>
+              <option value="60">0.60</option>
             </select>
           </div>
         </div>
@@ -185,7 +188,7 @@ export default function CandidatesTable({ candidates, onInspectFactors }) {
               <th>Signals</th>
               <th>Factors</th>
               <th>Composite</th>
-              <th>P(Win)</th>
+              <th>Model output</th>
               <th>E(R)</th>
               <th>Entry</th>
               <th>Stop Loss</th>
@@ -197,7 +200,6 @@ export default function CandidatesTable({ candidates, onInspectFactors }) {
               const action = getTradeAction(item);
               const isBuy = action === 'BUY';
               const horizon = getTradeHorizon(item);
-              const probPct = ((item.prob_win || 0) * 100).toFixed(0);
               const isWatchlist = Boolean(item.is_watchlist);
               const isMeanRev = Boolean(item.reasons && item.reasons.some(r => r.includes('MeanRev')));
               const displayReasons = (item.reasons || []).filter(r => !r.startsWith('Regime:') && !r.startsWith('RR:') && !r.startsWith('Kurt:'));
@@ -214,11 +216,11 @@ export default function CandidatesTable({ candidates, onInspectFactors }) {
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
                       <span className="mono" style={{ fontWeight: '800', fontSize: '13px' }}>{item.ticker}</span>
                       {isWatchlist ? (
-                        <span className="badge badge-watchlist" title="P(win) in [0.45, 0.52) - Candidate for monitoring">
+                        <span className="badge badge-watchlist" title="Monitoring tier from screening policy; model status shown separately">
                           WATCHLIST
                         </span>
                       ) : (
-                        <span className="badge badge-primary" title="P(win) >= 0.52 - High-conviction execution candidate">
+                        <span className="badge badge-primary" title="Primary tier from screening policy; recommendation only">
                           PRIMARY
                         </span>
                       )}
@@ -228,6 +230,7 @@ export default function CandidatesTable({ candidates, onInspectFactors }) {
                         </span>
                       )}
                     </div>
+                    <StrategyEvidence item={item} />
                   </td>
                   <td>
                     {isBuy ? (
@@ -297,9 +300,7 @@ export default function CandidatesTable({ candidates, onInspectFactors }) {
                   <td className="mono" style={{ color: (item.composite_score || 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
                     {(item.composite_score || 0).toFixed(2)}
                   </td>
-                  <td className="mono" style={{ fontWeight: '700', color: Number(probPct) >= 52 ? 'var(--green)' : 'var(--amber)' }}>
-                    {probPct}%
-                  </td>
+                  <td><ProbabilityEvidence item={item} /></td>
                   <td className="mono">{(item.expectancy_r || 0).toFixed(2)}R</td>
                   <td className="mono" style={{ fontWeight: '600' }}>
                     ₹{item.entry?.toLocaleString('en-IN', { minimumFractionDigits: 2 })}

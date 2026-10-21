@@ -42,6 +42,7 @@ import uvicorn
 import screener_v14_modular as svm
 from core.application import ApplicationRuntime, build_application_runtime
 from core.config import CONFIG, MarketRegimeType
+from core.dashboard_evidence import load_dashboard_evidence
 from core.regime import RegimeTracker
 from core.runtime_paths import RuntimePaths
 from core.scorer import TickerResult
@@ -545,6 +546,12 @@ async def get_scan_results(request: Request) -> Dict[str, Any]:
             "candidates_count": len(request.app.state.engine.last_candidates),
             "candidates": request.app.state.engine.last_candidates,
         }
+
+
+@router.get("/api/evidence", dependencies=[Depends(verify_api_key)])
+def get_dashboard_evidence(request: Request) -> Dict[str, Any]:
+    """Historical input audit, explicitly separate from current scan eligibility."""
+    return load_dashboard_evidence(_persistence(request.app).paths.artifacts_dir)
 
 
 @router.post("/api/scan/trigger", dependencies=[Depends(verify_api_key)])

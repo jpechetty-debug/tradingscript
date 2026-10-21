@@ -315,6 +315,25 @@ class AppSettings:
     backtest: BacktestSettings = field(default_factory=BacktestSettings)
 
 
+SettingsSlice = (
+    MarketDataSettings | RegimeSettings | SignalSettings | PortfolioSettings
+    | ExecutionCostSettings | AlertSettings | BacktestSettings
+)
+
+
+def _settings_slices(settings: AppSettings) -> tuple[SettingsSlice, ...]:
+    """Keep heterogeneous dataclass types explicit for fields() and preserve order."""
+    return (
+        settings.market_data,
+        settings.regime,
+        settings.signal,
+        settings.portfolio,
+        settings.execution_cost,
+        settings.alerts,
+        settings.backtest,
+    )
+
+
 @dataclass(frozen=True)
 class ScoringRuntime:
     platt_a: float = -4.0
@@ -637,15 +656,7 @@ class SystemConfig:
     def from_app_settings(cls, settings: AppSettings, **extra: Any) -> SystemConfig:
         """Compose a SystemConfig instance from an AppSettings composite."""
         kwargs: dict[str, Any] = dict(extra)
-        for slice_obj in (
-            settings.market_data,
-            settings.regime,
-            settings.signal,
-            settings.portfolio,
-            settings.execution_cost,
-            settings.alerts,
-            settings.backtest,
-        ):
+        for slice_obj in _settings_slices(settings):
             for f in fields(slice_obj):
                 attr_name = f.name.upper()
                 if attr_name not in kwargs and attr_name in cls.__dataclass_fields__:
@@ -671,15 +682,7 @@ class SystemConfig:
 
     def __post_init__(self) -> None:
         if self.settings_payload is not None:
-            for slice_obj in (
-                self.settings_payload.market_data,
-                self.settings_payload.regime,
-                self.settings_payload.signal,
-                self.settings_payload.portfolio,
-                self.settings_payload.execution_cost,
-                self.settings_payload.alerts,
-                self.settings_payload.backtest,
-            ):
+            for slice_obj in _settings_slices(self.settings_payload):
                 for f in fields(slice_obj):
                     attr_name = f.name.upper()
                     if attr_name in self.__dataclass_fields__:

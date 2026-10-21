@@ -35,19 +35,23 @@ def build_application_runtime(
         if snapshot is not None
         else 1_000_000.0
     )
-    components = component_factory(portfolio_peak=portfolio_peak)
+    components = component_factory(portfolio_peak=portfolio_peak, paths=resolved_persistence.paths)
 
     def current_nav() -> float | None:
         current = resolved_persistence.load_portfolio_state()
         return current.current_nav if current is not None else None
 
-    services = service_factory(
-        persistence=resolved_persistence,
-        probability_gate=components.gate,
-        capital_scaler=components.scaler,
-        factor_calibrator=components.calibrator,
-        alerter=components.alerter,
-        current_nav_provider=current_nav,
-        version=version,
-    )
+    try:
+        services = service_factory(
+            persistence=resolved_persistence,
+            probability_gate=components.gate,
+            capital_scaler=components.scaler,
+            factor_calibrator=components.calibrator,
+            alerter=components.alerter,
+            current_nav_provider=current_nav,
+            version=version,
+        )
+    except BaseException:
+        components.stop()
+        raise
     return ApplicationRuntime(services=services, components=components)

@@ -10,12 +10,22 @@ import KillswitchModal from './components/KillswitchModal';
 import FactorAttributionModal from './components/FactorAttributionModal';
 import { Briefcase, Layers, PieChart, History, AlertCircle } from 'lucide-react';
 import { streamSse } from './sse';
+import EvidencePanel from './components/EvidencePanel';
+import { emptyScanState, fetchResource } from './evidence';
+
+const RESOURCE_URLS = { status: '/api/status', scan: '/api/scan', sectors: '/api/sectors', trades: '/api/trades?limit=100', audit: '/api/evidence' };
 
 export default function App() {
   const [status, setStatus] = useState(null);
   const [scanData, setScanData] = useState(null);
   const [sectorsData, setSectorsData] = useState(null);
   const [tradesData, setTradesData] = useState(null);
+  const [auditData, setAuditData] = useState(null);
+  const [requests, setRequests] = useState({});
+  const [now, setNow] = useState(Date.now);
+  const controllers = useRef({});
+  const requestEpoch = useRef(0);
+  const batchRef = useRef(null);
   const [activeTab, setActiveTab] = useState('portfolio');
   const [isOverrideModalOpen, setIsOverrideModalOpen] = useState(false);
   const [isKillswitchModalOpen, setIsKillswitchModalOpen] = useState(false);
@@ -34,6 +44,20 @@ export default function App() {
   });
 
   const handleApiKeyChange = (val) => {
+    if (val !== apiKey) {
+      requestEpoch.current += 1;
+      Object.values(controllers.current).forEach(controller => controller.abort());
+      controllers.current = {};
+      batchRef.current = null;
+      setStatus(null);
+      setScanData(null);
+      setSectorsData(null);
+      setTradesData(null);
+      setAuditData(null);
+      setRequests({});
+      setSelectedTickerFactors(null);
+      setIsSseConnected(false);
+    }
     setApiKey(val);
     sessionStorage.setItem('sovereign_api_key', val);
   };
@@ -48,76 +72,46 @@ export default function App() {
     return keyToSend ? { 'X-API-Key': keyToSend } : {};
   }, [apiKey]);
 
-  // Data fetching routines
-  const fetchStatus = useCallback(async () => {
+  const refreshResource = useCallback(async (name) => {
+    const epoch = requestEpoch.current;
+    controllers.current[name]?.abort();
+    const controller = new AbortController();
+    controllers.current[name] = controller;
+    const setters = { status: setStatus, scan: setScanData, sectors: setSectorsData, trades: setTradesData, audit: setAuditData };
     try {
-      const res = await fetch('/api/status', { headers: getAuthHeaders() });
-      if (res.ok) {
-        const data = await res.json();
-        setStatus(data);
-      } else if (res.status === 401) {
-        showToast('Unauthorized: Please configure API_KEY in settings or .env.');
-      }
-    } catch (e) {
-      console.warn('Status poll error:', e);
-    }
-  }, [getAuthHeaders]);
-
-  const fetchScan = useCallback(async () => {
-    try {
-      const res = await fetch('/api/scan', { headers: getAuthHeaders() });
-      if (res.ok) {
-        const data = await res.json();
-        setScanData(data);
-      } else if (res.status === 401) {
-        showToast('Unauthorized: Please configure API_KEY in settings or .env.');
-      }
-    } catch (e) {
-      console.warn('Scan poll error:', e);
-    }
-  }, [getAuthHeaders]);
-
-  const fetchSectors = useCallback(async () => {
-    try {
-      const res = await fetch('/api/sectors', { headers: getAuthHeaders() });
-      if (res.ok) {
-        const data = await res.json();
-        setSectorsData(data);
-      }
-    } catch (e) {
-      console.warn('Sectors poll error:', e);
-    }
-  }, [getAuthHeaders]);
-
-  const fetchTrades = useCallback(async () => {
-    try {
-      const res = await fetch('/api/trades?limit=100', { headers: getAuthHeaders() });
-      if (res.ok) {
-        const data = await res.json();
-        setTradesData(data);
-      }
-    } catch (e) {
-      console.warn('Trades poll error:', e);
-    }
-  }, [getAuthHeaders]);
-
-  // Polling guard against overlapping requests
-  const isFetchingRef = useRef(false);
-
-  const refreshAll = useCallback(async () => {
-    if (isFetchingRef.current) return;
-    isFetchingRef.current = true;
-    try {
-      await Promise.all([
-        fetchStatus(),
-        fetchScan(),
-        fetchSectors(),
-        fetchTrades()
-      ]);
+      const data = await fetchResource(RESOURCE_URLS[name], getAuthHeaders(), controller.signal);
+      if (controller.signal.aborted || epoch !== requestEpoch.current) return;
+      setters[name](data);
+      setRequests(prev => ({ ...prev, [name]: { error: null, lastSuccess: Date.now() } }));
+    } catch (error) {
+      if (controller.signal.aborted || epoch !== requestEpoch.current) return;
+      setRequests(prev => ({ ...prev, [name]: { ...prev[name], error: error.message || 'Refresh failed' } }));
     } finally {
-      isFetchingRef.current = false;
+      if (controllers.current[name] === controller) delete controllers.current[name];
     }
-  }, [fetchStatus, fetchScan, fetchSectors, fetchTrades]);
+  }, [getAuthHeaders]);
+
+  const fetchStatus = useCallback(() => refreshResource('status'), [refreshResource]);
+  const fetchScan = useCallback(() => refreshResource('scan'), [refreshResource]);
+  const refreshAll = useCallback(async () => {
+    if (batchRef.current) return;
+    const batch = {};
+    batchRef.current = batch;
+    try {
+      await Promise.all(Object.keys(RESOURCE_URLS).map(refreshResource));
+    } finally {
+      if (batchRef.current === batch) batchRef.current = null;
+    }
+  }, [refreshResource]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30000);
+    return () => {
+      clearInterval(timer);
+      Object.values(controllers.current).forEach(controller => controller.abort());
+      batchRef.current = null;
+    };
+  }, []);
 
   // Initial load + interval polling fallback
   useEffect(() => {
@@ -133,6 +127,7 @@ export default function App() {
     let stopped = false;
 
     const handleMessage = (rawMessage) => {
+      if (stopped) return;
       try {
         const payload = JSON.parse(rawMessage);
         const { event, data } = payload;
@@ -236,8 +231,10 @@ export default function App() {
       throw new Error(errData.detail || 'Failed to apply regime override');
     }
     handleApiKeyChange(keyVal);
-    fetchStatus();
-    fetchScan();
+    if (keyVal === apiKey) {
+      fetchStatus();
+      fetchScan();
+    }
   };
 
   // Emergency Killswitch handler
@@ -258,7 +255,7 @@ export default function App() {
       throw new Error(errData.detail || 'Failed to update killswitch state');
     }
     handleApiKeyChange(keyVal);
-    fetchStatus();
+    if (keyVal === apiKey) fetchStatus();
   };
 
   const isScanning = status?.is_scanning || false;
@@ -302,6 +299,8 @@ export default function App() {
         apiKey={apiKey}
         setApiKey={handleApiKeyChange}
       />
+
+      <EvidencePanel scan={scanData} audit={auditData} requests={requests} now={now} />
 
       {/* Market Regime Overview */}
       <RegimeBanner regime={scanData?.regime || scanData?.regime_info || status?.last_known_regime || status?.regime_tracker} />
@@ -356,12 +355,14 @@ export default function App() {
       <main>
         {activeTab === 'portfolio' && (
           <PortfolioTable 
+            emptyState={emptyScanState('portfolio', scanData, requests.scan, now)}
             portfolio={scanData?.portfolio} 
             onInspectFactors={(item) => setSelectedTickerFactors(item)}
           />
         )}
         {activeTab === 'candidates' && (
           <CandidatesTable 
+            emptyState={emptyScanState('candidates', scanData, requests.scan, now)}
             candidates={scanData?.candidates} 
             onInspectFactors={(item) => setSelectedTickerFactors(item)}
           />

@@ -89,11 +89,13 @@ def run_scan(
     force_score: bool = False,
     services: Optional[ServiceBundle] = None,
     cancel_requested: Optional[Callable[[], bool]] = None,
+    tickers: list[str] | None = None,
 ) -> tuple[list[TickerResult], list[TickerResult], Optional[MarketRegime]]:
     """
     Compatibility wrapper over :meth:`ScanService.scan`.
 
     ``no_intraday`` suppresses all MIS/intraday candidates.
+    ``tickers=None`` retains the default universe; explicit lists restrict candidates.
     """
     bundle = _resolve_services(services)
     return bundle.scan_service.scan(
@@ -105,6 +107,7 @@ def run_scan(
         no_intraday=no_intraday,
         force_score=force_score,
         cancel_requested=cancel_requested,
+        tickers=tickers,
     )
 
 

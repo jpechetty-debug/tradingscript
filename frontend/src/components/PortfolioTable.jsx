@@ -1,4 +1,6 @@
 import React, { useState } from 'react';
+import ProbabilityEvidence, { StrategyEvidence } from './ProbabilityEvidence';
+import { emptyScanState } from '../evidence';
 import { ShieldCheck, Crosshair, BarChart2, TrendingUp, TrendingDown, Clock, Zap } from 'lucide-react';
 
 export function getTradeAction(item) {
@@ -19,7 +21,7 @@ export function getTradeHorizon(item) {
   return 'SWING';
 }
 
-export default function PortfolioTable({ portfolio, onInspectFactors }) {
+export default function PortfolioTable({ portfolio, onInspectFactors, emptyState = emptyScanState('portfolio') }) {
   const [filterAction, setFilterAction] = useState('ALL'); // 'ALL' | 'BUY' | 'SELL'
   const [filterHorizon, setFilterHorizon] = useState('ALL'); // 'ALL' | 'SWING' | 'INTRADAY'
 
@@ -27,9 +29,9 @@ export default function PortfolioTable({ portfolio, onInspectFactors }) {
     return (
       <div className="card" style={{ textAlign: 'center', padding: '40px 20px' }}>
         <Crosshair size={32} style={{ color: 'var(--text-faint)', marginBottom: '12px' }} />
-        <h3 style={{ fontSize: '16px', color: 'var(--text-muted)' }}>No Portfolio Positions Selected</h3>
+        <h3 style={{ fontSize: '16px', color: 'var(--text-muted)' }}>{emptyState.title}</h3>
         <p style={{ fontSize: '12px', color: 'var(--text-faint)', marginTop: '6px' }}>
-          Either no candidates cleared probability thresholds or current market regime restricts exposure.
+          {emptyState.message}
         </p>
       </div>
     );
@@ -77,7 +79,7 @@ export default function PortfolioTable({ portfolio, onInspectFactors }) {
             </div>
           </div>
           <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
-            High-conviction allocations with calibrated Kelly sizing, stop-loss distance, and trade horizon
+            Proposed allocations with sizing, stop-loss distance, and trade horizon; validation status is shown per row
           </p>
         </div>
 
@@ -139,7 +141,7 @@ export default function PortfolioTable({ portfolio, onInspectFactors }) {
               <th>Action</th>
               <th>Horizon</th>
               <th>Factors</th>
-              <th>P(Win)</th>
+              <th>Model output</th>
               <th>E(R)</th>
               <th>RR (T1)</th>
               <th>Entry Price</th>
@@ -154,7 +156,6 @@ export default function PortfolioTable({ portfolio, onInspectFactors }) {
               const action = getTradeAction(item);
               const isBuy = action === 'BUY';
               const horizon = getTradeHorizon(item);
-              const probPct = ((item.prob_win || 0) * 100).toFixed(0);
 
               const entry = item.entry || 0;
               const stop = item.stop || 0;
@@ -173,6 +174,7 @@ export default function PortfolioTable({ portfolio, onInspectFactors }) {
                       <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
                         {item.sector || 'NSE'}
                       </span>
+                      <StrategyEvidence item={item} />
                     </div>
                   </td>
                   <td>
@@ -232,26 +234,7 @@ export default function PortfolioTable({ portfolio, onInspectFactors }) {
                       <span>Factors</span>
                     </button>
                   </td>
-                  <td>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span className="mono" style={{ fontWeight: '700', color: Number(probPct) >= 55 ? 'var(--green)' : 'var(--text-main)' }}>
-                        {probPct}%
-                      </span>
-                      <div style={{
-                        width: '38px',
-                        height: '4px',
-                        background: 'rgba(255,255,255,0.08)',
-                        borderRadius: '2px',
-                        overflow: 'hidden'
-                      }}>
-                        <div style={{
-                          width: `${probPct}%`,
-                          height: '100%',
-                          background: item.prob_win >= 0.55 ? 'var(--green)' : 'var(--amber)'
-                        }} />
-                      </div>
-                    </div>
-                  </td>
+                  <td><ProbabilityEvidence item={item} /></td>
                   <td className="mono" style={{ fontWeight: '600', color: item.expectancy_r >= 0.5 ? 'var(--green)' : 'var(--text-main)' }}>
                     {item.expectancy_r?.toFixed(2)}R
                   </td>

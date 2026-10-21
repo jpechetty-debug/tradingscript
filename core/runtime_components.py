@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from .runtime_paths import RUNTIME_PATHS, ensure_parent, ensure_runtime_dirs
+from .runtime_paths import RUNTIME_PATHS, RuntimePaths, ensure_parent, ensure_runtime_dirs
 
 logger = logging.getLogger("sovereign.runtime")
 
@@ -347,13 +347,17 @@ def create_runtime_components(
     recal_window: int = RECALIBRATION_WINDOW,
     recal_interval: int = RECALIBRATION_INTERVAL,
     announce: bool = False,
+    paths: RuntimePaths = RUNTIME_PATHS,
 ) -> RuntimeComponents:
     # Ensure state/artifacts/logs dirs exist exactly once, at the point
     # where runtime components are intentionally constructed — not at import.
-    ensure_runtime_dirs()
+    ensure_runtime_dirs(paths)
     scaler = TieredCapitalScaler(portfolio_peak=portfolio_peak)
     gate = RegimeProbabilityGate()
-    calibrator = RollingFactorCalibrator(window=recal_window, interval_sec=recal_interval)
+    calibrator = RollingFactorCalibrator(
+        window=recal_window, interval_sec=recal_interval,
+        weights_path=paths.factor_weights_file, trade_log_path=paths.trade_log_file,
+    )
     alerter = RegimeAwareTelegramAlerter(gate=gate, scaler=scaler)
 
     calibrator.start()

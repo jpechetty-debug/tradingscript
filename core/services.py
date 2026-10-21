@@ -62,7 +62,7 @@ from .scorer import (
     score_ticker,
 )
 from .telemetry import ScanMetrics
-from .universe import ALL_TICKERS, N_SECTORS
+from .universe import ALL_TICKERS, N_SECTORS, resolve_scan_tickers
 from utils.messaging import send_telegram
 
 _DEFAULT_SCORE_TICKER = score_ticker
@@ -355,8 +355,13 @@ class MarketDataService:
         tickers: list[str],
         config: SystemConfig,
         metrics: Optional[ScanMetrics] = None,
+        *,
+        restrict_to_requested: bool = False,
     ) -> PreparedScanData:
         raw_data = self.fetch_universe(tickers, config, metrics=metrics)
+        if restrict_to_requested:
+            allowed = set(tickers) | {config.BENCHMARK}
+            raw_data = {ticker: frame for ticker, frame in raw_data.items() if ticker in allowed}
         if not raw_data:
             raise ValueError("No data fetched.")
 
@@ -1206,8 +1211,10 @@ class ScanService:
         no_intraday: bool = False,
         force_score: bool = False,
         cancel_requested: Optional[CancellationProbe] = None,
+        tickers: list[str] | None = None,
     ) -> tuple[list[TickerResult], list[TickerResult], Optional[MarketRegime]]:
         _check_cancelled(cancel_requested)
+        universe = resolve_scan_tickers(tickers, config.BENCHMARK)
         state = self._persistence.create_scan_state(config)
         metrics = ScanMetrics()
 
@@ -1226,7 +1233,12 @@ class ScanService:
         )
 
         try:
-            prepared = self._data_service.prepare_scan_data(ALL_TICKERS, config, metrics=metrics)
+            if tickers is None:
+                prepared = self._data_service.prepare_scan_data(universe, config, metrics=metrics)
+            else:
+                prepared = self._data_service.prepare_scan_data(
+                    universe, config, metrics=metrics, restrict_to_requested=True,
+                )
         except ValueError as exc:
             log.error("%s", exc)
             return ScanOutput([], [], None, sector_rs={})
